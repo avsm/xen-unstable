@@ -33,7 +33,7 @@ CFLAGS   += -Wall -Werror -O3 -fno-strict-aliasing
 CFLAGS   += -Wp,-MD,.$(@F).d
 DEPS     = .*.d
 
-MAJOR    := 2.0
+MAJOR    := 3.0
 MINOR    := 0
 LIB      := libxutil.so 
 LIB      += libxutil.so.$(MAJOR)
@@ -51,7 +51,7 @@ libxutil.so.$(MAJOR): libxutil.so.$(MAJOR).$(MINOR)
 	ln -sf $^ $@
 
 libxutil.so.$(MAJOR).$(MINOR): $(PIC_OBJS)
-	$(CC) -Wl,-soname -Wl,libxutil.so.$(MAJOR) -shared -o $@ $^
+	$(CC) $(CFLAGS) -Wl,-soname -Wl,libxutil.so.$(MAJOR) -shared -o $@ $^
 
 libxutil.a: $(LIB_OBJS)
 	$(AR) rc $@ $^

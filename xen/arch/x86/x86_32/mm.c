@@ -27,32 +27,63 @@
 #include <asm/fixmap.h>
 #include <asm/domain_page.h>
 
-unsigned long m2p_start_mfn;
-
-static inline void set_pte_phys(unsigned long vaddr,
-                                l1_pgentry_t entry)
+/* Map physical byte range (@p, @p+@s) at virt address @v in pagetable @pt. */
+#define __PTE_MASK (~(_PAGE_GLOBAL|_PAGE_DIRTY|_PAGE_PCD|_PAGE_PWT))
+int map_pages(
+    root_pgentry_t *pt,
+    unsigned long v,
+    unsigned long p,
+    unsigned long s,
+    unsigned long flags)
 {
-    l2_pgentry_t *l2ent;
-    l1_pgentry_t *l1ent;
+    l2_pgentry_t *pl2e;
+    l1_pgentry_t *pl1e;
+    void         *newpg;
 
-    l2ent = &idle_pg_table[l2_table_offset(vaddr)];
-    l1ent = l2_pgentry_to_l1(*l2ent) + l1_table_offset(vaddr);
-    *l1ent = entry;
+    while ( s != 0 )
+    {
+        pl2e = &pt[l2_table_offset(v)];
 
-    /* It's enough to flush this one mapping. */
-    __flush_tlb_one(vaddr);
+        if ( ((s|v|p) & ((1<<L2_PAGETABLE_SHIFT)-1)) == 0 )
+        {
+            /* Super-page mapping. */
+            if ( (l2_pgentry_val(*pl2e) & _PAGE_PRESENT) )
+                __flush_tlb_pge();
+            *pl2e = mk_l2_pgentry(p|flags|_PAGE_PSE);
+
+            v += 1 << L2_PAGETABLE_SHIFT;
+            p += 1 << L2_PAGETABLE_SHIFT;
+            s -= 1 << L2_PAGETABLE_SHIFT;
+        }
+        else
+        {
+            /* Normal page mapping. */
+            if ( !(l2_pgentry_val(*pl2e) & _PAGE_PRESENT) )
+            {
+                newpg = (void *)alloc_xenheap_page();
+                clear_page(newpg);
+                *pl2e = mk_l2_pgentry(__pa(newpg) | (flags & __PTE_MASK));
+            }
+            pl1e = l2_pgentry_to_l1(*pl2e) + l1_table_offset(v);
+            if ( (l1_pgentry_val(*pl1e) & _PAGE_PRESENT) )
+                __flush_tlb_one(v);
+            *pl1e = mk_l1_pgentry(p|flags);
+
+            v += 1 << L1_PAGETABLE_SHIFT;
+            p += 1 << L1_PAGETABLE_SHIFT;
+            s -= 1 << L1_PAGETABLE_SHIFT;            
+        }
+    }
+
+    return 0;
 }
 
-
-void __set_fixmap(enum fixed_addresses idx, 
-                  l1_pgentry_t entry)
+void __set_fixmap(
+    enum fixed_addresses idx, unsigned long p, unsigned long flags)
 {
-    unsigned long address = fix_to_virt(idx);
-
-    if ( likely(idx < __end_of_fixed_addresses) )
-        set_pte_phys(address, entry);
-    else
-        printk("Invalid __set_fixmap\n");
+    if ( unlikely(idx >= __end_of_fixed_addresses) )
+        BUG();
+    map_pages(idle_pg_table, fix_to_virt(idx), p, PAGE_SIZE, flags);
 }
 
 
@@ -65,16 +96,16 @@ void __init paging_init(void)
     /* Allocate and map the machine-to-phys table. */
     if ( (pg = alloc_domheap_pages(NULL, 10)) == NULL )
         panic("Not enough memory to bootstrap Xen.\n");
-    m2p_start_mfn = page_to_pfn(pg);
-    idle_pg_table[RDWR_MPT_VIRT_START >> L2_PAGETABLE_SHIFT] =
+    idle_pg_table[l2_table_offset(RDWR_MPT_VIRT_START)] =
         mk_l2_pgentry(page_to_phys(pg) | __PAGE_HYPERVISOR | _PAGE_PSE);
+    memset((void *)RDWR_MPT_VIRT_START, 0x55, 4UL << 20);
 
     /* Xen 4MB mappings can all be GLOBAL. */
     if ( cpu_has_pge )
     {
         for ( v = HYPERVISOR_VIRT_START; v; v += (1 << L2_PAGETABLE_SHIFT) )
         {
-             l2e = l2_pgentry_val(idle_pg_table[v >> L2_PAGETABLE_SHIFT]);
+             l2e = l2_pgentry_val(idle_pg_table[l2_table_offset(v)]);
              if ( l2e & _PAGE_PSE )
                  l2e |= _PAGE_GLOBAL;
              idle_pg_table[v >> L2_PAGETABLE_SHIFT] = mk_l2_pgentry(l2e);
@@ -84,23 +115,26 @@ void __init paging_init(void)
     /* Create page table for ioremap(). */
     ioremap_pt = (void *)alloc_xenheap_page();
     clear_page(ioremap_pt);
-    idle_pg_table[IOREMAP_VIRT_START >> L2_PAGETABLE_SHIFT] = 
+    idle_pg_table[l2_table_offset(IOREMAP_VIRT_START)] =
         mk_l2_pgentry(__pa(ioremap_pt) | __PAGE_HYPERVISOR);
 
-    /* Create read-only mapping of MPT for guest-OS use. */
-    idle_pg_table[RO_MPT_VIRT_START >> L2_PAGETABLE_SHIFT] =
+    /* Create read-only mapping of MPT for guest-OS use.
+     * NB. Remove the global bit so that shadow_mode_translate()==true domains
+     *     can reused this address space for their phys-to-machine mapping.
+     */
+    idle_pg_table[l2_table_offset(RO_MPT_VIRT_START)] =
         mk_l2_pgentry(l2_pgentry_val(
-            idle_pg_table[RDWR_MPT_VIRT_START >> L2_PAGETABLE_SHIFT]) & 
-                      ~_PAGE_RW);
+                          idle_pg_table[l2_table_offset(RDWR_MPT_VIRT_START)]) &
+                      ~(_PAGE_RW | _PAGE_GLOBAL));
 
     /* Set up mapping cache for domain pages. */
     mapcache = (unsigned long *)alloc_xenheap_page();
     clear_page(mapcache);
-    idle_pg_table[MAPCACHE_VIRT_START >> L2_PAGETABLE_SHIFT] =
+    idle_pg_table[l2_table_offset(MAPCACHE_VIRT_START)] =
         mk_l2_pgentry(__pa(mapcache) | __PAGE_HYPERVISOR);
 
     /* Set up linear page table mapping. */
-    idle_pg_table[LINEAR_PT_VIRT_START >> L2_PAGETABLE_SHIFT] =
+    idle_pg_table[l2_table_offset(LINEAR_PT_VIRT_START)] =
         mk_l2_pgentry(__pa(idle_pg_table) | __PAGE_HYPERVISOR);
 }
 
@@ -112,6 +146,39 @@ void __init zap_low_mappings(void)
     flush_tlb_all_pge();
 }
 
+void subarch_init_memory(struct domain *dom_xen)
+{
+    unsigned long i, m2p_start_mfn;
+
+    /*
+     * We are rather picky about the layout of 'struct pfn_info'. The
+     * count_info and domain fields must be adjacent, as we perform atomic
+     * 64-bit operations on them. Also, just for sanity, we assert the size
+     * of the structure here.
+     */
+    if ( (offsetof(struct pfn_info, u.inuse._domain) != 
+          (offsetof(struct pfn_info, count_info) + sizeof(u32))) ||
+         (sizeof(struct pfn_info) != 24) )
+    {
+        printk("Weird pfn_info layout (%ld,%ld,%d)\n",
+               offsetof(struct pfn_info, count_info),
+               offsetof(struct pfn_info, u.inuse._domain),
+               sizeof(struct pfn_info));
+        for ( ; ; ) ;
+    }
+
+    /* M2P table is mappable read-only by privileged domains. */
+    m2p_start_mfn = l2_pgentry_to_pfn(
+        idle_pg_table[l2_table_offset(RDWR_MPT_VIRT_START)]);
+    for ( i = 0; i < 1024; i++ )
+    {
+        frame_table[m2p_start_mfn+i].count_info = PGC_allocated | 1;
+	/* gdt to make sure it's only mapped read-only by non-privileged
+	   domains. */
+        frame_table[m2p_start_mfn+i].u.inuse.type_info = PGT_gdt_page | 1;
+        page_set_owner(&frame_table[m2p_start_mfn+i], dom_xen);
+    }
+}
 
 /*
  * Allows shooting down of borrowed page-table use on specific CPUs.
@@ -119,9 +186,10 @@ void __init zap_low_mappings(void)
  */
 static void __synchronise_pagetables(void *mask)
 {
-    struct domain *d = current;
-    if ( ((unsigned long)mask & (1<<d->processor)) && is_idle_task(d) )
-        write_ptbase(&d->mm);
+    struct exec_domain *ed = current;
+    if ( ((unsigned long)mask & (1 << ed->processor)) &&
+         is_idle_task(ed->domain) )
+        write_ptbase(ed);
 }
 void synchronise_pagetables(unsigned long cpu_mask)
 {
@@ -134,12 +202,11 @@ long do_stack_switch(unsigned long ss, unsigned long esp)
     int nr = smp_processor_id();
     struct tss_struct *t = &init_tss[nr];
 
-    /* We need to do this check as we load and use SS on guest's behalf. */
-    if ( (ss & 3) == 0 )
+    if ( (ss & 3) != 1 )
         return -EPERM;
 
-    current->thread.guestos_ss = ss;
-    current->thread.guestos_sp = esp;
+    current->arch.kernel_ss = ss;
+    current->arch.kernel_sp = esp;
     t->ss1  = ss;
     t->esp1 = esp;
 
@@ -148,9 +215,10 @@ long do_stack_switch(unsigned long ss, unsigned long esp)
 
 
 /* Returns TRUE if given descriptor is valid for GDT or LDT. */
-int check_descriptor(unsigned long *d)
+int check_descriptor(struct desc_struct *d)
 {
-    unsigned long base, limit, a = d[0], b = d[1];
+    unsigned long base, limit;
+    u32 a = d->a, b = d->b;
 
     /* A not-present descriptor will always fault, so is safe. */
     if ( !(b & _SEGMENT_P) ) 
@@ -159,7 +227,7 @@ int check_descriptor(unsigned long *d)
     /*
      * We don't allow a DPL of zero. There is no legitimate reason for 
      * specifying DPL==0, and it gets rather dangerous if we also accept call 
-     * gates (consider a call gate pointing at another guestos descriptor with 
+     * gates (consider a call gate pointing at another kernel descriptor with 
      * DPL 0 -- this would get the OS ring-0 privileges).
      */
     if ( (b & _SEGMENT_DPL) == 0 )
@@ -209,6 +277,7 @@ int check_descriptor(unsigned long *d)
     if ( (b & (_SEGMENT_CODE | _SEGMENT_EC)) == _SEGMENT_EC )
     {
         /*
+         * DATA, GROWS-DOWN.
          * Grows-down limit check. 
          * NB. limit == 0xFFFFF provides no access      (if G=1).
          *     limit == 0x00000 provides 4GB-4kB access (if G=1).
@@ -222,6 +291,8 @@ int check_descriptor(unsigned long *d)
     else
     {
         /*
+         * DATA, GROWS-UP. 
+         * CODE (CONFORMING AND NON-CONFORMING).
          * Grows-up limit check.
          * NB. limit == 0xFFFFF provides 4GB access (if G=1).
          *     limit == 0x00000 provides 4kB access (if G=1).
@@ -234,8 +305,8 @@ int check_descriptor(unsigned long *d)
             if ( !(b & _SEGMENT_G) )
                 goto bad; /* too dangerous; too hard to work out... */
             limit = (limit >> 12) - 1;
-            d[0] &= ~0x0ffff; d[0] |= limit & 0x0ffff;
-            d[1] &= ~0xf0000; d[1] |= limit & 0xf0000;
+            d->a &= ~0x0ffff; d->a |= limit & 0x0ffff;
+            d->b &= ~0xf0000; d->b |= limit & 0xf0000;
         }
     }
 
@@ -245,158 +316,6 @@ int check_descriptor(unsigned long *d)
     return 0;
 }
 
-
-void destroy_gdt(struct domain *d)
-{
-    int i;
-    unsigned long pfn;
-
-    for ( i = 0; i < 16; i++ )
-    {
-        if ( (pfn = l1_pgentry_to_pagenr(d->mm.perdomain_pt[i])) != 0 )
-            put_page_and_type(&frame_table[pfn]);
-        d->mm.perdomain_pt[i] = mk_l1_pgentry(0);
-    }
-}
-
-
-long set_gdt(struct domain *d, 
-             unsigned long *frames,
-             unsigned int entries)
-{
-    /* NB. There are 512 8-byte entries per GDT page. */
-    int i = 0, nr_pages = (entries + 511) / 512;
-    struct desc_struct *vgdt;
-    unsigned long pfn;
-
-    /* Check the first page in the new GDT. */
-    if ( (pfn = frames[0]) >= max_page )
-        goto fail;
-
-    /* The first page is special because Xen owns a range of entries in it. */
-    if ( !get_page_and_type(&frame_table[pfn], d, PGT_gdt_page) )
-    {
-        /* GDT checks failed: try zapping the Xen reserved entries. */
-        if ( !get_page_and_type(&frame_table[pfn], d, PGT_writable_page) )
-            goto fail;
-        vgdt = map_domain_mem(pfn << PAGE_SHIFT);
-        memset(vgdt + FIRST_RESERVED_GDT_ENTRY, 0,
-               NR_RESERVED_GDT_ENTRIES*8);
-        unmap_domain_mem(vgdt);
-        put_page_and_type(&frame_table[pfn]);
-
-        /* Okay, we zapped the entries. Now try the GDT checks again. */
-        if ( !get_page_and_type(&frame_table[pfn], d, PGT_gdt_page) )
-            goto fail;
-    }
-
-    /* Check the remaining pages in the new GDT. */
-    for ( i = 1; i < nr_pages; i++ )
-        if ( ((pfn = frames[i]) >= max_page) ||
-             !get_page_and_type(&frame_table[pfn], d, PGT_gdt_page) )
-            goto fail;
-
-    /* Copy reserved GDT entries to the new GDT. */
-    vgdt = map_domain_mem(frames[0] << PAGE_SHIFT);
-    memcpy(vgdt + FIRST_RESERVED_GDT_ENTRY, 
-           gdt_table + FIRST_RESERVED_GDT_ENTRY, 
-           NR_RESERVED_GDT_ENTRIES*8);
-    unmap_domain_mem(vgdt);
-
-    /* Tear down the old GDT. */
-    destroy_gdt(d);
-
-    /* Install the new GDT. */
-    for ( i = 0; i < nr_pages; i++ )
-        d->mm.perdomain_pt[i] =
-            mk_l1_pgentry((frames[i] << PAGE_SHIFT) | __PAGE_HYPERVISOR);
-
-    SET_GDT_ADDRESS(d, GDT_VIRT_START);
-    SET_GDT_ENTRIES(d, entries);
-
-    return 0;
-
- fail:
-    while ( i-- > 0 )
-        put_page_and_type(&frame_table[frames[i]]);
-    return -EINVAL;
-}
-
-
-long do_set_gdt(unsigned long *frame_list, unsigned int entries)
-{
-    int nr_pages = (entries + 511) / 512;
-    unsigned long frames[16];
-    long ret;
-
-    if ( (entries <= LAST_RESERVED_GDT_ENTRY) || (entries > 8192) ) 
-        return -EINVAL;
-    
-    if ( copy_from_user(frames, frame_list, nr_pages * sizeof(unsigned long)) )
-        return -EFAULT;
-
-    if ( (ret = set_gdt(current, frames, entries)) == 0 )
-    {
-        local_flush_tlb();
-        __asm__ __volatile__ ("lgdt %0" : "=m" (*current->mm.gdt));
-    }
-
-    return ret;
-}
-
-
-long do_update_descriptor(
-    unsigned long pa, unsigned long word1, unsigned long word2)
-{
-    unsigned long *gdt_pent, pfn = pa >> PAGE_SHIFT, d[2];
-    struct pfn_info *page;
-    long ret = -EINVAL;
-
-    d[0] = word1;
-    d[1] = word2;
-
-    if ( (pa & 7) || (pfn >= max_page) || !check_descriptor(d) )
-        return -EINVAL;
-
-    page = &frame_table[pfn];
-    if ( unlikely(!get_page(page, current)) )
-        return -EINVAL;
-
-    /* Check if the given frame is in use in an unsafe context. */
-    switch ( page->u.inuse.type_info & PGT_type_mask )
-    {
-    case PGT_gdt_page:
-        /* Disallow updates of Xen-reserved descriptors in the current GDT. */
-        if ( (l1_pgentry_to_pagenr(current->mm.perdomain_pt[0]) == pfn) &&
-             (((pa&(PAGE_SIZE-1))>>3) >= FIRST_RESERVED_GDT_ENTRY) &&
-             (((pa&(PAGE_SIZE-1))>>3) <= LAST_RESERVED_GDT_ENTRY) )
-            goto out;
-        if ( unlikely(!get_page_type(page, PGT_gdt_page)) )
-            goto out;
-        break;
-    case PGT_ldt_page:
-        if ( unlikely(!get_page_type(page, PGT_ldt_page)) )
-            goto out;
-        break;
-    default:
-        if ( unlikely(!get_page_type(page, PGT_writable_page)) )
-            goto out;
-        break;
-    }
-
-    /* All is good so make the update. */
-    gdt_pent = map_domain_mem(pa);
-    memcpy(gdt_pent, d, 8);
-    unmap_domain_mem(gdt_pent);
-
-    put_page_type(page);
-
-    ret = 0; /* success */
-
- out:
-    put_page(page);
-    return ret;
-}
 
 #ifdef MEMORY_GUARD
 
@@ -414,7 +333,7 @@ void *memguard_init(void *heap_start)
     {
         l1 = (l1_pgentry_t *)heap_start;
         heap_start = (void *)((unsigned long)heap_start + PAGE_SIZE);
-        for ( j = 0; j < ENTRIES_PER_L1_PAGETABLE; j++ )
+        for ( j = 0; j < L1_PAGETABLE_ENTRIES; j++ )
             l1[j] = mk_l1_pgentry((i << L2_PAGETABLE_SHIFT) |
                                    (j << L1_PAGETABLE_SHIFT) | 
                                   __PAGE_HYPERVISOR);
@@ -451,6 +370,11 @@ static void __memguard_change_range(void *p, unsigned long l, int guard)
     }
 }
 
+void memguard_guard_stack(void *p)
+{
+    memguard_guard_range(p, PAGE_SIZE);
+}
+
 void memguard_guard_range(void *p, unsigned long l)
 {
     __memguard_change_range(p, l, 1);
@@ -462,14 +386,14 @@ void memguard_unguard_range(void *p, unsigned long l)
     __memguard_change_range(p, l, 0);
 }
 
-int memguard_is_guarded(void *p)
-{
-    l1_pgentry_t *l1;
-    l2_pgentry_t *l2;
-    unsigned long _p = (unsigned long)p;
-    l2  = &idle_pg_table[l2_table_offset(_p)];
-    l1  = l2_pgentry_to_l1(*l2) + l1_table_offset(_p);
-    return !(l1_pgentry_val(*l1) & _PAGE_PRESENT);
-}
-
 #endif
+
+/*
+ * Local variables:
+ * mode: C
+ * c-set-style: "BSD"
+ * c-basic-offset: 4
+ * tab-width: 4
+ * indent-tabs-mode: nil
+ * End:
+ */
