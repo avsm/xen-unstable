@@ -50,7 +50,7 @@ long arch_do_dom0_op(dom0_op_t *op, dom0_op_t *u_dom0_op)
 {
     long ret = 0;
 
-    if ( !IS_PRIV(current) )
+    if ( !IS_PRIV(current->domain) )
         return -EPERM;
 
     switch ( op->cmd )
@@ -295,6 +295,44 @@ long arch_do_dom0_op(dom0_op_t *op, dom0_op_t *u_dom0_op)
     }
     break;
 
+    case DOM0_GETMEMLIST:
+    {
+        int i;
+        struct domain *d = find_domain_by_id(op->u.getmemlist.domain);
+        unsigned long max_pfns = op->u.getmemlist.max_pfns;
+        unsigned long pfn;
+        unsigned long *buffer = op->u.getmemlist.buffer;
+        struct list_head *list_ent;
+
+        ret = -EINVAL;
+        if ( d != NULL )
+        {
+            ret = 0;
+
+            spin_lock(&d->page_alloc_lock);
+            list_ent = d->page_list.next;
+            for ( i = 0; (i < max_pfns) && (list_ent != &d->page_list); i++ )
+            {
+                pfn = list_entry(list_ent, struct pfn_info, list) - 
+                    frame_table;
+                if ( put_user(pfn, buffer) )
+                {
+                    ret = -EFAULT;
+                    break;
+                }
+                buffer++;
+                list_ent = frame_table[pfn].list.next;
+            }
+            spin_unlock(&d->page_alloc_lock);
+
+            op->u.getmemlist.num_pfns = i;
+            copy_to_user(u_dom0_op, op, sizeof(*op));
+            
+            put_domain(d);
+        }
+    }
+    break;
+
     default:
         ret = -ENOSYS;
 
@@ -303,7 +341,7 @@ long arch_do_dom0_op(dom0_op_t *op, dom0_op_t *u_dom0_op)
     return ret;
 }
 
-void arch_getdomaininfo_ctxt(struct domain *d, full_execution_context_t *c)
+void arch_getdomaininfo_ctxt(struct exec_domain *d, full_execution_context_t *c)
 { 
     int i;
 
@@ -311,7 +349,7 @@ void arch_getdomaininfo_ctxt(struct domain *d, full_execution_context_t *c)
     memcpy(&c->cpu_ctxt, 
            &d->thread.user_ctxt,
            sizeof(d->thread.user_ctxt));
-    if ( test_bit(DF_DONEFPUINIT, &d->flags) )
+    if ( test_bit(EDF_DONEFPUINIT, &d->ed_flags) )
         c->flags |= ECF_I387_VALID;
     memcpy(&c->fpu_ctxt,
            &d->thread.i387,
@@ -330,11 +368,11 @@ void arch_getdomaininfo_ctxt(struct domain *d, full_execution_context_t *c)
     c->ldt_base = d->mm.ldt_base;
     c->ldt_ents = d->mm.ldt_ents;
     c->gdt_ents = 0;
-    if ( GET_GDT_ADDRESS(d) == GDT_VIRT_START )
+    if ( GET_GDT_ADDRESS(d) == GDT_VIRT_START(d) )
     {
         for ( i = 0; i < 16; i++ )
             c->gdt_frames[i] = 
-                l1_pgentry_to_pagenr(d->mm.perdomain_pt[i]);
+                l1_pgentry_to_pagenr(d->mm.perdomain_ptes[i]);
         c->gdt_ents = GET_GDT_ENTRIES(d);
     }
     c->guestos_ss  = d->thread.guestos_ss;
