@@ -17,8 +17,6 @@
 #include <linux/mman.h>
 #include <linux/swap.h>
 #include <linux/smp_lock.h>
-#include <linux/swapctl.h>
-#include <linux/iobuf.h>
 #include <linux/highmem.h>
 #include <linux/pagemap.h>
 #include <linux/seq_file.h>
@@ -27,9 +25,9 @@
 #include <asm/pgtable.h>
 #include <asm/uaccess.h>
 #include <asm/tlb.h>
-#include <asm/proc_cmd.h>
+#include <asm-xen/proc_cmd.h>
 #include <asm/hypervisor-ifs/dom0_ops.h>
-#include <asm/xen_proc.h>
+#include <asm-xen/xen_proc.h>
 
 static struct proc_dir_entry *privcmd_intf;
 
@@ -203,7 +201,7 @@ static struct file_operations privcmd_file_ops = {
 };
 
 
-static int __init init_module(void)
+static int __init privcmd_init(void)
 {
     if ( !(start_info.flags & SIF_PRIVILEGED) )
         return 0;
@@ -220,7 +218,7 @@ static int __init init_module(void)
 }
 
 
-static void __exit cleanup_module(void)
+static void __exit privcmd_cleanup(void)
 {
     if ( privcmd_intf == NULL ) return;
     remove_xen_proc_entry("privcmd");
@@ -228,6 +226,5 @@ static void __exit cleanup_module(void)
 }
 
 
-module_init(init_module);
-module_exit(cleanup_module);
-#
+module_init(privcmd_init);
+module_exit(privcmd_cleanup);
