@@ -48,6 +48,19 @@ config XEN_BLKDEV_BACKEND
 	  block devices to other guests via a high-performance shared-memory
 	  interface.
 
+config XEN_BLKDEV_TAP_BE
+        bool "Block Tap support for backend driver (DANGEROUS)"
+      depends on XEN_BLDEV_BACKEND
+        default n
+        help
+          If you intend to use the block tap driver, the backend domain will
+          not know the domain id of the real frontend, and so will not be able
+          to map its data pages.  This modifies the backend to attempt to map
+          from both the tap domain and the real frontend.  This presents a
+          security risk, and so should ONLY be used for development
+          with the blktap.  This option will be removed as the block drivers are
+          modified to use grant tables.
+
 config XEN_NETDEV_BACKEND
 	bool "Network-device backend driver"
 	depends on XEN_PHYSDEV_ACCESS
@@ -91,6 +104,15 @@ config XEN_NETDEV_FRONTEND_PIPELINED_TRANSMITTER
 	  like reassembling packets to perform firewall filtering; or if you
 	  are unsure; or if you experience network hangs when this option is
 	  enabled; then you must say N here.
+
+config XEN_BLKDEV_TAP
+	bool "Block device tap driver"
+	default n
+	help
+	  This driver allows a VM to interact on block device channels
+	  to other VMs.  Block messages may be passed through or redirected
+	  to a character device, allowing device prototyping in application
+	  space.  Odds are that you want to say N here.
 
 config XEN_WRITABLE_PAGETABLES
 	bool
