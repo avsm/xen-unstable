@@ -30,6 +30,8 @@ unsigned long xenheap_phys_end;
 
 xmem_cache_t *domain_struct_cachep;
 
+vm_assist_info_t vm_assist_info[MAX_VMASST_TYPE + 1];
+
 struct e820entry {
     unsigned long addr_lo, addr_hi;        /* start of memory segment */
     unsigned long size_lo, size_hi;        /* size of memory segment */
@@ -306,7 +308,7 @@ void cmain(multiboot_info_t *mbi)
     task_hash[TASK_HASH(IDLE_DOMAIN_ID)] = &idle0_task;
 
     /* Create initial domain 0. */
-    new_dom = do_createdomain(0, 0, 1);
+    new_dom = do_createdomain(0, 0);
     if ( new_dom == NULL )
         panic("Error creating domain 0\n");
 
@@ -353,16 +355,20 @@ long do_xen_version(int cmd)
 
 long do_vm_assist(unsigned int cmd, unsigned int type)
 {
-    if ( type > (sizeof(unsigned long) * 8) )
+    if ( type > MAX_VMASST_TYPE )
         return -EINVAL;
 
     switch ( cmd )
     {
     case VMASST_CMD_enable:
         set_bit(type, &current->vm_assist);
+        if (vm_assist_info[type].enable)
+            (*vm_assist_info[type].enable)();
         return 0;
     case VMASST_CMD_disable:
         clear_bit(type, &current->vm_assist);
+        if (vm_assist_info[type].disable)
+            (*vm_assist_info[type].disable)();
         return 0;
     }
 

@@ -152,17 +152,14 @@ int fbvt_alloc_task(struct domain *p)
 /*
  * Add and remove a domain
  */
-void fbvt_add_task(struct domain *p, float weight) 
+void fbvt_add_task(struct domain *p) 
 {
     struct fbvt_dom_info *inf = FBVT_INFO(p);
 
     ASSERT(inf != NULL);
     ASSERT(p   != NULL);
 
-    if(weight > 0)
-        inf->mcu_advance = MCU_ADVANCE / weight;
-    else
-        inf->mcu_advance = MCU_ADVANCE;
+    inf->mcu_advance = MCU_ADVANCE;
     inf->domain = p;
     if ( p->domain == IDLE_DOMAIN_ID )
     {
@@ -190,7 +187,7 @@ int fbvt_init_idle_task(struct domain *p)
 
     if(fbvt_alloc_task(p) < 0) return -1;
 
-    fbvt_add_task(p, 0);
+    fbvt_add_task(p);
     spin_lock_irqsave(&CPU_INFO(p->processor)->run_lock, flags);
     set_bit(DF_RUNNING, &p->flags);
     if ( !__task_on_runqueue(p) )
@@ -255,7 +252,7 @@ static void fbvt_wake(struct domain *d)
          * values, the virtual time can be determined as:
          * SVT - const * TIME_SLEPT
          */
-        io_warp = (int)(0.5 * inf->time_slept);
+        io_warp = inf->time_slept/2;
         if ( io_warp > 1000 )
             io_warp = 1000;
 
@@ -554,7 +551,7 @@ static task_slice_t fbvt_do_schedule(s_time_t now)
      * domains earlier in virtual time). Together this should give quite
      * good control both for CPU and IO-bound domains.
      */
-    LAST_VTB(cpu) = (int)(0.2 * next_inf->time_slept);
+    LAST_VTB(cpu) = next_inf->time_slept/5;
     if(LAST_VTB(cpu) / next_inf->mcu_advance > max_vtb / MCU) 
         LAST_VTB(cpu) = max_vtb * next_inf->mcu_advance / MCU;
 
