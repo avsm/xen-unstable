@@ -12,6 +12,7 @@
 
 #include "common.h"
 #include <asm-xen/balloon.h>
+#include <asm-xen/evtchn.h>
 
 static void netif_idx_release(u16 pending_idx);
 static void netif_page_release(struct page *page);

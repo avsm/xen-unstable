@@ -30,6 +30,7 @@ SRCS     += xc_misc.c
 SRCS     += xc_physdev.c
 SRCS     += xc_private.c
 SRCS     += xc_rrobin.c
+SRCS     += xc_vmx_build.c
 
 CFLAGS   += -Wall
 CFLAGS   += -Werror
@@ -76,7 +77,7 @@ install: all
 	$(INSTALL_DATA) xc.h $(DESTDIR)/usr/include
 
 clean:
-	rm -rf *.a *.so *.o *.opic *.rpm $(LIB) *~ $(DEPS) xen
+	rm -rf *.a *.so *.o *.opic *.rpm $(LIB) *~ $(DEPS) xen TAGS
 
 rpm: all
 	rm -rf staging
@@ -99,5 +100,9 @@ $(LIB_NAME).so.$(MAJOR): $(LIB_NAME).so.$(MAJOR).$(MINOR)
 	ln -sf $< $@
 $(LIB_NAME).so.$(MAJOR).$(MINOR): $(PIC_OBJS)
 	$(CC) -Wl,-soname -Wl,$(SONAME) -shared -o $@ $^ -L../libxutil -lxutil -lz
+
+.PHONY: TAGS clean install mk-symlinks rpm
+TAGS:
+	etags -t $(SRCS) *.h
 
 -include $(DEPS)
