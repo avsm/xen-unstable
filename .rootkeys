@@ -131,6 +131,7 @@
 3ddb79c2jFkPAZTDmU35L6IUssYMgQ xen-2.4.16/include/asm-i386/debugreg.h
 3ddb79c3r9-31dIsewPV3P3i8HALsQ xen-2.4.16/include/asm-i386/delay.h
 3ddb79c34BFiXjBJ_cCKB0aCsV1IDw xen-2.4.16/include/asm-i386/desc.h
+3e20b82fl1jmQiKdLy7fxMcutfpjWA xen-2.4.16/include/asm-i386/domain_page.h
 3ddb79c2O729EttZTYu1c8LcsUO_GQ xen-2.4.16/include/asm-i386/elf.h
 3ddb79c3NU8Zy40OTrq3D-i30Y3t4A xen-2.4.16/include/asm-i386/fixmap.h
 3ddb79c39o75zPP0T1aQQ4mNrCAN2w xen-2.4.16/include/asm-i386/hardirq.h
@@ -170,7 +171,6 @@
 3ddb79c0dVhTHLsv6CPTf4baKix4mA xen-2.4.16/include/xeno/blkdev.h
 3ddb79c18ePBgitnOs7GiOCFilODVw xen-2.4.16/include/xeno/blkpg.h
 3ddb79c2SisDOHDyTeK5-MV3m7pNbA xen-2.4.16/include/xeno/block.h
-3ddb79c2JOriBs0mWh-Tlolq78tg3w xen-2.4.16/include/xeno/bootmem.h
 3ddb79c1oOjpQbp68MW7yiUpoi-S-w xen-2.4.16/include/xeno/brlock.h
 3ddb79c1x7Ie3kifu7dQRx8y7HVyvA xen-2.4.16/include/xeno/byteorder/big_endian.h
 3ddb79c1qFXOEX1eD0yXJ_gsGkUt8w xen-2.4.16/include/xeno/byteorder/generic.h
@@ -195,6 +195,7 @@
 3ddb79c1yHLp08JhgPxIMcZ8DwN9hg xen-2.4.16/include/xeno/if.h
 3ddb79c1RCWOkWPQRzbYVTX_e-E7CA xen-2.4.16/include/xeno/if_ether.h
 3ddb79c2IYah7z7hkzPyOiG8szKkyw xen-2.4.16/include/xeno/if_packet.h
+3df0af1c-QrOEqpPHq4uL3NZzCeJCg xen-2.4.16/include/xeno/in.h
 3ddb79c0GurNF9tDWqQbAwJFH8ugfA xen-2.4.16/include/xeno/init.h
 3ddb79c1Vi5VleJAOKHAlY0G2zAsgw xen-2.4.16/include/xeno/interrupt.h
 3ddb79c2J6EnruiygRhBCgftzMzTeQ xen-2.4.16/include/xeno/ioctl.h
@@ -293,6 +294,7 @@
 3ddb79bbx682YH6vR2zbVOXwg73ULg xenolinux-2.4.16-sparse/drivers/block/ll_rw_blk.c
 3ddb79bcJfHdwrPsjqgI33_OsGdVCg xenolinux-2.4.16-sparse/drivers/block/rd.c
 3ddb79bcpVu-IbnqwQqpRqsEbLpsuw xenolinux-2.4.16-sparse/drivers/char/tty_io.c
+3e15d5273gfR2fbcYe05kqBSAvCX_w xenolinux-2.4.16-sparse/fs/exec.c
 3ddb79bba_zKpuurHVeWfgDkyPoq8A xenolinux-2.4.16-sparse/fs/nfs/nfsroot.c
 3ddb79b8VFtfWSCrXKPN2K21zd_vtw xenolinux-2.4.16-sparse/include/asm-xeno/a.out.h
 3ddb79b8Zzi13p3OAPV25QgiC3THAQ xenolinux-2.4.16-sparse/include/asm-xeno/apic.h
@@ -314,13 +316,12 @@
 3ddb79bac26NkKcPIEsfxETc5Snyag xenolinux-2.4.16-sparse/include/asm-xeno/elf.h
 3ddb79ba722pCJ_g_xI8ebsE31IK-Q xenolinux-2.4.16-sparse/include/asm-xeno/errno.h
 3ddb79b8vIpUpgaSNEneFkg5hYSvNg xenolinux-2.4.16-sparse/include/asm-xeno/fcntl.h
-3ddb79b8c_oKu2_BGNJctM4DBET31Q xenolinux-2.4.16-sparse/include/asm-xeno/fixmap.h
 3ddb79b8780YvqvK1g5KPIWzQ6P15w xenolinux-2.4.16-sparse/include/asm-xeno/floppy.h
 3ddb79bas-nFywnmilbUeT34PEAA0g xenolinux-2.4.16-sparse/include/asm-xeno/hardirq.h
 3ddb79batzR40ZFY9dvgs5f1aM9I6g xenolinux-2.4.16-sparse/include/asm-xeno/hdreg.h
 3ddb79b90xBgbeYgCcImS2ZxJakxBA xenolinux-2.4.16-sparse/include/asm-xeno/highmem.h
 3ddb79baXLZV3dUKQI2gIYpAy67RuA xenolinux-2.4.16-sparse/include/asm-xeno/hw_irq.h
-3deb3f5bhXnxocVMiXaeZ0L7fQBGaw xenolinux-2.4.16-sparse/include/asm-xeno/hypervisor-ifs
+3e00b957iYsdTI1x6THRwMoWSPIW2Q xenolinux-2.4.16-sparse/include/asm-xeno/hypervisor-ifs
 3ddb79bapQ9Z9ewa5O1pqAVaNBTazg xenolinux-2.4.16-sparse/include/asm-xeno/hypervisor.h
 3ddb79baL-pjPI8hg5xjPgd4__SlOA xenolinux-2.4.16-sparse/include/asm-xeno/i387.h
 3ddb79ba66TwvG7HpbBo04fRhmj3KQ xenolinux-2.4.16-sparse/include/asm-xeno/ide.h
@@ -403,3 +404,6 @@
 3ddb79bb_7YG4U75ZmEic9YXWTW7Vw xenolinux-2.4.16-sparse/include/linux/sunrpc/debug.h
 3ddb79bcxkVPfWlZ1PQKvDrfArzOVw xenolinux-2.4.16-sparse/kernel/panic.c
 3ddb79bbP31im-mx2NbfthSeqty1Dg xenolinux-2.4.16-sparse/mk
+3e15d52e0_j129JPvo7xfYGndVFpwQ xenolinux-2.4.16-sparse/mm/memory.c
+3e15d535DLvpzTrLRUIerB69LpJD1g xenolinux-2.4.16-sparse/mm/mremap.c
+3e15d531m1Y1_W8ki64AFOU_ua4C4w xenolinux-2.4.16-sparse/mm/swapfile.c

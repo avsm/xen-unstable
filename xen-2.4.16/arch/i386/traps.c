@@ -210,12 +210,12 @@ static void inline do_trap(int trapnr, char *str,
 
     __asm__ __volatile__ ("movl %%cr2,%0" : "=r" (addr) : );
 
-    if ( trapnr == 14 )
+    if ( (trapnr == 14) && (addr >= PAGE_OFFSET) )
     {
         unsigned long page;
-        __asm__ __volatile__ ("movl %%cr3,%0" : "=r" (page) : );
-        printk(" pde = %08lx\n", page);
-        page = ((unsigned long *) __va(page))[addr >> 22];
+        unsigned long *pde;
+        pde = (unsigned long *)idle_pg_table[smp_processor_id()];
+        page = pde[addr >> L2_PAGETABLE_SHIFT];
         printk("*pde = %08lx\n", page);
         if ( page & _PAGE_PRESENT )
         {
@@ -512,11 +512,6 @@ __asm__ __volatile__ ("movw %w3,0(%2)\n\t" \
 void set_tss_desc(unsigned int n, void *addr)
 {
     _set_tssldt_desc(gdt_table+__TSS(n), (int)addr, 235, 0x89);
-}
-
-void set_ldt_desc(unsigned int n, void *addr, unsigned int size)
-{
-    _set_tssldt_desc(gdt_table+__LDT(n), (int)addr, ((size << 3)-1), 0x82);
 }
 
 void __init trap_init(void)
