@@ -2,11 +2,20 @@
 #define __LIB_H__
 
 #include <stdarg.h>
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/string.h>
 
+#define BUG() do {					\
+    debugtrace_dump();                                  \
+    printk("BUG at %s:%d\n", __FILE__, __LINE__);	\
+    FORCE_CRASH();                                      \
+} while ( 0 )
+
+#define BUG_ON(_p) do { if (_p) BUG(); } while ( 0 )
+
 #ifndef NDEBUG
-#define ASSERT(_p) if ( !(_p) ) { printk("Assertion '%s' failed, line %d, file %s\n", #_p , __LINE__, __FILE__); *(int*)0=0; }
+#define ASSERT(_p) if ( !(_p) ) { printk("Assertion '%s' failed, line %d, file %s\n", #_p , __LINE__, __FILE__); BUG(); }
 #else
 #define ASSERT(_p) ((void)0)
 #endif
@@ -14,11 +23,22 @@
 #define SWAP(_a, _b) \
    do { typeof(_a) _t = (_a); (_a) = (_b); (_b) = _t; } while ( 0 )
 
+#define DIV_ROUND(x, y) (((x) + (y) - 1) / (y))
+
 #define reserve_bootmem(_p,_l) ((void)0)
 
 struct domain;
 
 void cmdline_parse(char *cmdline);
+
+#ifndef NDEBUG
+extern int debugtrace_send_to_console;
+extern void debugtrace_dump(void);
+extern void debugtrace_printk(const char *fmt, ...);
+#else
+#define debugtrace_dump()          ((void)0)
+#define debugtrace_printk(_f, ...) ((void)0)
+#endif
 
 #define printk printf
 void printf(const char *format, ...);

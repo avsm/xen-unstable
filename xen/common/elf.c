@@ -9,13 +9,12 @@
 #include <xen/lib.h>
 #include <xen/mm.h>
 #include <xen/elf.h>
+#include <xen/sched.h>
 
 #ifdef CONFIG_X86
 #define FORCE_XENELF_IMAGE 1
-#define ELF_ADDR           p_vaddr
 #elif defined(__ia64__)
 #define FORCE_XENELF_IMAGE 0
-#define ELF_ADDR           p_paddr
 #endif
 
 static inline int is_loadable_phdr(Elf_Phdr *phdr)
@@ -35,11 +34,8 @@ int parseelfimage(char *elfbase,
     char *shstrtab, *guestinfo=NULL, *p;
     int h;
 
-    if ( !IS_ELF(*ehdr) )
-    {
-        printk("Kernel image does not have an ELF header.\n");
+    if ( !elf_sanity_check(ehdr) )
         return -EINVAL;
-    }
 
     if ( (ehdr->e_phoff + (ehdr->e_phnum * ehdr->e_phentsize)) > elfsize )
     {
@@ -81,9 +77,9 @@ int parseelfimage(char *elfbase,
             return -EINVAL;
         }
 
-        if ( (strstr(guestinfo, "XEN_VER=2.0") == NULL) )
+        if ( (strstr(guestinfo, "XEN_VER=3.0") == NULL) )
         {
-            printk("ERROR: Xen will only load images built for Xen v2.0\n");
+            printk("ERROR: Xen will only load images built for Xen v3.0\n");
             return -EINVAL;
         }
 
@@ -102,10 +98,10 @@ int parseelfimage(char *elfbase,
         phdr = (Elf_Phdr *)(elfbase + ehdr->e_phoff + (h*ehdr->e_phentsize));
         if ( !is_loadable_phdr(phdr) )
             continue;
-        if ( phdr->ELF_ADDR < kernstart )
-            kernstart = phdr->ELF_ADDR;
-        if ( (phdr->ELF_ADDR + phdr->p_memsz) > kernend )
-            kernend = phdr->ELF_ADDR + phdr->p_memsz;
+        if ( phdr->p_paddr < kernstart )
+            kernstart = phdr->p_paddr;
+        if ( (phdr->p_paddr + phdr->p_memsz) > kernend )
+            kernend = phdr->p_paddr + phdr->p_memsz;
     }
 
     if ( (kernstart > kernend) || 
@@ -122,9 +118,6 @@ int parseelfimage(char *elfbase,
     {
         if ( (p = strstr(guestinfo, "VIRT_BASE=")) != NULL )
             dsi->v_start = simple_strtoul(p+10, &p, 0);
-        
-        if ( (p = strstr(guestinfo, "PT_MODE_WRITABLE")) != NULL )
-            dsi->use_writable_pagetables = 1;
 
         if ( (p = strstr(guestinfo, "BSD_SYMTAB")) != NULL )
             dsi->load_bsd_symtab = 1;
@@ -152,10 +145,10 @@ int loadelfimage(char *elfbase)
         if ( !is_loadable_phdr(phdr) )
             continue;
         if ( phdr->p_filesz != 0 )
-            memcpy((char *)phdr->ELF_ADDR, elfbase + phdr->p_offset, 
+            memcpy((char *)phdr->p_paddr, elfbase + phdr->p_offset, 
                    phdr->p_filesz);
         if ( phdr->p_memsz > phdr->p_filesz )
-            memset((char *)phdr->ELF_ADDR + phdr->p_filesz, 0, 
+            memset((char *)phdr->p_paddr + phdr->p_filesz, 0, 
                    phdr->p_memsz - phdr->p_filesz);
     }
 
@@ -255,3 +248,13 @@ int loadelfsymtab(char *elfbase, int doload, struct domain_setup_info *dsi)
 
     return 0;
 }
+
+/*
+ * Local variables:
+ * mode: C
+ * c-set-style: "BSD"
+ * c-basic-offset: 4
+ * tab-width: 4
+ * indent-tabs-mode: nil
+ * End:
+ */

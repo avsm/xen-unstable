@@ -278,6 +278,13 @@ class Xend:
                              { 'op'     : 'maxmem_set',
                                'memory' : memory })
 
+    def xend_domain_vif_limit(self, id, vif, credit, period):
+        return self.xendPost(self.domainurl(id),
+                            { 'op'      : 'vif_credit_limit',
+                              'vif'     : vif,
+                              'credit'  : credit,
+                              'period'  : period })
+
     def xend_domain_vifs(self, id):
         return self.xendGet(self.domainurl(id),
                             { 'op'      : 'vifs' })
@@ -300,6 +307,12 @@ class Xend:
         return self.xendPost(self.domainurl(id),
                              {'op'      : 'device_create',
                               'config'  : fileof(config) })
+
+    def xend_domain_device_refresh(self, id, type, idx):
+        return self.xendPost(self.domainurl(id),
+                             {'op'      : 'device_refresh',
+                              'type'    : type,
+                              'idx'     : idx })
 
     def xend_domain_device_destroy(self, id, type, idx):
         return self.xendPost(self.domainurl(id),

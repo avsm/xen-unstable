@@ -19,31 +19,6 @@
 #define DPRINTF(_f, _a...) ((void)0)
 #endif
 
-static int get_pfn_list(int xc_handle,
-                        u32 domain_id, 
-                        unsigned long *pfn_buf, 
-                        unsigned long max_pfns)
-{
-    dom0_op_t op;
-    int ret;
-    op.cmd = DOM0_GETMEMLIST;
-    op.u.getmemlist.domain   = (domid_t)domain_id;
-    op.u.getmemlist.max_pfns = max_pfns;
-    op.u.getmemlist.buffer   = pfn_buf;
-
-    if ( mlock(pfn_buf, max_pfns * sizeof(unsigned long)) != 0 )
-    {
-        PERROR("Could not lock pfn list buffer");
-        return -1;
-    }    
-
-    ret = do_dom0_op(xc_handle, &op);
-
-    (void)munlock(pfn_buf, max_pfns * sizeof(unsigned long));
-
-    return (ret < 0) ? -1 : op.u.getmemlist.num_pfns;
-}
-
 /** Read the vmconfig string from the state input.
  * It is stored as a 4-byte count 'n' followed by n bytes.
  * The config data is stored in a new string in 'ioctxt->vmconfig',
@@ -94,7 +69,8 @@ int xc_linux_restore(int xc_handle, XcIOContext *ioctxt)
 
     /* The new domain's shared-info frame number. */
     unsigned long shared_info_frame;
-    unsigned char shared_info[PAGE_SIZE]; /* saved contents from file */
+    unsigned char shared_info_page[PAGE_SIZE]; /* saved contents from file */
+    shared_info_t *shared_info = (shared_info_t *)shared_info_page;
     
     /* A copy of the CPU context of the guest. */
     full_execution_context_t ctxt;
@@ -129,6 +105,10 @@ int xc_linux_restore(int xc_handle, XcIOContext *ioctxt)
 
     /* used by debug verify code */
     unsigned long buf[PAGE_SIZE/sizeof(unsigned long)];
+
+#define MAX_PIN_BATCH 1024
+    struct mmuext_op pin[MAX_PIN_BATCH];
+    unsigned int nr_pins = 0;
 
     xcio_info(ioctxt, "xc_linux_restore start\n");
 
@@ -201,6 +181,7 @@ int xc_linux_restore(int xc_handle, XcIOContext *ioctxt)
     /* Get the domain's shared-info frame. */
     op.cmd = DOM0_GETDOMAININFO;
     op.u.getdomaininfo.domain = (domid_t)dom;
+    op.u.getdomaininfo.exec_domain = 0;
     op.u.getdomaininfo.ctxt = NULL;
     if ( do_dom0_op(xc_handle, &op) < 0 )
     {
@@ -219,7 +200,7 @@ int xc_linux_restore(int xc_handle, XcIOContext *ioctxt)
     }
 
     /* Build the pfn-to-mfn table. We choose MFN ordering returned by Xen. */
-    if ( get_pfn_list(xc_handle, dom, pfn_to_mfn_table, nr_pfns) != nr_pfns )
+    if ( xc_get_pfn_list(xc_handle, dom, pfn_to_mfn_table, nr_pfns) != nr_pfns )
     {
         xcio_error(ioctxt, "Did not read correct number of frame "
                    "numbers for new dom");
@@ -437,43 +418,33 @@ int xc_linux_restore(int xc_handle, XcIOContext *ioctxt)
 
     xcio_info(ioctxt, "Received all pages\n");
 
+    if ( finish_mmu_updates(xc_handle, mmu) )
+        goto out;
+
     /*
      * Pin page tables. Do this after writing to them as otherwise Xen
      * will barf when doing the type-checking.
      */
     for ( i = 0; i < nr_pfns; i++ )
     {
+        if ( (pfn_type[i] & LPINTAB) == 0 )
+            continue;
         if ( pfn_type[i] == (L1TAB|LPINTAB) )
+            pin[nr_pins].cmd = MMUEXT_PIN_L1_TABLE;
+        else /* pfn_type[i] == (L2TAB|LPINTAB) */
+            pin[nr_pins].cmd = MMUEXT_PIN_L2_TABLE;
+        pin[nr_pins].mfn = pfn_to_mfn_table[i];
+        if ( ++nr_pins == MAX_PIN_BATCH )
         {
-            if ( add_mmu_update(xc_handle, mmu,
-                                (pfn_to_mfn_table[i]<<PAGE_SHIFT) | 
-                                MMU_EXTENDED_COMMAND,
-                                MMUEXT_PIN_L1_TABLE) ) {
-                printf("ERR pin L1 pfn=%lx mfn=%lx\n",
-                       (unsigned long)i, pfn_to_mfn_table[i]);
+            if ( do_mmuext_op(xc_handle, pin, nr_pins, dom) < 0 )
                 goto out;
-            }
+            nr_pins = 0;
         }
     }
 
-    /* must pin all L1's before L2's (need consistent va back ptr) */
-    for ( i = 0; i < nr_pfns; i++ )
-    {
-        if ( pfn_type[i] == (L2TAB|LPINTAB) )
-        {
-            if ( add_mmu_update(xc_handle, mmu,
-                                (pfn_to_mfn_table[i]<<PAGE_SHIFT) | 
-                                MMU_EXTENDED_COMMAND,
-                                MMUEXT_PIN_L2_TABLE) )
-            {
-                printf("ERR pin L2 pfn=%lx mfn=%lx\n",
-                       (unsigned long)i, pfn_to_mfn_table[i]);
-                goto out;
-            }
-        }
-    }
-
-    if ( finish_mmu_updates(xc_handle, mmu) ) goto out;
+    if ( (nr_pins != 0) &&
+         (do_mmuext_op(xc_handle, pin, nr_pins, dom) < 0) )
+        goto out;
 
     xcio_info(ioctxt, "\b\b\b\b100%%\n");
     xcio_info(ioctxt, "Memory reloaded.\n");
@@ -525,8 +496,8 @@ int xc_linux_restore(int xc_handle, XcIOContext *ioctxt)
 	}	
     }
 
-    if ( xcio_read(ioctxt, &ctxt,       sizeof(ctxt)) ||
-         xcio_read(ioctxt, shared_info, PAGE_SIZE) )
+    if ( xcio_read(ioctxt, &ctxt,            sizeof(ctxt)) ||
+         xcio_read(ioctxt, shared_info_page, PAGE_SIZE) )
     {
         xcio_error(ioctxt, "Error when reading from state file");
         goto out;
@@ -584,9 +555,10 @@ int xc_linux_restore(int xc_handle, XcIOContext *ioctxt)
     ctxt.pt_base = pfn_to_mfn_table[pfn] << PAGE_SHIFT;
 
     /* clear any pending events and the selector */
-    memset(&(((shared_info_t *)shared_info)->evtchn_pending[0]),
-           0, sizeof (((shared_info_t *)shared_info)->evtchn_pending)+
-           sizeof(((shared_info_t *)shared_info)->evtchn_pending_sel));
+    memset(&(shared_info->evtchn_pending[0]), 0,
+	   sizeof (shared_info->evtchn_pending));
+    for ( i = 0; i < MAX_VIRT_CPUS; i++ )
+        shared_info->vcpu_data[i].evtchn_pending_sel = 0;
 
     /* Copy saved contents of shared-info page. No checking needed. */
     ppage = xc_map_foreign_range(
@@ -632,7 +604,7 @@ int xc_linux_restore(int xc_handle, XcIOContext *ioctxt)
      *  4. fast_trap_idx is checked by Xen.
      *  5. ldt base must be page-aligned, no more than 8192 ents, ...
      *  6. gdt already done, and further checking is done by Xen.
-     *  7. check that guestos_ss is safe.
+     *  7. check that kernel_ss is safe.
      *  8. pt_base is already done.
      *  9. debugregs are checked by Xen.
      *  10. callback code selectors need checking.
@@ -641,14 +613,16 @@ int xc_linux_restore(int xc_handle, XcIOContext *ioctxt)
     {
         ctxt.trap_ctxt[i].vector = i;
         if ( (ctxt.trap_ctxt[i].cs & 3) == 0 )
-            ctxt.trap_ctxt[i].cs = FLAT_GUESTOS_CS;
+            ctxt.trap_ctxt[i].cs = FLAT_KERNEL_CS;
     }
-    if ( (ctxt.guestos_ss & 3) == 0 )
-        ctxt.guestos_ss = FLAT_GUESTOS_DS;
+    if ( (ctxt.kernel_ss & 3) == 0 )
+        ctxt.kernel_ss = FLAT_KERNEL_DS;
+#if defined(__i386__)
     if ( (ctxt.event_callback_cs & 3) == 0 )
-        ctxt.event_callback_cs = FLAT_GUESTOS_CS;
+        ctxt.event_callback_cs = FLAT_KERNEL_CS;
     if ( (ctxt.failsafe_callback_cs & 3) == 0 )
-        ctxt.failsafe_callback_cs = FLAT_GUESTOS_CS;
+        ctxt.failsafe_callback_cs = FLAT_KERNEL_CS;
+#endif
     if ( ((ctxt.ldt_base & (PAGE_SIZE - 1)) != 0) ||
          (ctxt.ldt_ents > 8192) ||
          (ctxt.ldt_base > HYPERVISOR_VIRT_START) ||
@@ -660,9 +634,10 @@ int xc_linux_restore(int xc_handle, XcIOContext *ioctxt)
 
     xcio_info(ioctxt, "Domain ready to be built.\n");
 
-    op.cmd = DOM0_BUILDDOMAIN;
-    op.u.builddomain.domain   = (domid_t)dom;
-    op.u.builddomain.ctxt = &ctxt;
+    op.cmd = DOM0_SETDOMAININFO;
+    op.u.setdomaininfo.domain   = (domid_t)dom;
+    op.u.setdomaininfo.exec_domain   = 0;
+    op.u.setdomaininfo.ctxt = &ctxt;
     rc = do_dom0_op(xc_handle, &op);
 
     if ( rc != 0 )
