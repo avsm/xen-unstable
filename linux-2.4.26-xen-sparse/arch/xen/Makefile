@@ -98,23 +98,32 @@ FORCE: ;
 
 .PHONY: bzImage compressed clean archclean archmrproper archdep
 
+
 bzImage: vmlinux
 	@$(MAKEBOOT) bzImage
 
 install: bzImage
 	mkdir -p $(prefix)/boot
-	install -m0644 arch/$(ARCH)/boot/bzImage $(prefix)/boot/vmlinuz-2.4.26-xen
-	install -m0644 vmlinux $(prefix)/boot/vmlinux-syms-2.4.26-xen
+	install -m0644 arch/$(ARCH)/boot/bzImage $(prefix)/boot/vmlinuz-$(INSTALL_NAME)
+	install -m0644 vmlinux $(prefix)/boot/vmlinux-syms-$(INSTALL_NAME)
+	install -m0664 .config $(prefix)/boot/config-$(INSTALL_NAME)
 
 dist: bzImage
 	mkdir -p ../install/boot
-	install -m0644 arch/$(ARCH)/boot/xenolinux.gz ../install/boot/vmlinuz-2.4.26-xen
-	install -m0644 vmlinux ../install/boot/vmlinux-syms-2.4.26-xen
+	install -m0644 arch/$(ARCH)/boot/bzImage ../install/boot/vmlinuz-$(INSTALL_NAME)
+	install -m0644 vmlinux ../install/boot/vmlinux-syms-$(INSTALL_NAME)
+	install -m0664 .config ../install/boot/config-$(INSTALL_NAME)
+
+%_config: arch/xen/defconfig-%
+	rm -f .config arch/xen/defconfig
+	cp -f arch/xen/defconfig-$(@:_config=) arch/xen/defconfig
+
 
 archclean:
 	@$(MAKEBOOT) clean
 
 archmrproper:
+	rm -f include/asm-xen/hypervisor-ifs/arch
 
 archdep:
 	@$(MAKEBOOT) dep
