@@ -231,6 +231,7 @@ static void net_rx_action(unsigned long unused)
         mcl[1].op = __HYPERVISOR_mmu_update;
         mcl[1].args[0] = (unsigned long)mmu;
         mcl[1].args[1] = 4;
+        mcl[1].args[2] = 0;
 
         mmu += 4;
         mcl += 2;
@@ -327,14 +328,14 @@ static int __on_net_schedule_list(netif_t *netif)
 
 static void remove_from_net_schedule_list(netif_t *netif)
 {
-    spin_lock(&net_schedule_list_lock);
+    spin_lock_irq(&net_schedule_list_lock);
     if ( likely(__on_net_schedule_list(netif)) )
     {
         list_del(&netif->list);
         netif->list.next = NULL;
         netif_put(netif);
     }
-    spin_unlock(&net_schedule_list_lock);
+    spin_unlock_irq(&net_schedule_list_lock);
 }
 
 static void add_to_net_schedule_list_tail(netif_t *netif)
@@ -342,13 +343,13 @@ static void add_to_net_schedule_list_tail(netif_t *netif)
     if ( __on_net_schedule_list(netif) )
         return;
 
-    spin_lock(&net_schedule_list_lock);
+    spin_lock_irq(&net_schedule_list_lock);
     if ( !__on_net_schedule_list(netif) && (netif->status == CONNECTED) )
     {
         list_add_tail(&netif->list, &net_schedule_list);
         netif_get(netif);
     }
-    spin_unlock(&net_schedule_list_lock);
+    spin_unlock_irq(&net_schedule_list_lock);
 }
 
 static inline void netif_schedule_work(netif_t *netif)
@@ -573,9 +574,16 @@ static void net_tx_action(unsigned long unused)
         skb->dev      = netif->dev;
         skb->protocol = eth_type_trans(skb, skb->dev);
 
-        /* Destructor information. */
-        atomic_set(&page->count, 1);
+        /*
+         * Destructor information. We hideously abuse the 'mapping' pointer,
+         * which isn't otherwise used by us. The page deallocator is modified
+         * to interpret a non-NULL value as a destructor function to be called.
+         * This works okay because in all other cases the pointer must be NULL
+         * when the page is freed (normally Linux will explicitly bug out if
+         * it sees otherwise.
+         */
         page->mapping = (struct address_space *)netif_page_release;
+        atomic_set(&page->count, 1);
         pending_id[pending_idx] = txreq.id;
         pending_netif[pending_idx] = netif;
 
@@ -593,6 +601,9 @@ static void netif_page_release(struct page *page)
 {
     unsigned long flags;
     u16 pending_idx = page - virt_to_page(mmap_vstart);
+
+    /* Stop the abuse. */
+    page->mapping = NULL;
 
     spin_lock_irqsave(&dealloc_lock, flags);
     dealloc_ring[MASK_PEND_IDX(dealloc_prod++)] = pending_idx;
@@ -691,6 +702,35 @@ static int make_rx_response(netif_t     *netif,
     return (i == netif->rx->event);
 }
 
+static void netif_be_dbg(int irq, void *dev_id, struct pt_regs *regs)
+{
+    struct list_head *ent;
+    netif_t *netif;
+    int i = 0;
+
+    printk(KERN_ALERT "netif_schedule_list:\n");
+    spin_lock_irq(&net_schedule_list_lock);
+
+    list_for_each ( ent, &net_schedule_list )
+    {
+        netif = list_entry(ent, netif_t, list);
+        printk(KERN_ALERT " %d: private(rx_req_cons=%08x rx_resp_prod=%08x\n",
+               i, netif->rx_req_cons, netif->rx_resp_prod);               
+        printk(KERN_ALERT "   tx_req_cons=%08x tx_resp_prod=%08x)\n",
+               netif->tx_req_cons, netif->tx_resp_prod);
+        printk(KERN_ALERT "   shared(rx_req_prod=%08x rx_resp_prod=%08x\n",
+               netif->rx->req_prod, netif->rx->resp_prod);
+        printk(KERN_ALERT "   rx_event=%08x tx_req_prod=%08x\n",
+               netif->rx->event, netif->tx->req_prod);
+        printk(KERN_ALERT "   tx_resp_prod=%08x, tx_event=%08x)\n",
+               netif->tx->resp_prod, netif->tx->event);
+        i++;
+    }
+
+    spin_unlock_irq(&net_schedule_list_lock);
+    printk(KERN_ALERT " ** End of netif_schedule_list **\n");
+}
+
 static int __init init_module(void)
 {
     int i;
@@ -715,6 +755,10 @@ static int __init init_module(void)
     INIT_LIST_HEAD(&net_schedule_list);
 
     netif_ctrlif_init();
+
+    (void)request_irq(bind_virq_to_irq(VIRQ_DEBUG),
+                      netif_be_dbg, SA_SHIRQ, 
+                      "net-be-dbg", NULL);
 
     return 0;
 }
