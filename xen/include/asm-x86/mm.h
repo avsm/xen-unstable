@@ -237,8 +237,12 @@ static inline int get_page_type(struct pfn_info *page, u32 type)
         {
             if ( unlikely((x & PGT_type_mask) != (type & PGT_type_mask) ) )
             {
-                DPRINTK("Bad type (saw %08x != exp %08x) for pfn %08lx\n",
-                        x & PGT_type_mask, type, page_to_pfn(page));
+#ifdef VERBOSE
+                if ( ((x & PGT_type_mask) != PGT_l2_page_table) ||
+                     ((type & PGT_type_mask) != PGT_l1_page_table) )
+                    DPRINTK("Bad type (saw %08x != exp %08x) for pfn %08lx\n",
+                            x & PGT_type_mask, type, page_to_pfn(page));
+#endif
                 return 0;
             }
             else if ( (x & PGT_va_mask) == PGT_va_mutable )
