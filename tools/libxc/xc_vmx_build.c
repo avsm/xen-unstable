@@ -27,7 +27,6 @@ struct domain_setup_info
     unsigned long v_kernend;
     unsigned long v_kernentry;
 
-    unsigned int use_writable_pagetables;
     unsigned int load_bsd_symtab;
 
     unsigned long symtab_addr;
@@ -198,10 +197,6 @@ static int setup_guest(int xc_handle,
     if ( rc != 0 )
         goto error_out;
 
-    if (dsi.use_writable_pagetables)
-        xc_domain_setvmassist(xc_handle, dom, VMASST_CMD_enable,
-                              VMASST_TYPE_writable_pagetables);
-
     if (dsi.load_bsd_symtab)
         loadelfsymtab(image, xc_handle, dom, NULL, &dsi);
 
@@ -338,8 +333,7 @@ static int setup_guest(int xc_handle,
      * Pin down l2tab addr as page dir page - causes hypervisor to provide
      * correct protection for the page
      */ 
-    if ( add_mmu_update(xc_handle, mmu,
-                        l2tab | MMU_EXTENDED_COMMAND, MMUEXT_PIN_L2_TABLE) )
+    if ( pin_table(xc_handle, MMUEXT_PIN_L2_TABLE, l2tab>>PAGE_SHIFT, dom) )
         goto error_out;
 
     if ((boot_paramsp = xc_map_foreign_range(
@@ -478,10 +472,18 @@ int vmx_identify(void)
 {
     int eax, ecx;
 
+#ifdef __i386__
     __asm__ __volatile__ ("pushl %%ebx; cpuid; popl %%ebx" 
 			  : "=a" (eax), "=c" (ecx) 
 			  : "0" (1) 
 			  : "dx");
+#elif defined __x86_64__
+    __asm__ __volatile__ ("pushq %%rbx; cpuid; popq %%rbx"
+                          : "=a" (eax), "=c" (ecx)
+                          : "0" (1)
+                          : "dx");
+#endif
+
     if (!(ecx & VMX_FEATURE_FLAG)) {
         return -1;
     }
@@ -609,10 +611,16 @@ int xc_vmx_build(int xc_handle,
     memset(ctxt->debugreg, 0, sizeof(ctxt->debugreg));
 
     /* No callback handlers. */
+#if defined(__i386__)
     ctxt->event_callback_cs     = FLAT_KERNEL_CS;
     ctxt->event_callback_eip    = 0;
     ctxt->failsafe_callback_cs  = FLAT_KERNEL_CS;
     ctxt->failsafe_callback_eip = 0;
+#elif defined(__x86_64__)
+    ctxt->event_callback_eip    = 0;
+    ctxt->failsafe_callback_eip = 0;
+    ctxt->syscall_callback_eip  = 0;
+#endif
 
     memset( &launch_op, 0, sizeof(launch_op) );
 
@@ -700,7 +708,6 @@ static int parseelfimage(char *elfbase,
     }
 
     dsi->v_start = 0x00000000;
-    dsi->use_writable_pagetables = 0;
     dsi->load_bsd_symtab = 0;
 
     dsi->v_kernstart = kernstart - LINUX_PAGE_OFFSET;

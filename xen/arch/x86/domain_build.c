@@ -129,10 +129,6 @@ int construct_dom0(struct domain *d,
     if ( rc != 0 )
         return rc;
 
-    /* Set up domain options */
-    if ( dsi.use_writable_pagetables )
-        vm_assist(d, VMASST_CMD_enable, VMASST_TYPE_writable_pagetables);
-
     /* Align load address to 4MB boundary. */
     dsi.v_start &= ~((1UL<<22)-1);
 
@@ -421,7 +417,7 @@ int construct_dom0(struct domain *d,
     update_pagetables(ed);
 
     /* Install the new page tables. */
-    __cli();
+    local_irq_disable();
     write_ptbase(ed);
 
     /* Copy the OS image and free temporary buffer. */
@@ -498,7 +494,7 @@ int construct_dom0(struct domain *d,
 
     /* Reinstate the caller's page tables. */
     write_ptbase(current);
-    __sti();
+    local_irq_enable();
 
 #if defined(__i386__)
     /* Destroy low mappings - they were only for our convenience. */

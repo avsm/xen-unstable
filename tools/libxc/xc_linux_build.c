@@ -22,7 +22,6 @@ struct domain_setup_info
     unsigned long v_kernend;
     unsigned long v_kernentry;
 
-    unsigned int use_writable_pagetables;
     unsigned int load_bsd_symtab;
 
     unsigned long symtab_addr;
@@ -87,10 +86,6 @@ static int setup_guest(int xc_handle,
     rc = parseelfimage(image, image_size, &dsi);
     if ( rc != 0 )
         goto error_out;
-
-    if (dsi.use_writable_pagetables)
-        xc_domain_setvmassist(xc_handle, dom, VMASST_CMD_enable,
-                              VMASST_TYPE_writable_pagetables);
 
     if (dsi.load_bsd_symtab)
         loadelfsymtab(image, xc_handle, dom, NULL, &dsi);
@@ -259,8 +254,7 @@ static int setup_guest(int xc_handle,
      * Pin down l2tab addr as page dir page - causes hypervisor to provide
      * correct protection for the page
      */ 
-    if ( add_mmu_update(xc_handle, mmu,
-                        l2tab | MMU_EXTENDED_COMMAND, MMUEXT_PIN_L2_TABLE) )
+    if ( pin_table(xc_handle, MMUEXT_PIN_L2_TABLE, l2tab>>PAGE_SHIFT, dom) )
         goto error_out;
 
     start_info = xc_map_foreign_range(
@@ -452,10 +446,16 @@ int xc_linux_build(int xc_handle,
     memset(ctxt->debugreg, 0, sizeof(ctxt->debugreg));
 
     /* No callback handlers. */
+#if defined(__i386__)
     ctxt->event_callback_cs     = FLAT_KERNEL_CS;
     ctxt->event_callback_eip    = 0;
     ctxt->failsafe_callback_cs  = FLAT_KERNEL_CS;
     ctxt->failsafe_callback_eip = 0;
+#elif defined(__x86_64__)
+    ctxt->event_callback_eip    = 0;
+    ctxt->failsafe_callback_eip = 0;
+    ctxt->syscall_callback_eip  = 0;
+#endif
 
     memset( &launch_op, 0, sizeof(launch_op) );
 
@@ -579,9 +579,6 @@ static int parseelfimage(char *elfbase,
     dsi->v_start = kernstart;
     if ( (p = strstr(guestinfo, "VIRT_BASE=")) != NULL )
         dsi->v_start = strtoul(p+10, &p, 0);
-
-    if ( (p = strstr(guestinfo, "PT_MODE_WRITABLE")) != NULL )
-        dsi->use_writable_pagetables = 1;
 
     if ( (p = strstr(guestinfo, "BSD_SYMTAB")) != NULL )
         dsi->load_bsd_symtab = 1;

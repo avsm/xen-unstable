@@ -192,7 +192,6 @@ void sched_add_domain(struct exec_domain *ed)
 
 void sched_rem_domain(struct exec_domain *ed) 
 {
-
     rem_ac_timer(&ed->timer);
     SCHED_OP(rem_task, ed);
     TRACE_3D(TRC_SCHED_DOM_REM, ed->domain->id, ed->eid, ed);
@@ -217,10 +216,7 @@ void domain_sleep(struct exec_domain *d)
  
     /* Synchronous. */
     while ( test_bit(EDF_RUNNING, &d->ed_flags) && !domain_runnable(d) )
-    {
-        smp_mb();
         cpu_relax();
-    }
 }
 
 void domain_wake(struct exec_domain *ed)

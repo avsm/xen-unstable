@@ -53,7 +53,9 @@ platform_is_hp_ski(void)
 }
 
 /* calls in xen/common code that are unused on ia64 */
-void synchronise_pagetables(unsigned long cpu_mask) { return; }
+
+void sync_lazy_execstate_cpuset(unsigned long cpuset) {}
+void sync_lazy_execstate_all(void) {}
 
 int grant_table_create(struct domain *d) { return 0; }
 void grant_table_destroy(struct domain *d)

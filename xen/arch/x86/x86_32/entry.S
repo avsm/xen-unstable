@@ -218,6 +218,7 @@ failsafe_callback:
         GET_CURRENT(%ebx)
         leal  EDOMAIN_trap_bounce(%ebx),%edx
         movl  EDOMAIN_failsafe_addr(%ebx),%eax
+        movl  %eax,TRAPBOUNCE_eip(%edx)
         movl  EDOMAIN_failsafe_sel(%ebx),%eax
         movw  %ax,TRAPBOUNCE_cs(%edx)
         movw  $TBF_FAILSAFE,TRAPBOUNCE_flags(%edx)
@@ -741,6 +742,8 @@ ENTRY(hypercall_table)
         .long SYMBOL_NAME(do_update_va_mapping_otherdomain)
         .long SYMBOL_NAME(do_switch_vm86)
         .long SYMBOL_NAME(do_boot_vcpu)
+        .long SYMBOL_NAME(do_ni_hypercall)       /* 25 */
+        .long SYMBOL_NAME(do_mmuext_op)
         .rept NR_hypercalls-((.-hypercall_table)/4)
         .long SYMBOL_NAME(do_ni_hypercall)
         .endr

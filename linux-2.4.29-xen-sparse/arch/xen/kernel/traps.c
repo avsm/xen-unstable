@@ -316,15 +316,7 @@ asmlinkage void do_general_protection(struct pt_regs * regs, long error_code)
 		__asm__ __volatile__ ( "sldt %0" : "=r" (ldt) );
 		if ( ldt == 0 )
 		{
-		    mmu_update_t u;
-		    u.ptr  = MMU_EXTENDED_COMMAND;
-		    u.ptr |= (unsigned long)&default_ldt[0];
-		    u.val  = MMUEXT_SET_LDT | (5 << MMUEXT_CMD_SHIFT);
-		    if ( unlikely(HYPERVISOR_mmu_update(&u, 1, NULL) < 0) )
-		    {
-			show_trace(NULL);
-			panic("Failed to install default LDT");
-		    }
+                    xen_set_ldt((unsigned long)&default_ldt[0], 5);
 		    return;
 		}
 	}
@@ -623,7 +615,6 @@ void __init trap_init(void)
     set_call_gate(&default_ldt[0],lcall7);
     set_call_gate(&default_ldt[4],lcall27);
     __make_page_readonly(&default_ldt[0]);
-    flush_page_update_queue();
 
     cpu_init();
 }
