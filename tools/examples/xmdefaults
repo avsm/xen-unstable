@@ -5,9 +5,6 @@
 # This file expects the variable 'vmid' to be set.
 #============================================================================
 
-import sys
-import xenctl.ip
-
 try:
     vmid = int(vmid) # convert to integer
 except:
@@ -19,7 +16,7 @@ if vmid <= 0:
 
 #----------------------------------------------------------------------------
 # Kernel image file.
-kernel = "../../../install/boot/vmlinuz-2.4.26-xen"
+kernel = "../../../install/boot/vmlinuz-2.4.26-xenU"
 
 # Optional ramdisk.
 #ramdisk = "/boot/initrd.gz"
