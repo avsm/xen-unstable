@@ -1,8 +1,6 @@
-/*
- * include/asm-x86/processor.h
- *
- * Copyright (C) 1994 Linus Torvalds
- */
+/* -*-  Mode:C; c-basic-offset:4; tab-width:4; indent-tabs-mode:nil -*- */
+
+/* Portions are: Copyright (c) 1994 Linus Torvalds */
 
 #ifndef __ASM_X86_PROCESSOR_H
 #define __ASM_X86_PROCESSOR_H
@@ -13,9 +11,10 @@
 #include <asm/cpufeature.h>
 #include <asm/desc.h>
 #include <asm/flushtlb.h>
-#include <asm/pdb.h>
 #include <xen/config.h>
 #include <xen/spinlock.h>
+#include <xen/cache.h>
+#include <asm/vmx_vmcs.h>
 #include <public/xen.h>
 #endif
 
@@ -84,31 +83,35 @@
 #define X86_CR4_PCE		0x0100	/* enable performance counters at ipl 3 */
 #define X86_CR4_OSFXSR		0x0200	/* enable fast FPU save and restore */
 #define X86_CR4_OSXMMEXCPT	0x0400	/* enable unmasked SSE exceptions */
+#define X86_CR4_VMXE		0x2000  /* enable VMX */
 
 /*
  * Trap/fault mnemonics.
  */
-#define TRAP_divide_error     0
-#define TRAP_debug            1
-#define TRAP_nmi              2
-#define TRAP_int3             3
-#define TRAP_overflow         4
-#define TRAP_bounds           5
-#define TRAP_invalid_op       6
-#define TRAP_no_device        7
-#define TRAP_double_fault     8
-#define TRAP_copro_seg        9
-#define TRAP_invalid_tss     10
-#define TRAP_no_segment      11
-#define TRAP_stack_error     12
-#define TRAP_gp_fault        13
-#define TRAP_page_fault      14
-#define TRAP_spurious_int    15
-#define TRAP_copro_error     16
-#define TRAP_alignment_check 17
-#define TRAP_machine_check   18
-#define TRAP_simd_error      19
-#define TRAP_deferred_nmi    31
+#define TRAP_divide_error      0
+#define TRAP_debug             1
+#define TRAP_nmi               2
+#define TRAP_int3              3
+#define TRAP_overflow          4
+#define TRAP_bounds            5
+#define TRAP_invalid_op        6
+#define TRAP_no_device         7
+#define TRAP_double_fault      8
+#define TRAP_copro_seg         9
+#define TRAP_invalid_tss      10
+#define TRAP_no_segment       11
+#define TRAP_stack_error      12
+#define TRAP_gp_fault         13
+#define TRAP_page_fault       14
+#define TRAP_spurious_int     15
+#define TRAP_copro_error      16
+#define TRAP_alignment_check  17
+#define TRAP_machine_check    18
+#define TRAP_simd_error       19
+#define TRAP_deferred_nmi     31
+
+/* Set for entry via SYSCALL. Informs return code to use SYSRETQ not IRETQ. */
+#define TRAP_syscall         256 /* NB. Same as ECF_IN_SYSCALL */
 
 /*
  * Non-fatal fault/trap handlers return an error code to the caller. If the
@@ -119,23 +122,23 @@
 #define EXCRET_not_a_fault 1 /* It was a trap. No instruction replay needed. */
 #define EXCRET_fault_fixed 1 /* It was fault that we fixed: try a replay. */
 
-/*
- * 'trap_bounce' flags values.
- */
+/* 'trap_bounce' flags values */
 #define TBF_EXCEPTION          1
 #define TBF_EXCEPTION_ERRCODE  2
 #define TBF_EXCEPTION_CR2      4
 #define TBF_INTERRUPT          8
 #define TBF_FAILSAFE          16
 
-/*
- * thread.flags values.
- */
-#define TF_failsafe_return 1
+/* arch_exec_domain' flags values */
+#define _TF_failsafe_return    0
+#define _TF_kernel_mode        1
+#define TF_failsafe_return     (1<<_TF_failsafe_return)
+#define TF_kernel_mode         (1<<_TF_kernel_mode)
 
 #ifndef __ASSEMBLY__
 
 struct domain;
+struct exec_domain;
 
 /*
  * Default implementation of macro that returns current
@@ -375,67 +378,13 @@ struct tss_struct {
     u8  io_bitmap[IOBMP_BYTES+1];
     /* Pads the TSS to be cacheline-aligned (total size is 0x2080). */
     u8 __cacheline_filler[23];
-};
-
-struct trap_bounce {
-    unsigned long  error_code;
-    unsigned long  cr2;
-    unsigned short flags; /* TBF_ */
-    unsigned short cs;
-    unsigned long  eip;
-};
-
-struct thread_struct {
-    unsigned long      guestos_sp;
-    unsigned long      guestos_ss;
-
-    unsigned long      flags; /* TF_ */
-
-    /* Hardware debugging registers */
-    unsigned long      debugreg[8];  /* %%db0-7 debug registers */
-
-    /* floating point info */
-    struct i387_state  i387;
-
-    /* general user-visible register state */
-    execution_context_t user_ctxt;
-
-    void (*schedule_tail) (struct domain *);
-
-    /*
-     * Return vectors pushed to us by guest OS.
-     * The stack frame for events is exactly that of an x86 hardware interrupt.
-     * The stack frame for a failsafe callback is augmented with saved values
-     * for segment registers %ds, %es, %fs and %gs:
-     * 	%ds, %es, %fs, %gs, %eip, %cs, %eflags [, %oldesp, %oldss]
-     */
-    unsigned long event_selector;    /* 08: entry CS  */
-    unsigned long event_address;     /* 12: entry EIP */
-
-    unsigned long failsafe_selector; /* 16: entry CS  */
-    unsigned long failsafe_address;  /* 20: entry EIP */
-
-    /* Bounce information for propagating an exception to guest OS. */
-    struct trap_bounce trap_bounce;
-
-    /* I/O-port access bitmap. */
-    u64 io_bitmap_sel; /* Selector to tell us which part of the IO bitmap are
-                        * "interesting" (i.e. have clear bits) */
-    u8 *io_bitmap; /* Pointer to task's IO bitmap or NULL */
-
-    /* Trap info. */
-#ifdef __i386__
-    int                fast_trap_idx;
-    struct desc_struct fast_trap_desc;
-#endif
-    trap_info_t        traps[256];
-};
+} __cacheline_aligned PACKED;
 
 #define IDT_ENTRIES 256
-extern struct desc_struct idt_table[];
-extern struct desc_struct *idt_tables[];
+extern idt_entry_t idt_table[];
+extern idt_entry_t *idt_tables[];
 
-#if defined(__i386__)
+#ifdef ARCH_HAS_FAST_TRAP
 
 #define SET_DEFAULT_FAST_TRAP(_p) \
     (_p)->fast_trap_idx = 0x20;   \
@@ -446,92 +395,40 @@ extern struct desc_struct *idt_tables[];
     (memset(idt_tables[smp_processor_id()] + (_p)->fast_trap_idx, \
      0, 8))
 
-#ifdef XEN_DEBUGGER
-#define SET_FAST_TRAP(_p)   \
-    (pdb_initialized ? (void *) 0 : \
-       (memcpy(idt_tables[smp_processor_id()] + (_p)->fast_trap_idx, \
-               &((_p)->fast_trap_desc), 8)))
-#else
 #define SET_FAST_TRAP(_p)   \
     (memcpy(idt_tables[smp_processor_id()] + (_p)->fast_trap_idx, \
             &((_p)->fast_trap_desc), 8))
+
+long set_fast_trap(struct exec_domain *p, int idx);
+
+#else
+
+#define SET_DEFAULT_FAST_TRAP(_p) ((void)0)
+#define CLEAR_FAST_TRAP(_p)       ((void)0)
+#define SET_FAST_TRAP(_p)         ((void)0)
+#define set_fast_trap(_p, _i)     (0)
+
 #endif
-
-long set_fast_trap(struct domain *p, int idx);
-
-#endif
-
-#define INIT_THREAD { 0 }
 
 extern int gpf_emulate_4gb(struct xen_regs *regs);
 
-struct mm_struct {
-    /*
-     * Every domain has a L1 pagetable of its own. Per-domain mappings
-     * are put in this table (eg. the current GDT is mapped here).
-     */
-    l1_pgentry_t *perdomain_pt;
-    pagetable_t  pagetable;
+extern void write_ptbase(struct exec_domain *ed);
 
-    /* shadow mode status and controls */
-    unsigned int shadow_mode;  /* flags to control shadow table operation */
-    pagetable_t  shadow_table;
-    spinlock_t   shadow_lock;
-    unsigned int shadow_max_page_count; // currently unused
+#define SET_GDT_ENTRIES(_p, _e) \
+    ((*(u16 *)((_p)->arch.gdt + 0)) = (((_e)<<3)-1))
+#define SET_GDT_ADDRESS(_p, _a) \
+    ((*(unsigned long *)((_p)->arch.gdt + 2)) = (_a))
+#define GET_GDT_ENTRIES(_p)     \
+    (((*(u16 *)((_p)->arch.gdt + 0))+1)>>3)
+#define GET_GDT_ADDRESS(_p)     \
+    (*(unsigned long *)((_p)->arch.gdt + 2))
 
-    /* shadow hashtable */
-    struct shadow_status *shadow_ht;
-    struct shadow_status *shadow_ht_free;
-    struct shadow_status *shadow_ht_extras; /* extra allocation units */
-    unsigned int shadow_extras_count;
-
-    /* shadow dirty bitmap */
-    unsigned long *shadow_dirty_bitmap;
-    unsigned int shadow_dirty_bitmap_size;  /* in pages, bit per page */
-
-    /* shadow mode stats */
-    unsigned int shadow_page_count;     
-    unsigned int shadow_fault_count;     
-    unsigned int shadow_dirty_count;     
-    unsigned int shadow_dirty_net_count;     
-    unsigned int shadow_dirty_block_count;     
-
-    /* Current LDT details. */
-    unsigned long ldt_base, ldt_ents, shadow_ldt_mapcnt;
-    /* Next entry is passed to LGDT on domain switch. */
-    char gdt[10]; /* NB. 10 bytes needed for x86_64. Use 6 bytes for x86_32. */
-};
-
-static inline void write_ptbase(struct mm_struct *mm)
-{
-    unsigned long pa;
-
-    if ( unlikely(mm->shadow_mode) )
-        pa = pagetable_val(mm->shadow_table);
-    else
-        pa = pagetable_val(mm->pagetable);
-
-    write_cr3(pa);
-}
-
-#define IDLE0_MM                                                    \
-{                                                                   \
-    perdomain_pt: 0,                                                \
-    pagetable:   mk_pagetable(__pa(idle_pg_table))                  \
-}
-
-/* Convenient accessor for mm.gdt. */
-#define SET_GDT_ENTRIES(_p, _e) ((*(u16 *)((_p)->mm.gdt + 0)) = (((_e)<<3)-1))
-#define SET_GDT_ADDRESS(_p, _a) ((*(unsigned long *)((_p)->mm.gdt + 2)) = (_a))
-#define GET_GDT_ENTRIES(_p)     (((*(u16 *)((_p)->mm.gdt + 0))+1)>>3)
-#define GET_GDT_ADDRESS(_p)     (*(unsigned long *)((_p)->mm.gdt + 2))
-
-void destroy_gdt(struct domain *d);
-long set_gdt(struct domain *d, 
+void destroy_gdt(struct exec_domain *d);
+long set_gdt(struct exec_domain *d, 
              unsigned long *frames, 
              unsigned int entries);
 
-long set_debugreg(struct domain *p, int reg, unsigned long value);
+long set_debugreg(struct exec_domain *p, int reg, unsigned long value);
 
 struct microcode_header {
     unsigned int hdrver;
@@ -608,6 +505,7 @@ void show_guest_stack();
 void show_trace(unsigned long *esp);
 void show_stack(unsigned long *esp);
 void show_registers(struct xen_regs *regs);
+void show_page_walk(unsigned long addr);
 asmlinkage void fatal_trap(int trapnr, struct xen_regs *regs);
 
 #endif /* !__ASSEMBLY__ */

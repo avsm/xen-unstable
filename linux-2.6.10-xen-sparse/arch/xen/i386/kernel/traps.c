@@ -910,7 +910,7 @@ asmlinkage void math_state_restore(struct pt_regs regs)
 	if ((regs.xcs & 2) == 0)
 		return;
 
-	clts();		/* Allow maths ops (or we recurse) */
+	/* NB. 'clts' is done for us by Xen during virtual trap. */
 	if (!tsk->used_math)
 		init_fpu(tsk);
 	restore_fpu(tsk);
@@ -986,4 +986,16 @@ void __init trap_init(void)
 	 * Should be a barrier for any external CPU state.
 	 */
 	cpu_init();
+}
+
+int smp_trap_init(trap_info_t *trap_ctxt)
+{
+	trap_info_t *t = trap_table;
+
+	for (t = trap_table; t->address; t++) {
+		trap_ctxt[t->vector].flags = t->flags;
+		trap_ctxt[t->vector].cs = t->cs;
+		trap_ctxt[t->vector].address = t->address;
+	}
+	return SYSCALL_VECTOR;
 }
