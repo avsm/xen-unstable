@@ -168,13 +168,21 @@ static inline unsigned long __cmpxchg(volatile void *ptr, unsigned long old,
  * Some non intel clones support out of order store. wmb() ceases to be a
  * nop for these.
  */
- 
+#if defined(__i386__)
 #define mb() 	__asm__ __volatile__ ("lock; addl $0,0(%%esp)": : :"memory")
-#define rmb()	mb()
-
+#define rmb()	__asm__ __volatile__ ("lock; addl $0,0(%%esp)": : :"memory")
 #ifdef CONFIG_X86_OOSTORE
 #define wmb() 	__asm__ __volatile__ ("lock; addl $0,0(%%esp)": : :"memory")
-#else
+#endif
+#elif defined(__x86_64__)
+#define mb()    __asm__ __volatile__ ("mfence":::"memory")
+#define rmb()   __asm__ __volatile__ ("lfence":::"memory")
+#ifdef CONFIG_X86_OOSTORE
+#define wmb()   __asm__ __volatile__ ("sfence":::"memory")
+#endif
+#endif
+
+#ifndef CONFIG_X86_OOSTORE
 #define wmb()	__asm__ __volatile__ ("": : :"memory")
 #endif
 
@@ -221,26 +229,6 @@ static inline int local_irq_is_enabled(void)
     __save_flags(flags);
     return !!(flags & (1<<9)); /* EFLAGS_IF */
 }
-
-#ifdef CONFIG_SMP
-
-extern void __global_cli(void);
-extern void __global_sti(void);
-extern unsigned long __global_save_flags(void);
-extern void __global_restore_flags(unsigned long);
-#define cli() __global_cli()
-#define sti() __global_sti()
-#define save_flags(x) ((x)=__global_save_flags())
-#define restore_flags(x) __global_restore_flags(x)
-
-#else
-
-#define cli() __cli()
-#define sti() __sti()
-#define save_flags(x) __save_flags(x)
-#define restore_flags(x) __restore_flags(x)
-
-#endif
 
 /*
  * disable hlt during certain critical i/o operations

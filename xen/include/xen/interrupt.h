@@ -1,4 +1,3 @@
-/* interrupt.h */
 #ifndef _LINUX_INTERRUPT_H
 #define _LINUX_INTERRUPT_H
 
@@ -11,39 +10,24 @@
 #include <asm/atomic.h>
 #include <asm/ptrace.h>
 
-/* For 2.6.x compatibility */
-typedef void irqreturn_t;
-#define IRQ_NONE
-#define IRQ_HANDLED
-#define IRQ_RETVAL(x)
-
 struct irqaction {
-	void (*handler)(int, void *, struct pt_regs *);
-	unsigned long flags;
-	unsigned long mask;
-	const char *name;
-	void *dev_id;
-	struct irqaction *next;
-};
-
-enum {
-	TIMER_BH = 0,
-	SCSI_BH
+    void (*handler)(int, void *, struct pt_regs *);
+    unsigned long flags;
+    unsigned long mask;
+    const char *name;
+    void *dev_id;
+    struct irqaction *next;
 };
 
 #include <asm/hardirq.h>
 #include <asm/softirq.h>
 
-
 enum
 {
-	HI_SOFTIRQ=0,
-	NET_RX_SOFTIRQ,
-	AC_TIMER_SOFTIRQ,
-	TASKLET_SOFTIRQ,
-        BLKDEV_RESPONSE_SOFTIRQ,
-        NET_TX_SOFTIRQ,
-        NEW_TLBFLUSH_CLOCK_PERIOD_SOFTIRQ
+    HI_SOFTIRQ=0,
+    AC_TIMER_SOFTIRQ,
+    TASKLET_SOFTIRQ,
+    NEW_TLBFLUSH_CLOCK_PERIOD_SOFTIRQ
 };
 
 /* softirq mask and active fields moved to irq_cpustat_t in
@@ -52,8 +36,8 @@ enum
 
 struct softirq_action
 {
-	void	(*action)(struct softirq_action *);
-	void	*data;
+    void (*action)(struct softirq_action *);
+    void *data;
 };
 
 asmlinkage void do_softirq(void);
@@ -62,8 +46,6 @@ extern void softirq_init(void);
 #define __cpu_raise_softirq(cpu, nr) set_bit(nr, &softirq_pending(cpu))
 extern void FASTCALL(cpu_raise_softirq(unsigned int cpu, unsigned int nr));
 extern void FASTCALL(raise_softirq(unsigned int nr));
-
-
 
 /* Tasklets --- multithreaded analogue of BHs.
 
@@ -87,11 +69,11 @@ extern void FASTCALL(raise_softirq(unsigned int nr));
 
 struct tasklet_struct
 {
-	struct tasklet_struct *next;
-	unsigned long state;
-	atomic_t count;
-	void (*func)(unsigned long);
-	unsigned long data;
+    struct tasklet_struct *next;
+    unsigned long state;
+    atomic_t count;
+    void (*func)(unsigned long);
+    unsigned long data;
 };
 
 #define DECLARE_TASKLET(name, func, data) \
@@ -103,13 +85,13 @@ struct tasklet_struct name = { NULL, 0, ATOMIC_INIT(1), func, data }
 
 enum
 {
-	TASKLET_STATE_SCHED,	/* Tasklet is scheduled for execution */
-	TASKLET_STATE_RUN	/* Tasklet is running (SMP only) */
+    TASKLET_STATE_SCHED,	/* Tasklet is scheduled for execution */
+    TASKLET_STATE_RUN	/* Tasklet is running (SMP only) */
 };
 
 struct tasklet_head
 {
-	struct tasklet_struct *list;
+    struct tasklet_struct *list;
 } __attribute__ ((__aligned__(SMP_CACHE_BYTES)));
 
 extern struct tasklet_head tasklet_vec[NR_CPUS];
@@ -118,18 +100,18 @@ extern struct tasklet_head tasklet_hi_vec[NR_CPUS];
 #ifdef CONFIG_SMP
 static inline int tasklet_trylock(struct tasklet_struct *t)
 {
-	return !test_and_set_bit(TASKLET_STATE_RUN, &(t)->state);
+    return !test_and_set_bit(TASKLET_STATE_RUN, &(t)->state);
 }
 
 static inline void tasklet_unlock(struct tasklet_struct *t)
 {
-	smp_mb__before_clear_bit(); 
-	clear_bit(TASKLET_STATE_RUN, &(t)->state);
+    smp_mb__before_clear_bit(); 
+    clear_bit(TASKLET_STATE_RUN, &(t)->state);
 }
 
 static inline void tasklet_unlock_wait(struct tasklet_struct *t)
 {
-	while (test_bit(TASKLET_STATE_RUN, &(t)->state)) { barrier(); }
+    while (test_bit(TASKLET_STATE_RUN, &(t)->state)) { barrier(); }
 }
 #else
 #define tasklet_trylock(t) 1
@@ -141,116 +123,50 @@ extern void FASTCALL(__tasklet_schedule(struct tasklet_struct *t));
 
 static inline void tasklet_schedule(struct tasklet_struct *t)
 {
-	if (!test_and_set_bit(TASKLET_STATE_SCHED, &t->state))
-		__tasklet_schedule(t);
+    if (!test_and_set_bit(TASKLET_STATE_SCHED, &t->state))
+        __tasklet_schedule(t);
 }
 
 extern void FASTCALL(__tasklet_hi_schedule(struct tasklet_struct *t));
 
 static inline void tasklet_hi_schedule(struct tasklet_struct *t)
 {
-	if (!test_and_set_bit(TASKLET_STATE_SCHED, &t->state))
-		__tasklet_hi_schedule(t);
+    if (!test_and_set_bit(TASKLET_STATE_SCHED, &t->state))
+        __tasklet_hi_schedule(t);
 }
 
 
 static inline void tasklet_disable_nosync(struct tasklet_struct *t)
 {
-	atomic_inc(&t->count);
-	smp_mb__after_atomic_inc();
+    atomic_inc(&t->count);
+    smp_mb__after_atomic_inc();
 }
 
 static inline void tasklet_disable(struct tasklet_struct *t)
 {
-	tasklet_disable_nosync(t);
-	tasklet_unlock_wait(t);
-	smp_mb();
+    tasklet_disable_nosync(t);
+    tasklet_unlock_wait(t);
+    smp_mb();
 }
 
 static inline void tasklet_enable(struct tasklet_struct *t)
 {
-	smp_mb__before_atomic_dec();
-	if (atomic_dec_and_test(&t->count) &&
-	    test_bit(TASKLET_STATE_SCHED, &t->state))
-		__tasklet_schedule(t);
+    smp_mb__before_atomic_dec();
+    if (atomic_dec_and_test(&t->count) &&
+        test_bit(TASKLET_STATE_SCHED, &t->state))
+        __tasklet_schedule(t);
 }
 
 static inline void tasklet_hi_enable(struct tasklet_struct *t)
 {
-	smp_mb__before_atomic_dec();
-	if (atomic_dec_and_test(&t->count) &&
-	    test_bit(TASKLET_STATE_SCHED, &t->state))
-		__tasklet_hi_schedule(t);
+    smp_mb__before_atomic_dec();
+    if (atomic_dec_and_test(&t->count) &&
+        test_bit(TASKLET_STATE_SCHED, &t->state))
+        __tasklet_hi_schedule(t);
 }
 
 extern void tasklet_kill(struct tasklet_struct *t);
 extern void tasklet_init(struct tasklet_struct *t,
 			 void (*func)(unsigned long), unsigned long data);
-
-#ifdef CONFIG_SMP
-
-#define SMP_TIMER_NAME(name) name##__thr
-
-#define SMP_TIMER_DEFINE(name, task) \
-DECLARE_TASKLET(task, name##__thr, 0); \
-static void name (unsigned long dummy) \
-{ \
-	tasklet_schedule(&(task)); \
-}
-
-#else /* CONFIG_SMP */
-
-#define SMP_TIMER_NAME(name) name
-#define SMP_TIMER_DEFINE(name, task)
-
-#endif /* CONFIG_SMP */
-
-
-/* Old BH definitions */
-
-extern struct tasklet_struct bh_task_vec[];
-
-/* It is exported _ONLY_ for wait_on_irq(). */
-extern spinlock_t global_bh_lock;
-
-static inline void mark_bh(int nr)
-{
-	tasklet_hi_schedule(bh_task_vec+nr);
-}
-
-extern void init_bh(int nr, void (*routine)(void));
-extern void remove_bh(int nr);
-
-
-/*
- * Autoprobing for irqs:
- *
- * probe_irq_on() and probe_irq_off() provide robust primitives
- * for accurate IRQ probing during kernel initialization.  They are
- * reasonably simple to use, are not "fooled" by spurious interrupts,
- * and, unlike other attempts at IRQ probing, they do not get hung on
- * stuck interrupts (such as unused PS2 mouse interfaces on ASUS boards).
- *
- * For reasonably foolproof probing, use them as follows:
- *
- * 1. clear and/or mask the device's internal interrupt.
- * 2. sti();
- * 3. irqs = probe_irq_on();      // "take over" all unassigned idle IRQs
- * 4. enable the device and cause it to trigger an interrupt.
- * 5. wait for the device to interrupt, using non-intrusive polling or a delay.
- * 6. irq = probe_irq_off(irqs);  // get IRQ number, 0=none, negative=multiple
- * 7. service the device to clear its pending interrupt.
- * 8. loop again if paranoia is required.
- *
- * probe_irq_on() returns a mask of allocated irq's.
- *
- * probe_irq_off() takes the mask as a parameter,
- * and returns the irq number which occurred,
- * or zero if none occurred, or a negative irq number
- * if more than one irq occurred.
- */
-extern unsigned long probe_irq_on(void);	/* returns 0 on failure */
-extern int probe_irq_off(unsigned long);	/* returns 0 or negative on failure */
-extern unsigned int probe_irq_mask(unsigned long);	/* returns mask of ISA interrupts */
 
 #endif

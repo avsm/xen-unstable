@@ -214,8 +214,8 @@ void __init init_frametable(unsigned long nr_pages)
        This costs 4MB -- may want to fix some day */
 
     /* Pin the ownership of the MP table so that DOM0 can map it later. */
-    for ( mfn = virt_to_phys((void *)RDWR_MPT_VIRT_START)>>PAGE_SHIFT;
-          mfn < virt_to_phys((void *)RDWR_MPT_VIRT_END)>>PAGE_SHIFT;
+    for ( mfn = virt_to_phys(&machine_to_phys_mapping[0])>>PAGE_SHIFT;
+          mfn < virt_to_phys(&machine_to_phys_mapping[1024*1024])>>PAGE_SHIFT;
           mfn++ )
     {
         frame_table[mfn].count_and_flags = 1 | PGC_allocated;
@@ -1327,9 +1327,9 @@ void audit_page(unsigned long pfn)
 {
     unsigned long     i;
 
-    cli();
+    __cli();
     __audit_page(pfn);
-    sti();
+    __sti();
     /* add pfn to last_pages cache if is not already present */
     for ( i = 0; i < LASTPAGES_SIZE; i++ )
         if ( last_pages[i] == pfn )
@@ -1371,7 +1371,7 @@ void audit_all_pages(u_char key, void *dev_id, struct pt_regs *regs)
 
     printk("audit_all_pages\n");
 
-    cli();
+    __cli();
     
     /* walk the frame table */
     for ( i = 0; i < max_page; i++ )
@@ -1432,7 +1432,7 @@ void audit_all_pages(u_char key, void *dev_id, struct pt_regs *regs)
             }
         } /* ref count error */
     }
-    sti();
+    __sti();
     
 }
 
