@@ -207,7 +207,7 @@ static void end_block_io_op(struct buffer_head *bh, int uptodate)
     if ( !uptodate )
     {
         DPRINTK("Buffer not up-to-date at end of operation\n");
-        pending_req->status = 1;
+        pending_req->status = 2;
     }
 
     unlock_buffer(pending_req->domain, 
@@ -563,7 +563,10 @@ static void dispatch_rw_block_io(struct task_struct *p, int index)
         }
 
         if ( !__buffer_is_valid(p, buffer, nr_sects<<9, (operation==READ)) )
+	{
+            DPRINTK("invalid buffer\n");
             goto bad_descriptor;
+	}
 
         /* Get the physical device and block index. */
         if ( (req->device & XENDEV_TYPE_MASK) == XENDEV_VIRTUAL )
@@ -573,7 +576,11 @@ static void dispatch_rw_block_io(struct task_struct *p, int index)
                 req->device, 
                 req->sector_number + tot_sects,
                 buffer, nr_sects);
-            if ( new_segs <= 0 ) goto bad_descriptor;
+            if ( new_segs <= 0 ) 
+	    {
+	        DPRINTK("bogus xen_segment_map_request\n");
+		goto bad_descriptor;
+	    }
         }
         else
         {
@@ -581,7 +588,11 @@ static void dispatch_rw_block_io(struct task_struct *p, int index)
             phys_seg[nr_psegs].sector_number = req->sector_number + tot_sects;
             phys_seg[nr_psegs].buffer        = buffer;
             phys_seg[nr_psegs].nr_sects      = nr_sects;
-            if ( phys_seg[nr_psegs].dev == 0 ) goto bad_descriptor;
+            if ( phys_seg[nr_psegs].dev == 0 ) 
+	    {
+	        DPRINTK("bad device\n");
+	        goto bad_descriptor;
+	    }
             new_segs = 1;
         }
         
@@ -669,6 +680,7 @@ kdev_t xendev_to_physdev(unsigned short xendev)
         }
         return scsi_devs[xendev];
         
+    case XENDEV_VIRTUAL:
     default:
         DPRINTK("xendev_to_physdev: unknown device %d\n", xendev);
     }
@@ -734,7 +746,6 @@ void init_blkdev_info(struct task_struct *p)
     p->blkdev_list.next = NULL;
 
     memset(p->segment_list, 0, sizeof(p->segment_list));
-    p->segment_count = 0;
 
     /* Get any previously created segments. */
     xen_refresh_segment_list(p);
@@ -780,5 +791,5 @@ void initialize_block_io ()
 
     xen_segment_initialize();
     
-    add_key_handler('b', dump_blockq, "dump xen ide blkdev stats");     
+    add_key_handler('b', dump_blockq, "dump xen ide blkdev statistics");
 }
