@@ -91,9 +91,12 @@
 40431ac64Hj4ixUnKmlugZKhXPFE_Q tools/xend/Makefile
 40431ac8wrUEj-XM7B8smFtx_HA7lQ tools/xend/xend_utils.c
 403a3edbrr8RE34gkbR40zep98SXbg tools/xentrace/Makefile
+4050c413PhhLNAYk3TEwP37i_iLw9Q tools/xentrace/xentrace.8
 403a3edbVpV2E_wq1zeEkJ_n4Uu2eg tools/xentrace/xentrace.c
-403a3edb0lzD0Fojc-NYNoXr3SYrnA tools/xentrace/xentrace_cpusplit.py
-403a3edblCUrzSj0mmKhO5HOPrOrSQ tools/xentrace/xentrace_format.py
+403a3edb0lzD0Fojc-NYNoXr3SYrnA tools/xentrace/xentrace_cpusplit
+4050c413BnzzZZlZRI1ai6oFXOsHLQ tools/xentrace/xentrace_cpusplit.1
+403a3edblCUrzSj0mmKhO5HOPrOrSQ tools/xentrace/xentrace_format
+4050c413NtuyIq5lsYJV4P7KIjujXw tools/xentrace/xentrace_format.1
 3f72f1bdJPsV3JCnBqs9ddL9tr6D2g xen/COPYING
 3ddb79bcbOVHh38VJzc97-JEGD4dJQ xen/Makefile
 3ddb79bcWnTwYsQRWl_PaneJfa6p0w xen/Rules.mk
@@ -659,7 +662,6 @@
 3e5a4e68TJJavrunYwTAnLRSBxSYqQ xenolinux-2.4.25-sparse/kernel/panic.c
 3f9d4b44247udoqWEgFkaHiWv6Uvyg xenolinux-2.4.25-sparse/kernel/time.c
 401c059bjLBFYHRD4Py2uM3eA1D4zQ xenolinux-2.4.25-sparse/kernel/timer.c
-3eba8f878XjouY21EkQBXwYBsPsipQ xenolinux-2.4.25-sparse/lndir-rel
 3e6e7c1efbQe93xCvOpOVCnXTMmQ5w xenolinux-2.4.25-sparse/mkbuildtree
 3e5a4e68GxCIaFH4sy01v1wjapetaA xenolinux-2.4.25-sparse/mm/memory.c
 3f108af5VxPkLv13tXpXgoRKALQtXQ xenolinux-2.4.25-sparse/mm/mprotect.c
