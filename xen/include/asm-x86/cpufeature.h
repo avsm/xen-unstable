@@ -8,7 +8,7 @@
 #define __ASM_X86_CPUFEATURE_H
 
 /* Sample usage: CPU_FEATURE_P(cpu.x86_capability, FPU) */
-#define CPU_FEATURE_P(CAP, FEATURE) test_bit(CAP, X86_FEATURE_##FEATURE ##_BIT)
+#define CPU_FEATURE_P(CAP, FEATURE) test_bit(CAP, X86_FEATURE_##FEATURE)
 
 #define NCAPINTS	6	/* Currently we have 6 32-bit words worth of info */
 
@@ -71,6 +71,8 @@
 #define X86_FEATURE_P4		(3*32+ 7) /* P4 */
 
 /* Intel-defined CPU features, CPUID level 0x00000001 (ecx), word 4 */
+#define X86_FEATURE_MWAIT	(4*32+ 3) /* Monitor/Mwait support */
+#define X86_FEATURE_VMXE	(4*32+ 5) /* Virtual Machine Extensions */
 #define X86_FEATURE_EST		(4*32+ 7) /* Enhanced SpeedStep */
 
 /* VIA/Cyrix/Centaur-defined CPU features, CPUID level 0xC0000001, word 5 */

@@ -32,7 +32,7 @@ CFLAGS   += -Wall -Werror -O3 -fno-strict-aliasing
 CFLAGS   += -Wp,-MD,.$(@F).d
 DEPS     = .*.d
 
-MAJOR    := 2.0
+MAJOR    := 3.0
 MINOR    := 0
 LIB_NAME := libxutil
 SO_NAME  := $(LIB_NAME).so.$(MAJOR)
