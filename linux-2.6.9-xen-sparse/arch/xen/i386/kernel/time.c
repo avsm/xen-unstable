@@ -401,8 +401,12 @@ static inline void do_timer_interrupt(int irq, void *dev_id,
 		delta -= NS_PER_TICK;
 		processed_system_time += NS_PER_TICK;
 		do_timer(regs);
+#ifdef CONFIG_SMP
 		if (regs)
-		    profile_tick(CPU_PROFILING, regs);
+			update_process_times(user_mode(regs));
+#endif
+		if (regs)
+			profile_tick(CPU_PROFILING, regs);
 	}
 
 	/*
@@ -656,15 +660,27 @@ int set_timeout_timer(void)
 {
 	u64 alarm = 0;
 	int ret = 0;
+#ifdef CONFIG_SMP
+	unsigned long seq;
+#endif
 
 	/*
 	 * This is safe against long blocking (since calculations are
 	 * not based on TSC deltas). It is also safe against warped
 	 * system time since suspend-resume is cooperative and we
-	 * would first get locked out. It is safe against normal
-	 * updates of jiffies since interrupts are off.
+	 * would first get locked out.
 	 */
+#ifdef CONFIG_SMP
+	do {
+		seq = read_seqbegin(&xtime_lock);
+		if (smp_processor_id())
+			alarm = __jiffies_to_st(jiffies + 1);
+		else
+			alarm = __jiffies_to_st(jiffies + 1);
+	} while (read_seqretry(&xtime_lock, seq));
+#else
 	alarm = __jiffies_to_st(next_timer_interrupt());
+#endif
 
 	/* Failure is pretty bad, but we'd best soldier on. */
 	if ( HYPERVISOR_set_timer_op(alarm) != 0 )
@@ -696,6 +712,50 @@ void time_resume(void)
 	/* Make sure we resync UTC time with Xen on next timer interrupt. */
 	last_update_from_xen = 0;
 }
+
+#ifdef CONFIG_SMP
+#define xxprint(msg) HYPERVISOR_console_io(CONSOLEIO_write, strlen(msg), msg)
+
+static irqreturn_t local_timer_interrupt(int irq, void *dev_id,
+					 struct pt_regs *regs)
+{
+#if 0
+	static int xxx = 0;
+	if ((xxx++ % 2000) == 0)
+		printk("local_timer_interrupt %d\n", xxx);
+#endif
+
+	/*
+	 * update_process_times() expects us to have done irq_enter().
+	 * Besides, if we don't timer interrupts ignore the global
+	 * interrupt lock, which is the WrongThing (tm) to do.
+	 */
+	// irq_enter();
+	/* XXX add processed_system_time loop thingy */
+	// if (regs)
+	//	update_process_times(user_mode(regs));
+	// irq_exit();
+	if (smp_processor_id() == 0) {
+	    xxprint("bug bug\n");
+	    BUG();
+	}
+
+	return IRQ_HANDLED;
+}
+
+static struct irqaction local_irq_timer = {
+	local_timer_interrupt, SA_INTERRUPT, CPU_MASK_NONE, "ltimer",
+	NULL, NULL
+};
+
+void local_setup_timer(void)
+{
+	int time_irq;
+
+	time_irq = bind_virq_to_irq(VIRQ_TIMER);
+	(void)setup_irq(time_irq, &local_irq_timer);
+}
+#endif
 
 /*
  * /proc/sys/xen: This really belongs in another file. It can stay here for
