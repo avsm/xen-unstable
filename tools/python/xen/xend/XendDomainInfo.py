@@ -20,6 +20,7 @@ from twisted.internet import defer
 import xen.lowlevel.xc; xc = xen.lowlevel.xc.new()
 import xen.util.ip
 from xen.util.ip import _readline, _readlines
+from xen.xend.server import channel
 
 import sxp
 
@@ -319,6 +320,8 @@ class XendDomainInfo:
         self.restart_time = None
         self.console_port = None
         self.savedinfo = None
+        self.is_vmx = 0
+        self.vcpus = 1
 
     def setdom(self, dom):
         """Set the domain id.
@@ -446,6 +449,11 @@ class XendDomainInfo:
             cpu = sxp.child_value(config, 'cpu')
             if self.recreate and self.dom and cpu is not None:
                 xc.domain_pincpu(self.dom, int(cpu))
+            try:
+                image = sxp.child_value(self.config, 'image')
+                self.vcpus = int(sxp.child_value(image, 'vcpus'))
+            except:
+                raise VmError('invalid vcpus value')
 
             self.init_domain()
             self.configure_console()
@@ -650,6 +658,7 @@ class XendDomainInfo:
         """
         self.release_vifs()
         self.release_vbds()
+        self.release_usbifs()
         
         self.devices = {}
         self.device_index = {}
@@ -672,6 +681,15 @@ class XendDomainInfo:
         ctrl = xend.blkif_get(self.dom)
         if ctrl:
             log.debug("Destroying vbds for domain %d", self.dom)
+            ctrl.destroy()
+
+    def release_usbifs(self):
+        """Release vm virtual USB devices (usbifs).
+        """
+        if self.dom is None: return
+        ctrl = xend.usbif_get(self.dom)
+        if ctrl:
+            log.debug("Destroying usbifs for domain %d", self.dom)
             ctrl.destroy()
 
     def show(self):
@@ -720,7 +738,7 @@ class XendDomainInfo:
         log.debug('init_domain> Created domain=%d name=%s memory=%d', dom, name, memory)
         self.setdom(dom)
 
-    def build_domain(self, ostype, kernel, ramdisk, cmdline):
+    def build_domain(self, ostype, kernel, ramdisk, cmdline, memmap):
         """Build the domain boot image.
         """
         if self.recreate or self.restore: return
@@ -735,17 +753,28 @@ class XendDomainInfo:
         flags = 0
         if self.netif_backend: flags |= SIF_NET_BE_DOMAIN
         if self.blkif_backend: flags |= SIF_BLK_BE_DOMAIN
-        err = buildfn(dom            = dom,
-                      image          = kernel,
-                      control_evtchn = self.console.getRemotePort(),
-                      cmdline        = cmdline,
-                      ramdisk        = ramdisk,
-                      flags          = flags)
+	if ostype == "vmx":
+        	err = buildfn(dom      = dom,
+               	      	image          = kernel,
+                      	control_evtchn = 0,
+			memmap	       = memmap,
+                      	cmdline        = cmdline,
+                      	ramdisk        = ramdisk,
+                      	flags          = flags)
+	else:
+        	log.warning('building dom with %d vcpus', self.vcpus)
+        	err = buildfn(dom            = dom,
+               	      	image          = kernel,
+                      	control_evtchn = self.console.getRemotePort(),
+                      	cmdline        = cmdline,
+                      	ramdisk        = ramdisk,
+                      	flags          = flags,
+                      	vcpus          = self.vcpus)
         if err != 0:
             raise VmError('Building domain failed: type=%s dom=%d err=%d'
                           % (ostype, dom, err))
 
-    def create_domain(self, ostype, kernel, ramdisk, cmdline):
+    def create_domain(self, ostype, kernel, ramdisk, cmdline, memmap=''):
         """Create a domain. Builds the image but does not configure it.
 
         @param ostype:  OS type
@@ -760,7 +789,7 @@ class XendDomainInfo:
         else:
             self.console = xendConsole.console_create(
                 self.dom, console_port=self.console_port)
-        self.build_domain(ostype, kernel, ramdisk, cmdline)
+        self.build_domain(ostype, kernel, ramdisk, cmdline, memmap)
         self.image = kernel
         self.ramdisk = ramdisk
         self.cmdline = cmdline
@@ -804,6 +833,18 @@ class XendDomainInfo:
             index[dev_name] = dev_index + 1
         deferred = defer.DeferredList(dlist, fireOnOneErrback=1)
         deferred.addErrback(dlist_err)
+        if self.is_vmx:
+            device_model = sxp.child_value(self.config, 'device_model')
+            device_config = sxp.child_value(self.config, 'device_config')
+            memory = sxp.child_value(self.config, "memory")
+            # Create an event channel
+            device_channel = channel.eventChannel(0, self.dom)
+            # Fork and exec device_model -f device_config <port>
+            os.system(device_model
+                      + " -f %s" % device_config
+                      + " -d %d" % self.dom
+                      + " -p %d" % device_channel['port1']
+                      + " -m %s &" % memory)
         return deferred
 
     def device_create(self, dev_config):
@@ -963,6 +1004,8 @@ class XendDomainInfo:
                 self.blkif_backend = 1
             elif name == 'netif':
                 self.netif_backend = 1
+            elif name == 'usbif':
+                self.usbif_backend = 1
             else:
                 raise VmError('invalid backend type:' + str(name))
 
@@ -1091,7 +1134,33 @@ def vm_image_plan9(vm, image):
     vm.create_domain("plan9", kernel, ramdisk, cmdline)
     return vm
     
-    
+def vm_image_vmx(vm, image):
+    """Create a VM for the VMX environment.
+
+    @param name:      vm name
+    @param memory:    vm memory
+    @param image:     image config
+    @return: vm
+    """
+    kernel = sxp.child_value(image, "kernel")
+    cmdline = ""
+    ip = sxp.child_value(image, "ip", "dhcp")
+    if ip:
+        cmdline += " ip=" + ip
+    root = sxp.child_value(image, "root")
+    if root:
+        cmdline += " root=" + root
+    args = sxp.child_value(image, "args")
+    if args:
+        cmdline += " " + args
+    ramdisk = sxp.child_value(image, "ramdisk", '')
+    memmap = sxp.child_value(vm.config, "memmap", '')
+    memmap = sxp.parse(open(memmap))[0]
+    from xen.util.memmap import memmap_parse
+    memmap = memmap_parse(memmap)
+    vm.create_domain("vmx", kernel, ramdisk, cmdline, memmap)
+    vm.is_vmx = 1
+    return vm
 
 def vm_dev_vif(vm, val, index, change=0):
     """Create a virtual network interface (vif).
@@ -1114,6 +1183,23 @@ def vm_dev_vif(vm, val, index, change=0):
         if change:
             dev.interfaceChanged()
         return dev
+    defer.addCallback(cbok)
+    return defer
+
+def vm_dev_usb(vm, val, index):
+    """Attach the relevant physical ports to the domains' USB interface.
+
+    @param vm:    virtual machine
+    @param val:   USB interface config
+    @param index: USB interface index
+    @return: deferred
+    """
+    ctrl = xend.usbif_create(vm.dom, recreate=vm.recreate)
+    log.debug("Creating USB interface dom=%d", vm.dom)
+    defer = ctrl.attachDevice(val, recreate=vm.recreate)
+    def cbok(path):
+        vm.add_device('usb', val[1][1])
+        return path
     defer.addCallback(cbok)
     return defer
 
@@ -1215,11 +1301,13 @@ def vm_field_maxmem(vm, config, val, index):
 # Register image handlers.
 add_image_handler('linux',  vm_image_linux)
 add_image_handler('plan9',  vm_image_plan9)
+add_image_handler('vmx',  vm_image_vmx)
 
 # Register device handlers.
 add_device_handler('vif',  vm_dev_vif)
 add_device_handler('vbd',  vm_dev_vbd)
 add_device_handler('pci',  vm_dev_pci)
+add_device_handler('usb',  vm_dev_usb)
 
 # Ignore the fields we already handle.
 add_config_handler('name',       vm_field_ignore)
@@ -1230,6 +1318,7 @@ add_config_handler('console',    vm_field_ignore)
 add_config_handler('image',      vm_field_ignore)
 add_config_handler('device',     vm_field_ignore)
 add_config_handler('backend',    vm_field_ignore)
+add_config_handler('vcpus',      vm_field_ignore)
 
 # Register other config handlers.
 add_config_handler('maxmem',     vm_field_maxmem)
