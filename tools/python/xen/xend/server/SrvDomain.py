@@ -151,6 +151,13 @@ class SrvDomain(SrvDir):
         val = fn(req.args, {'dom': self.dom.id})
         return val
 
+    def op_maxmem_set(self, op, req):
+        fn = FormFn(self.xd.domain_maxmem_set,
+                    [['dom', 'int'],
+                     ['memory', 'int']])
+        val = fn(req.args, {'dom': self.dom.id})
+        return val
+
     def op_vifs(self, op, req):
         return self.xd.domain_vif_ls(self.dom.id)
 
@@ -204,7 +211,7 @@ class SrvDomain(SrvDir):
             req.write('<p>%s</p>' % self.dom)
             if self.dom.console:
                 cinfo = self.dom.console
-                cid = cinfo.id
+                cid = str(cinfo.console_port)
                 #todo: Local xref: need to know server prefix.
                 req.write('<p><a href="/xend/console/%s">Console %s</a></p>'
                           % (cid, cid))

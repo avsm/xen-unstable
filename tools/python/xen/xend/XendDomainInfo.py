@@ -13,6 +13,7 @@ import types
 import re
 import sys
 import os
+import time
 
 from twisted.internet import defer
 #defer.Deferred.debug = 1
@@ -25,6 +26,7 @@ import sxp
 
 import XendConsole
 xendConsole = XendConsole.instance()
+from XendLogging import log
 
 import server.SrvDaemon
 xend = server.SrvDaemon.instance()
@@ -59,6 +61,12 @@ restart_modes = [
     RESTART_ONREBOOT,
     RESTART_NEVER,
     ]
+
+STATE_RESTART_PENDING = 'pending'
+STATE_RESTART_BOOTING = 'booting'
+
+STATE_VM_OK         = "ok"
+STATE_VM_TERMINATED = "terminated"
 
 def shutdown_reason(code):
     """Get a shutdown reason from a code.
@@ -99,7 +107,7 @@ def lookup_raw_partn(name):
     if line:
 	return [ { 'device' : blkdev_name_to_number(p),
 		   'start_sector' : long(0),
-		   'nr_sectors' : long(line) * 2,
+		   'nr_sectors' : long(1L<<63),
 		   'type' : 'Disk' } ]
     else:
 	# see if this is a hex device number
@@ -252,19 +260,34 @@ def vm_create(config):
     vm = XendDomainInfo()
     return vm.construct(config)
 
-def vm_recreate(config, info):
+def vm_recreate(savedinfo, info):
     """Create the VM object for an existing domain.
+
+    @param savedinfo: saved info from the domain DB
+    @type  savedinfo: sxpr
+    @param info:      domain info from xc
+    @type  info:      xc domain dict
+    @return: deferred
     """
     vm = XendDomainInfo()
     vm.recreate = 1
     vm.setdom(info['dom'])
     vm.name = info['name']
     vm.memory = info['mem_kb']/1024
+    start_time = sxp.child_value(savedinfo, 'start_time')
+    if start_time is not None:
+        vm.start_time = float(start_time)
+    vm.restart_state = sxp.child_value(savedinfo, 'restart_state')
+    restart_time = sxp.child_value(savedinfo, 'restart_time')
+    if restart_time is not None:
+        vm.restart_time = float(restart_time)
+    config = sxp.child_value(savedinfo, 'config')
     if config:
         d = vm.construct(config)
     else:
         d = defer.Deferred()
         d.callback(vm)
+    vm.recreate = 0
     return d
 
 def vm_restore(src, progress=0):
@@ -323,14 +346,16 @@ def _vm_configure2(val, vm):
 class XendDomainInfo:
     """Virtual machine object."""
 
-    STATE_OK = "ok"
-    STATE_TERMINATED = "terminated"
+    """Minimum time between domain restarts in seconds.
+    """
+    MINIMUM_RESTART_TIME = 10
 
     def __init__(self):
         self.recreate = 0
         self.config = None
         self.id = None
         self.dom = None
+        self.start_time = None
         self.name = None
         self.memory = None
         self.image = None
@@ -344,17 +369,18 @@ class XendDomainInfo:
         self.blkif_backend = 0
         self.netif_backend = 0
         #todo: state: running, suspended
-        self.state = self.STATE_OK
+        self.state = STATE_VM_OK
         #todo: set to migrate info if migrating
         self.migrate = None
-        #Whether to auto-restart
         self.restart_mode = RESTART_ONREBOOT
+        self.restart_state = None
+        self.restart_time = None
         self.console_port = None
 
     def setdom(self, dom):
         self.dom = int(dom)
         self.id = str(dom)
-        
+    
     def update(self, info):
         """Update with  info from xc.domain_getinfo().
         """
@@ -367,7 +393,7 @@ class XendDomainInfo:
         s += " name=" + self.name
         s += " memory=" + str(self.memory)
         if self.console:
-            s += " console=" + self.console.id
+            s += " console=" + str(self.console.console_port)
         if self.image:
             s += " image=" + self.image
         s += ""
@@ -380,21 +406,33 @@ class XendDomainInfo:
                 ['id', self.id],
                 ['name', self.name],
                 ['memory', self.memory] ]
+
         if self.info:
-            run   = (self.info['running'] and 'r') or '-'
-            block = (self.info['blocked'] and 'b') or '-'
-            stop  = (self.info['paused']  and 'p') or '-'
-            susp  = (self.info['shutdown'] and 's') or '-'
-            crash = (self.info['crashed'] and 'c') or '-'
-            state = run + block + stop + susp + crash
+            sxpr.append(['maxmem', self.info['maxmem_kb']/1024 ])
+            run   = (self.info['running']  and 'r') or '-'
+            block = (self.info['blocked']  and 'b') or '-'
+            pause = (self.info['paused']   and 'p') or '-'
+            shut  = (self.info['shutdown'] and 's') or '-'
+            crash = (self.info['crashed']  and 'c') or '-'
+            state = run + block + pause + shut + crash
             sxpr.append(['state', state])
             if self.info['shutdown']:
                 reason = shutdown_reason(self.info['shutdown_reason'])
                 sxpr.append(['shutdown_reason', reason])
             sxpr.append(['cpu', self.info['cpu']])
-            sxpr.append(['cpu_time', self.info['cpu_time']/1e9])
+            sxpr.append(['cpu_time', self.info['cpu_time']/1e9])    
+            
+        if self.start_time:
+            up_time =  time.time() - self.start_time  
+            sxpr.append(['up_time', str(up_time) ])
+            sxpr.append(['start_time', str(self.start_time) ])
+
         if self.console:
             sxpr.append(self.console.sxpr())
+        if self.restart_state:
+            sxpr.append(['restart_state', self.restart_state])
+        if self.restart_time:
+            sxpr.append(['restart_time', str(self.restart_time)])
         if self.config:
             sxpr.append(['config', self.config])
         return sxpr
@@ -409,6 +447,7 @@ class XendDomainInfo:
             self.memory = int(sxp.child_value(config, 'memory'))
             if self.memory is None:
                 raise VmError('missing memory size')
+
             self.configure_console()
             self.configure_restart()
             self.configure_backends()
@@ -515,21 +554,27 @@ class XendDomainInfo:
         devices have been released.
         """
         if self.dom is None: return 0
+        if self.console:
+            if self.restart_pending():
+                self.console.deregisterChannel()
+            else:
+                self.console.close()
         chan = xend.getDomChannel(self.dom)
         if chan:
+            log.debug("Closing channel to domain %d", self.dom)
             chan.close()
         return xc.domain_destroy(dom=self.dom)
 
     def cleanup(self):
         """Cleanup vm resources: release devices.
         """
-        self.state = self.STATE_TERMINATED
+        self.state = STATE_VM_TERMINATED
         self.release_devices()
 
     def is_terminated(self):
         """Check if a domain has been terminated.
         """
-        return self.state == self.STATE_TERMINATED
+        return self.state == STATE_VM_TERMINATED
 
     def release_devices(self):
         """Release all vm devices.
@@ -544,6 +589,7 @@ class XendDomainInfo:
         if self.dom is None: return
         ctrl = xend.netif_get(self.dom)
         if ctrl:
+            log.debug("Destroying vifs for domain %d", self.dom)
             ctrl.destroy()
 
     def release_vbds(self):
@@ -552,6 +598,7 @@ class XendDomainInfo:
         if self.dom is None: return
         ctrl = xend.blkif_get(self.dom)
         if ctrl:
+            log.debug("Destroying vbds for domain %d", self.dom)
             ctrl.destroy()
 
     def show(self):
@@ -579,28 +626,31 @@ class XendDomainInfo:
         memory = self.memory
         name = self.name
         cpu = int(sxp.child_value(self.config, 'cpu', '-1'))
-        #print 'init_domain>', memory, name, cpu
-        dom = xc.domain_create(mem_kb= memory * 1024, name= name, cpu= cpu)
+        dom = self.dom or 0
+        dom = xc.domain_create(dom= dom, mem_kb= memory * 1024, name= name, cpu= cpu)
         if dom <= 0:
             raise VmError('Creating domain failed: name=%s memory=%d'
                           % (name, memory))
+        log.debug('init_domain> Created domain=%d name=%s memory=%d', dom, name, memory)
         self.setdom(dom)
+
+        if self.start_time is None:
+            self.start_time = time.time()
 
     def build_domain(self, ostype, kernel, ramdisk, cmdline, vifs_n):
         """Build the domain boot image.
         """
         if self.recreate: return
         if len(cmdline) >= 256:
-            print 'Warning: kernel cmdline too long'
+            log.warning('kernel cmdline too long, domain %d', self.dom)
         dom = self.dom
         buildfn = getattr(xc, '%s_build' % ostype)
-        #print 'build_domain>', ostype, dom, kernel, cmdline, ramdisk
         flags = 0
         if self.netif_backend: flags |= SIF_NET_BE_DOMAIN
         if self.blkif_backend: flags |= SIF_BLK_BE_DOMAIN
         err = buildfn(dom            = dom,
                       image          = kernel,
-                      control_evtchn = self.console.port2,
+                      control_evtchn = self.console.getRemotePort(),
                       cmdline        = cmdline,
                       ramdisk        = ramdisk,
                       flags          = flags)
@@ -623,7 +673,10 @@ class XendDomainInfo:
             if ramdisk and not os.path.isfile(ramdisk):
                 raise VmError('Kernel ramdisk does not exist: %s' % ramdisk)
         self.init_domain()
-        self.console = xendConsole.console_create(self.dom, console_port=self.console_port)
+        if self.console:
+            self.console.registerChannel()
+        else:
+            self.console = xendConsole.console_create(self.dom, console_port=self.console_port)
         self.build_domain(ostype, kernel, ramdisk, cmdline, vifs_n)
         self.image = kernel
         self.ramdisk = ramdisk
@@ -710,6 +763,43 @@ class XendDomainInfo:
             return reason == 'reboot'
         return 0
 
+    def restart_cancel(self):
+        self.restart_state = None
+
+    def restarting(self):
+        self.restart_state = STATE_RESTART_PENDING
+
+    def restart_pending(self):
+        return self.restart_state == STATE_RESTART_PENDING
+
+    def restart_check(self):
+        """Check if domain restart is OK.
+        To prevent restart loops, raise an error it is
+        less than MINIMUM_RESTART_TIME seconds since the last restart.
+        """
+        tnow = time.time()
+        if self.restart_time is not None:
+            tdelta = tnow - self.restart_time
+            if tdelta < self.MINIMUM_RESTART_TIME:
+                msg = 'VM %d restarting too fast' % self.dom
+                log.error(msg)
+                raise VmError(msg)
+        self.restart_time = tnow
+
+    def restart(self):
+        """Restart the domain after it has exited.
+        Reuses the domain id and console port.
+
+        @return: deferred
+        """
+        try:
+            self.restart_check()
+            self.restart_state = STATE_RESTART_BOOTING
+            d = self.construct(self.config)
+        finally:
+            self.restart_state = None
+        return d
+
     def configure_backends(self):
         """Set configuration flags if the vm is a backend for netif of blkif.
         """
@@ -780,6 +870,8 @@ class XendDomainInfo:
             if field_handler:
                 v = field_handler(self, self.config, field, field_index)
                 append_deferred(dlist, v)
+            else:
+                log.warning("Unknown config field %s", field_name)
             index[field_name] = field_index + 1
         d = defer.DeferredList(dlist, fireOnOneErrback=1)
         return d
@@ -849,6 +941,7 @@ def vm_dev_vif(vm, val, index):
     vif = index #todo
     vmac = sxp.child_value(val, "mac")
     xend.netif_create(vm.dom, recreate=vm.recreate)
+    log.debug("Creating vif dom=%d vif=%d mac=%s", vm.dom, vif, str(vmac))
     defer = xend.netif_dev_create(vm.dom, vif, val, recreate=vm.recreate)
     def fn(id):
         dev = xend.netif_dev(vm.dom, vif)
@@ -875,6 +968,7 @@ def vm_dev_vbd(vm, val, index):
     if not dev:
         raise VmError('vbd: Missing dev')
     mode = sxp.child_value(val, 'mode', 'r')
+    log.debug("Creating vbd dom=%d uname=%s dev=%s", vm.dom, uname, dev)
     defer = make_disk(vm.dom, uname, dev, mode, vm.recreate)
     def fn(vbd):
         dev = xend.blkif_dev(vm.dom, vdev)
@@ -909,6 +1003,7 @@ def vm_dev_pci(vm, val, index):
         func = parse_pci(func)
     except:
         raise VmError('pci: invalid parameter')
+    log.debug("Creating pci device dom=%d bus=%x dev=%x func=%x", vm.dom, bus, dev, func)
     rc = xc.physdev_pci_access_modify(dom=vm.dom, bus=bus, dev=dev,
                                       func=func, enable=1)
     if rc < 0:
@@ -951,13 +1046,13 @@ def vnet_bridge(vnet, vmac, dom, idx):
     vif = "vif%d.%d" % (dom, idx)
     try:
         cmd = "(vif.conn (vif %s) (vnet %s) (vmac %s))" % (vif, vnet, vmac)
-        print "*** vnet_bridge>", cmd
+        log.debug("vnet_bridge> %s", cmd)
         out = file("/proc/vnet/policy", "wb")
         out.write(cmd)
         err = out.close()
-        print "vnet_bridge>", "err=", err
+        log.debug("vnet_bridge> err=%d", err)
     except IOError, ex:
-        print "vnet_bridge>", ex
+        log.exception("vnet_bridge>")
     
 def vm_field_vnet(vm, config, val, index):
     """Handle a vnet field in a config.
@@ -982,6 +1077,9 @@ def vm_field_vnet(vm, config, val, index):
         #vnet_bridge(vnet, mac, vm.dom, 0)
         #vm.add_config([ 'vif.vnet', ['id', id], ['vnet', vnet], ['mac', mac]])
 
+def vm_field_ignore(vm, config, val, index):
+    pass
+
 # Register image handlers for linux and bsd.
 add_image_handler('linux',  vm_image_linux)
 add_image_handler('netbsd', vm_image_netbsd)
@@ -990,6 +1088,15 @@ add_image_handler('netbsd', vm_image_netbsd)
 add_device_handler('vif',  vm_dev_vif)
 add_device_handler('vbd',  vm_dev_vbd)
 add_device_handler('pci',  vm_dev_pci)
+
+# Ignore the fields we already handle.
+add_config_handler('name',    vm_field_ignore)
+add_config_handler('memory',  vm_field_ignore)
+add_config_handler('cpu',     vm_field_ignore)
+add_config_handler('console', vm_field_ignore)
+add_config_handler('image',   vm_field_ignore)
+add_config_handler('device',  vm_field_ignore)
+add_config_handler('backend', vm_field_ignore)
 
 # Register config handlers for vfr and vnet.
 add_config_handler('vfr',  vm_field_vfr)

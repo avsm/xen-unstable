@@ -164,9 +164,8 @@ static void __invalidate_shadow_ldt(struct domain *d)
 }
 
 
-static inline void invalidate_shadow_ldt(void)
+static inline void invalidate_shadow_ldt(struct domain *d)
 {
-    struct domain *d = current;
     if ( d->mm.shadow_ldt_mapcnt != 0 )
         __invalidate_shadow_ldt(d);
 }
@@ -178,7 +177,7 @@ int alloc_segdesc_page(struct pfn_info *page)
     int i;
 
     for ( i = 0; i < 512; i++ )
-        if ( unlikely(!check_descriptor(descs[i*2], descs[i*2+1])) )
+        if ( unlikely(!check_descriptor(&descs[i*2])) )
             goto fail;
 
     unmap_domain_mem(descs);
@@ -246,7 +245,7 @@ static int get_page_and_type_from_pagenr(unsigned long page_nr,
     if ( unlikely(!get_page_type(page, type)) )
     {
         MEM_LOG("Bad page type for pfn %08lx (%08x)", 
-                page_nr, page->type_and_flags);
+                page_nr, page->u.inuse.type_info);
         put_page(page);
         return 0;
     }
@@ -289,7 +288,7 @@ static int get_linear_pagetable(l2_pgentry_t l2e, unsigned long pfn)
          * If so, atomically increment the count (checking for overflow).
          */
         page = &frame_table[l2_pgentry_to_pagenr(l2e)];
-        y = page->type_and_flags;
+        y = page->u.inuse.type_info;
         do {
             x = y;
             if ( unlikely((x & PGT_count_mask) == PGT_count_mask) ||
@@ -300,7 +299,7 @@ static int get_linear_pagetable(l2_pgentry_t l2e, unsigned long pfn)
                 return 0;
             }
         }
-        while ( (y = cmpxchg(&page->type_and_flags, x, x + 1)) != x );
+        while ( (y = cmpxchg(&page->u.inuse.type_info, x, x + 1)) != x );
     }
 
     return 1;
@@ -340,7 +339,7 @@ static int get_page_from_l1e(l1_pgentry_t l1e)
             pfn, PGT_writeable_page, GPS)) )
             return 0;
         set_bit(_PGC_tlb_flush_on_type_change, 
-                &frame_table[pfn].count_and_flags);
+                &frame_table[pfn].u.inuse.count_info);
         return 1;
     }
 
@@ -384,10 +383,10 @@ static void put_page_from_l1e(l1_pgentry_t l1e)
     else
     {
         /* We expect this is rare so we blow the entire shadow LDT. */
-        if ( unlikely(((page->type_and_flags & PGT_type_mask) == 
+        if ( unlikely(((page->u.inuse.type_info & PGT_type_mask) == 
                        PGT_ldt_page)) &&
-             unlikely(((page->type_and_flags & PGT_count_mask) != 0)) )
-            invalidate_shadow_ldt();
+             unlikely(((page->u.inuse.type_info & PGT_count_mask) != 0)) )
+            invalidate_shadow_ldt(page->u.inuse.domain);
         put_page(page);
     }
 }
@@ -425,7 +424,7 @@ static int alloc_l2_table(struct pfn_info *page)
     pl2e[LINEAR_PT_VIRT_START >> L2_PAGETABLE_SHIFT] =
         mk_l2_pgentry((page_nr << PAGE_SHIFT) | __PAGE_HYPERVISOR);
     pl2e[PERDOMAIN_VIRT_START >> L2_PAGETABLE_SHIFT] =
-        mk_l2_pgentry(__pa(page->u.domain->mm.perdomain_pt) | 
+        mk_l2_pgentry(__pa(page->u.inuse.domain->mm.perdomain_pt) | 
                       __PAGE_HYPERVISOR);
 #endif
 
@@ -618,9 +617,9 @@ static int mod_l1_entry(l1_pgentry_t *pl1e, l1_pgentry_t nl1e)
 int alloc_page_type(struct pfn_info *page, unsigned int type)
 {
     if ( unlikely(test_and_clear_bit(_PGC_tlb_flush_on_type_change, 
-                                     &page->count_and_flags)) )
+                                     &page->u.inuse.count_info)) )
     {
-        struct domain *p = page->u.domain;
+        struct domain *p = page->u.inuse.domain;
         if ( unlikely(NEED_FLUSH(tlbflush_time[p->processor],
                                  page->tlbflush_timestamp)) )
         {
@@ -714,7 +713,7 @@ static int do_extended_command(unsigned long ptr, unsigned long val)
         }
 
         if ( unlikely(test_and_set_bit(_PGC_guest_pinned, 
-                                       &page->count_and_flags)) )
+                                       &page->u.inuse.count_info)) )
         {
             MEM_LOG("Pfn %08lx already pinned", pfn);
             put_page_and_type(page);
@@ -728,10 +727,10 @@ static int do_extended_command(unsigned long ptr, unsigned long val)
         if ( unlikely(!(okay = get_page_from_pagenr(pfn, PTS))) )
         {
             MEM_LOG("Page %08lx bad domain (dom=%p)",
-                    ptr, page->u.domain);
+                    ptr, page->u.inuse.domain);
         }
         else if ( likely(test_and_clear_bit(_PGC_guest_pinned, 
-                                            &page->count_and_flags)) )
+                                            &page->u.inuse.count_info)) )
         {
             put_page_and_type(page);
             put_page(page);
@@ -748,7 +747,7 @@ static int do_extended_command(unsigned long ptr, unsigned long val)
         okay = get_page_and_type_from_pagenr(pfn, PGT_l2_page_table, d);
         if ( likely(okay) )
         {
-            invalidate_shadow_ldt();
+            invalidate_shadow_ldt(d);
 
             percpu_info[cpu].deferred_ops &= ~DOP_FLUSH_TLB;
             old_base_pfn = pagetable_val(d->mm.pagetable) >> PAGE_SHIFT;
@@ -795,7 +794,7 @@ static int do_extended_command(unsigned long ptr, unsigned long val)
         else if ( (d->mm.ldt_ents != ents) || 
                   (d->mm.ldt_base != ptr) )
         {
-            invalidate_shadow_ldt();
+            invalidate_shadow_ldt(d);
             d->mm.ldt_base = ptr;
             d->mm.ldt_ents = ents;
             load_LDT(d);
@@ -840,7 +839,7 @@ static int do_extended_command(unsigned long ptr, unsigned long val)
 
         if ( unlikely((e = percpu_info[cpu].gps) == NULL) )
         {
-            MEM_LOG("No GPS to reassign pfn %08lx to\n", pfn);
+            MEM_LOG("No GPS to reassign pfn %08lx to", pfn);
             okay = 0;
             break;
         }
@@ -865,6 +864,7 @@ static int do_extended_command(unsigned long ptr, unsigned long val)
         if ( unlikely(test_bit(DF_DYING, &e->flags)) ||
              unlikely(IS_XEN_HEAP_FRAME(page)) )
         {
+            MEM_LOG("Reassignment page is Xen heap, or dest dom is dying.");
             okay = 0;
             goto reassign_fail;
         }
@@ -874,8 +874,8 @@ static int do_extended_command(unsigned long ptr, unsigned long val)
          * benign reference to the page (PGC_allocated). If that reference
          * disappears then the deallocation routine will safely spin.
          */
-        nd = page->u.domain;
-        y  = page->count_and_flags;
+        nd = page->u.inuse.domain;
+        y  = page->u.inuse.count_info;
         do {
             x = y;
             if ( unlikely((x & (PGC_count_mask|PGC_allocated)) != 
@@ -884,14 +884,14 @@ static int do_extended_command(unsigned long ptr, unsigned long val)
             {
                 MEM_LOG("Bad page values %08lx: ed=%p(%u), sd=%p,"
                         " caf=%08x, taf=%08x\n", page_to_pfn(page),
-                        d, d->domain, nd, x, page->type_and_flags);
+                        d, d->domain, nd, x, page->u.inuse.type_info);
                 okay = 0;
                 goto reassign_fail;
             }
             __asm__ __volatile__(
                 LOCK_PREFIX "cmpxchg8b %3"
                 : "=a" (nd), "=d" (y), "=b" (e),
-                "=m" (*(volatile u64 *)(&page->u.domain))
+                "=m" (*(volatile u64 *)(&page->u.inuse.domain))
                 : "0" (d), "1" (x), "b" (e), "c" (x) );
         } 
         while ( unlikely(nd != d) || unlikely(y != x) );
@@ -985,7 +985,7 @@ int do_mmu_update(mmu_update_t *ureqs, int count, int *success_count)
             }
 
             page = &frame_table[pfn];
-            switch ( (page->type_and_flags & PGT_type_mask) )
+            switch ( (page->u.inuse.type_info & PGT_type_mask) )
             {
             case PGT_l1_page_table: 
                 if ( likely(get_page_type(page, PGT_l1_page_table)) )
@@ -1051,8 +1051,8 @@ int do_mmu_update(mmu_update_t *ureqs, int count, int *success_count)
              * If in log-dirty mode, mark the corresponding pseudo-physical
              * page as dirty.
              */
-            if( unlikely(current->mm.shadow_mode == SHM_logdirty) )
-                mark_dirty( &current->mm, pfn );
+            if ( unlikely(current->mm.shadow_mode == SHM_logdirty) )
+                mark_dirty(&current->mm, pfn);
 
             put_page(&frame_table[pfn]);
             break;

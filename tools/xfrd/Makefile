@@ -35,6 +35,8 @@ XFRD_PROG_OBJ += $(UTIL_LIB)
 # Define to use stubs, undefine to use the real Xen functions.
 #CPPFLAGS += -D _XEN_XFR_STUB_
 
+CC := gcc
+
 CFLAGS += -g
 CFLAGS += -Wall
 CFALGS += -Werror

@@ -105,8 +105,23 @@ class Xm:
 
     def getprog(self, name, val=None):
         """Get a sub-program.
+        name  Name of the sub-program (or optionally, an unambiguous
+              prefix of its name)
+        val   Default return value if no (unique) match is found
         """
-        return self.progs.get(name, val)
+
+        match = None
+        for progname in self.progs.keys():
+            if progname == name:
+                match = progname
+                break
+            if progname.startswith(name):
+                if not match:
+                    match = progname
+                else:
+                    return val # name is ambiguous - bail out
+
+        return self.progs.get(match, val)
 
     def proglist(self):
         """Get a list of sub-programs, ordered by group.
@@ -336,6 +351,22 @@ class ProgPincpu(Prog):
 
 xm.prog(ProgPincpu)
 
+class ProgMaxmem(Prog):
+    group = 'domain'
+    name = 'maxmem'
+    info = """Set domain memory limit."""
+
+    def help(self, args):
+        print args[0], "DOM MEMORY"
+        print "\nSet the memory limit for domain DOM to MEMORY megabytes."
+
+    def main(self, args):
+        if len(args) != 3: self.err("%s: Invalid argument(s)" % args[0])
+        v = map(int, args[1:3])
+        server.xend_domain_maxmem_set(*v)
+
+xm.prog(ProgMaxmem)
+
 class ProgBvt(Prog):
     group = 'scheduler'
     name = "bvt"
@@ -364,6 +395,7 @@ class ProgBvtslice(Prog):
     def main(self, args):
         if len(args) < 2: self.err('%s: Missing context switch allowance'
                                                             % args[0])
+        slice = int(args[1])
         server.xend_node_cpu_bvt_slice_set(slice)
 
 xm.prog(ProgBvtslice)
@@ -396,7 +428,8 @@ class ProgFbvtslice(Prog):
     def main(self, args):
         if len(args) < 2: self.err('%s: Missing context switch allowance.' 
                                                                 % args[0])
-        server.xend_node_cpu_fbvt_slice_set(slice)
+        ctx_allow = int(args[1])
+        server.xend_node_cpu_fbvt_slice_set(ctx_allow)
 
 xm.prog(ProgFbvtslice)
 
@@ -452,14 +485,19 @@ class ProgConsoles(Prog):
 
     def main(self, args):
         l = server.xend_consoles()
-        print "Dom Port  Id"
+        print "Dom Port  Id Connection"
         for x in l:
             info = server.xend_console(x)
             d = {}
-            d['dom'] = sxp.child(info, 'dst', ['dst', '?', '?'])[1]
-            d['port'] = sxp.child_value(info, 'port', '?')
+            d['dom'] = sxp.child(info, 'domain', '?')[1]
+            d['port'] = sxp.child_value(info, 'console_port', '?')
             d['id'] = sxp.child_value(info, 'id', '?')
-            print "%(dom)3s %(port)4s %(id)3s" % d
+            connected = sxp.child(info, 'connected')
+            if connected:
+                d['conn'] = '%s:%s' % (connected[1], connected[2])
+            else:
+                d['conn'] = ''
+            print "%(dom)3s %(port)4s %(id)3s %(conn)s" % d
 
 xm.prog(ProgConsoles)
 
@@ -479,7 +517,7 @@ class ProgConsole(Prog):
         console = sxp.child(info, "console")
         if not console:
             self.err("No console information")
-        port = sxp.child_value(console, "port")
+        port = sxp.child_value(console, "console_port")
         from xen.util import console_client
         console_client.connect("localhost", int(port))
 
@@ -507,7 +545,7 @@ class ProgDmesg(Prog):
     info  = """Print Xen boot output."""
 
     def main(self, args):
-        print server.xend_dmesg()[1]
+        print server.xend_node_dmesg()[1]
 
 xm.prog(ProgDmesg)
 
