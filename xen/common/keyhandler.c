@@ -2,6 +2,7 @@
  * keyhandler.c
  */
 
+#include <asm/regs.h>
 #include <xen/keyhandler.h> 
 #include <xen/reboot.h>
 #include <xen/event.h>
@@ -9,6 +10,7 @@
 #include <xen/serial.h>
 #include <xen/sched.h>
 #include <xen/softirq.h>
+#include <asm/debugger.h>
 
 #define KEY_MAX 256
 #define STR_MAX  64
@@ -96,6 +98,7 @@ static void halt_machine(unsigned char key, struct xen_regs *regs)
 static void do_task_queues(unsigned char key)
 {
     struct domain *d;
+    struct exec_domain *ed;
     s_time_t       now = NOW();
 
     printk("'%c' pressed -> dumping task queues (now=0x%X:%08X)\n", key,
@@ -105,19 +108,28 @@ static void do_task_queues(unsigned char key)
 
     for_each_domain ( d )
     {
-        printk("Xen: DOM %u, CPU %d [has=%c] flags=%lx refcnt=%d nr_pages=%d "
-               "xenheap_pages=%d\n",
-               d->id, d->processor, 
-               test_bit(DF_RUNNING, &d->flags) ? 'T':'F', d->flags,
+        printk("Xen: DOM %u, flags=%lx refcnt=%d nr_pages=%d "
+               "xenheap_pages=%d\n", d->id, d->d_flags,
                atomic_read(&d->refcnt), d->tot_pages, d->xenheap_pages);
 
         dump_pageframe_info(d);
                
-        printk("Guest: upcall_pend = %02x, upcall_mask = %02x\n", 
-               d->shared_info->vcpu_data[0].evtchn_upcall_pending, 
-               d->shared_info->vcpu_data[0].evtchn_upcall_mask);
-        printk("Notifying guest...\n"); 
-        send_guest_virq(d, VIRQ_DEBUG);
+        for_each_exec_domain ( d, ed ) {
+            printk("Guest: %p CPU %d [has=%c] flags=%lx "
+                   "upcall_pend = %02x, upcall_mask = %02x\n", ed,
+                   ed->processor,
+                   test_bit(EDF_RUNNING, &ed->ed_flags) ? 'T':'F',
+                   ed->ed_flags,
+                   ed->vcpu_info->evtchn_upcall_pending, 
+                   ed->vcpu_info->evtchn_upcall_mask);
+            printk("Notifying guest... %d/%d\n", d->id, ed->eid); 
+            printk("port %d/%d stat %d %d %d\n",
+                   VIRQ_DEBUG, ed->virq_to_evtchn[VIRQ_DEBUG],
+                   test_bit(ed->virq_to_evtchn[VIRQ_DEBUG], &d->shared_info->evtchn_pending[0]),
+                   test_bit(ed->virq_to_evtchn[VIRQ_DEBUG], &d->shared_info->evtchn_mask[0]),
+                   test_bit(ed->virq_to_evtchn[VIRQ_DEBUG]>>5, &ed->vcpu_info->evtchn_pending_sel));
+            send_guest_virq(ed, VIRQ_DEBUG);
+        }
     }
 
     read_unlock(&domlist_lock);
@@ -133,6 +145,24 @@ extern void audit_domains_key(unsigned char key);
 #ifdef PERF_COUNTERS
 extern void perfc_printall(unsigned char key);
 extern void perfc_reset(unsigned char key);
+#endif
+
+void do_debug_key(unsigned char key, struct xen_regs *regs)
+{
+    (void)debugger_trap_fatal(0xf001, regs);
+    nop(); /* Prevent the compiler doing tail call
+                             optimisation, as that confuses xendbg a
+                             bit. */
+}
+
+#ifndef NDEBUG
+void debugtrace_key(unsigned char key)
+{
+    debugtrace_send_to_console = !debugtrace_send_to_console;
+    debugtrace_dump();
+    printk("debugtrace_printk now writing to %s.\n",
+           debugtrace_send_to_console ? "console" : "buffer");
+}
 #endif
 
 void initialize_keytable(void)
@@ -156,7 +186,9 @@ void initialize_keytable(void)
 
 #ifndef NDEBUG
     register_keyhandler(
-        'o', audit_domains_key,  "audit domains >0 EXPERIMENTAL"); 
+        'o', audit_domains_key,  "audit domains >0 EXPERIMENTAL");
+    register_keyhandler(
+        'T', debugtrace_key, "dump debugtrace");
 #endif
 
 #ifdef PERF_COUNTERS
@@ -165,4 +197,16 @@ void initialize_keytable(void)
     register_keyhandler(
         'P', perfc_reset,    "reset performance counters"); 
 #endif
+
+    register_irq_keyhandler('%', do_debug_key,   "Trap to xendbg");
 }
+
+/*
+ * Local variables:
+ * mode: C
+ * c-set-style: "BSD"
+ * c-basic-offset: 4
+ * tab-width: 4
+ * indent-tabs-mode: nil
+ * End:
+ */
