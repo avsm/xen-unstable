@@ -104,8 +104,8 @@ void __init zap_low_mappings(void)
  */
 static void __synchronise_pagetables(void *mask)
 {
-    struct domain *d = current;
-    if ( ((unsigned long)mask & (1<<d->processor)) && is_idle_task(d) )
+    struct exec_domain *d = current;
+    if ( ((unsigned long)mask & (1<<d->processor)) && is_idle_task(d->domain) )
         write_ptbase(&d->mm);
 }
 void synchronise_pagetables(unsigned long cpu_mask)
@@ -209,24 +209,25 @@ int check_descriptor(unsigned long *d)
 }
 
 
-void destroy_gdt(struct domain *d)
+void destroy_gdt(struct exec_domain *ed)
 {
     int i;
     unsigned long pfn;
 
     for ( i = 0; i < 16; i++ )
     {
-        if ( (pfn = l1_pgentry_to_pagenr(d->mm.perdomain_pt[i])) != 0 )
+        if ( (pfn = l1_pgentry_to_pagenr(ed->mm.perdomain_pt[i])) != 0 )
             put_page_and_type(&frame_table[pfn]);
-        d->mm.perdomain_pt[i] = mk_l1_pgentry(0);
+        ed->mm.perdomain_pt[i] = mk_l1_pgentry(0);
     }
 }
 
 
-long set_gdt(struct domain *d, 
+long set_gdt(struct exec_domain *ed, 
              unsigned long *frames,
              unsigned int entries)
 {
+    struct domain *d = ed->domain;
     /* NB. There are 512 8-byte entries per GDT page. */
     int i = 0, nr_pages = (entries + 511) / 512;
     struct desc_struct *vgdt;
@@ -267,15 +268,15 @@ long set_gdt(struct domain *d,
     unmap_domain_mem(vgdt);
 
     /* Tear down the old GDT. */
-    destroy_gdt(d);
+    destroy_gdt(ed);
 
     /* Install the new GDT. */
     for ( i = 0; i < nr_pages; i++ )
-        d->mm.perdomain_pt[i] =
+        ed->mm.perdomain_pt[i] =
             mk_l1_pgentry((frames[i] << PAGE_SHIFT) | __PAGE_HYPERVISOR);
 
-    SET_GDT_ADDRESS(d, GDT_VIRT_START);
-    SET_GDT_ENTRIES(d, entries);
+    SET_GDT_ADDRESS(ed, GDT_VIRT_START);
+    SET_GDT_ENTRIES(ed, entries);
 
     return 0;
 
@@ -322,7 +323,7 @@ long do_update_descriptor(
         return -EINVAL;
 
     page = &frame_table[pfn];
-    if ( unlikely(!get_page(page, current)) )
+    if ( unlikely(!get_page(page, current->domain)) )
         return -EINVAL;
 
     /* Check if the given frame is in use in an unsafe context. */

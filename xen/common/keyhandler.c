@@ -98,6 +98,7 @@ static void halt_machine(unsigned char key)
 void do_task_queues(unsigned char key)
 {
     struct domain *d;
+    struct exec_domain *ed;
     s_time_t       now = NOW();
     struct list_head *ent;
     struct pfn_info  *page;
@@ -109,10 +110,8 @@ void do_task_queues(unsigned char key)
 
     for_each_domain ( d )
     {
-        printk("Xen: DOM %u, CPU %d [has=%c] flags=%lx refcnt=%d nr_pages=%d "
-               "xenheap_pages=%d\n",
-               d->id, d->processor, 
-               test_bit(DF_RUNNING, &d->flags) ? 'T':'F', d->flags,
+        printk("Xen: DOM %u, flags=%lx refcnt=%d nr_pages=%d "
+               "xenheap_pages=%d\n", d->id, d->d_flags,
                atomic_read(&d->refcnt), d->tot_pages, d->xenheap_pages);
 
         if ( d->tot_pages < 10 )
@@ -131,11 +130,22 @@ void do_task_queues(unsigned char key)
                page_to_phys(page), page->count_info,
                page->u.inuse.type_info);
                
-        printk("Guest: upcall_pend = %02x, upcall_mask = %02x\n", 
-               d->shared_info->vcpu_data[0].evtchn_upcall_pending, 
-               d->shared_info->vcpu_data[0].evtchn_upcall_mask);
-        printk("Notifying guest...\n"); 
-        send_guest_virq(d, VIRQ_DEBUG);
+        for_each_exec_domain ( d, ed ) {
+            printk("Guest: %p CPU %d [has=%c] flags=%lx "
+                   "upcall_pend = %02x, upcall_mask = %02x\n", ed,
+                   ed->processor,
+                   test_bit(EDF_RUNNING, &ed->ed_flags) ? 'T':'F',
+                   ed->ed_flags,
+                   ed->vcpu_info->evtchn_upcall_pending, 
+                   ed->vcpu_info->evtchn_upcall_mask);
+            printk("Notifying guest... %d/%d\n", d->id, ed->eid); 
+            printk("port %d/%d stat %d %d %d\n",
+                   VIRQ_DEBUG, ed->virq_to_evtchn[VIRQ_DEBUG],
+                   test_bit(ed->virq_to_evtchn[VIRQ_DEBUG], &d->shared_info->evtchn_pending[0]),
+                   test_bit(ed->virq_to_evtchn[VIRQ_DEBUG], &d->shared_info->evtchn_mask[0]),
+                   test_bit(ed->virq_to_evtchn[VIRQ_DEBUG]>>5, &ed->vcpu_info->evtchn_pending_sel));
+            send_guest_virq(ed, VIRQ_DEBUG);
+        }
     }
 
     read_unlock(&domlist_lock);
