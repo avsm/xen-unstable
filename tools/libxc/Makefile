@@ -12,7 +12,7 @@ INSTALL_PROG	= $(INSTALL) -m0755
 INSTALL_DATA	= $(INSTALL) -m0644
 INSTALL_DIR	= $(INSTALL) -d -m0755
 
-MAJOR    = 2.0
+MAJOR    = 3.0
 MINOR    = 0
 
 CC       = gcc
@@ -37,6 +37,7 @@ SRCS     += xc_misc.c
 SRCS     += xc_physdev.c
 SRCS     += xc_private.c
 SRCS     += xc_rrobin.c
+SRCS     += xc_vmx_build.c
 
 CFLAGS   += -Wall
 CFLAGS   += -Werror
@@ -82,6 +83,11 @@ install: all
 	ln -sf libxc.so.$(MAJOR).$(MINOR) $(DESTDIR)/usr/lib/libxc.so.$(MAJOR)
 	ln -sf libxc.so.$(MAJOR) $(DESTDIR)/usr/lib/libxc.so
 	$(INSTALL_DATA) xc.h $(DESTDIR)/usr/include
+
+.PHONY: TAGS clean rpm install all
+
+TAGS:
+	etags -t $(SRCS) *.h
 
 clean:
 	rm -rf *.a *.so* *.o *.opic *.rpm $(LIB) *~ $(DEPS) xen
