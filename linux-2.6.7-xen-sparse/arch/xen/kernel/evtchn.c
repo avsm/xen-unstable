@@ -7,10 +7,12 @@
  */
 
 #include <linux/config.h>
+#include <linux/module.h>
 #include <linux/irq.h>
 #include <linux/interrupt.h>
 #include <linux/sched.h>
 #include <linux/kernel_stat.h>
+#include <linux/version.h>
 #include <asm/atomic.h>
 #include <asm/system.h>
 #include <asm/ptrace.h>
@@ -81,7 +83,9 @@ void evtchn_do_upcall(struct pt_regs *regs)
 
     local_irq_restore(flags);
 }
-
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,0)
+EXPORT_SYMBOL(evtchn_do_upcall);
+#endif
 
 static int find_unbound_irq(void)
 {
