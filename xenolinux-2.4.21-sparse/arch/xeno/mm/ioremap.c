@@ -175,8 +175,53 @@ void iounmap(void *addr)
     vfree((void *)((unsigned long)addr & PAGE_MASK));
 }
 
+/* implementation of boot time ioremap for purpose of provising access
+to the vga console for privileged domains. Unlike boot time ioremap on 
+other architectures, ours is permanent and not reclaimed when then vmalloc
+infrastructure is started */
+
+void __init *bt_ioremap(unsigned long machine_addr, unsigned long size)
+{
+        unsigned long offset, last_addr;
+        unsigned int nrpages;
+        enum fixed_addresses idx;
+
+        /* Don't allow wraparound or zero size */
+        last_addr = machine_addr + size - 1;
+        if (!size || last_addr < machine_addr)
+                return NULL;
+
+        /*
+         * Mappings have to be page-aligned
+         */
+        offset = machine_addr & ~PAGE_MASK;
+        machine_addr &= PAGE_MASK;
+        size = PAGE_ALIGN(last_addr) - machine_addr;
+
+        /*
+         * Mappings have to fit in the FIX_BTMAP area.
+         */
+        nrpages = size >> PAGE_SHIFT;
+        if (nrpages > NR_FIX_BTMAPS)
+                return NULL;
+
+        /*
+         * Ok, go for it..
+         */
+        idx = FIX_BTMAP_BEGIN;
+        while (nrpages > 0) {
+                set_fixmap(idx, machine_addr);
+                machine_addr += PAGE_SIZE;
+                --idx;
+                --nrpages;
+        }
+
+	flush_tlb_all();
+
+        return (void*) (offset + fix_to_virt(FIX_BTMAP_BEGIN));
+}
+
 
 #if 0 /* We don't support these functions. They shouldn't be required. */
-void __init *bt_ioremap(unsigned long machine_addr, unsigned long size) {}
 void __init bt_iounmap(void *addr, unsigned long size) {}
 #endif
