@@ -22,9 +22,9 @@ XKERNELS := $(foreach kernel, $(KERNELS), $(patsubst buildconfigs/mk.%,%,$(wildc
 export DESTDIR
 
 # Export target architecture overrides to Xen and Linux sub-trees.
-ifneq ($(TARGET_ARCH),)
-SUBARCH := $(subst x86_32,i386,$(TARGET_ARCH))
-export TARGET_ARCH SUBARCH
+ifneq ($(XEN_TARGET_ARCH),)
+SUBARCH := $(subst x86_32,i386,$(XEN_TARGET_ARCH))
+export XEN_TARGET_ARCH SUBARCH
 endif
 
 include buildconfigs/Rules.mk
@@ -166,6 +166,7 @@ uninstall:
 	rm -rf $(D)/usr/share/doc/xen  $(D)/usr/man/man*/xentrace*
 	rm -rf $(D)/usr/bin/xen* $(D)/usr/bin/miniterm
 	rm -rf $(D)/boot/*xen*
+	rm -rf $(D)/lib/modules/*xen*
 
 # Legacy targets for compatibility
 linux24:

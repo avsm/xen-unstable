@@ -1,5 +1,4 @@
-/* -*-  Mode:C; c-basic-offset:4; tab-width:4 -*-
- ****************************************************************************
+/****************************************************************************
  * (C) 2002 - Rolf Neugebauer - Intel Research Cambridge
  ****************************************************************************
  *
@@ -29,10 +28,13 @@
 
 #include <xen/types.h>
 #include <public/xen.h>
+#include <asm/time.h>
 
 extern int init_xen_time();
 
 extern unsigned long cpu_khz;
+
+struct domain;
 
 /*
  * System Time
@@ -52,9 +54,18 @@ s_time_t get_s_time(void);
 #define MILLISECS(_ms)  (((s_time_t)(_ms)) * 1000000ULL )
 #define MICROSECS(_us)  (((s_time_t)(_us)) * 1000ULL )
 
-struct domain;
-extern int update_dom_time(struct domain *d);
+extern void update_dom_time(struct exec_domain *ed);
 extern void do_settime(unsigned long secs, unsigned long usecs, 
                        u64 system_time_base);
 
 #endif /* __XEN_TIME_H__ */
+
+/*
+ * Local variables:
+ * mode: C
+ * c-set-style: "BSD"
+ * c-basic-offset: 4
+ * tab-width: 4
+ * indent-tabs-mode: nil
+ * End:
+ */

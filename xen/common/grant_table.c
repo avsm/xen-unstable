@@ -74,7 +74,7 @@ __gnttab_map_grant_ref(
      */
     int            retries = 0;
 
-    ld = current;
+    ld = current->domain;
 
     /* Bitwise-OR avoids short-circuiting which screws control flow. */
     if ( unlikely(__get_user(dom, &uop->dom) |
@@ -291,7 +291,7 @@ __gnttab_unmap_grant_ref(
     s16            rc = 0;
     unsigned long  frame, virt;
 
-    ld = current;
+    ld = current->domain;
 
     /* Bitwise-OR avoids short-circuiting which screws control flow. */
     if ( unlikely(__get_user(virt, &uop->host_virt_addr) |
@@ -404,9 +404,9 @@ gnttab_setup_table(
 
     if ( op.dom == DOMID_SELF )
     {
-        op.dom = current->id;
+        op.dom = current->domain->id;
     }
-    else if ( unlikely(!IS_PRIV(current)) )
+    else if ( unlikely(!IS_PRIV(current->domain)) )
     {
         (void)put_user(GNTST_permission_denied, &uop->status);
         return 0;
@@ -443,6 +443,8 @@ do_grant_table_op(
     if ( count > 512 )
         return -EINVAL;
 
+    LOCK_BIGLOCK(current->domain);
+
     switch ( cmd )
     {
     case GNTTABOP_map_grant_ref:
@@ -464,6 +466,8 @@ do_grant_table_op(
         rc = -ENOSYS;
         break;
     }
+
+    UNLOCK_BIGLOCK(current->domain);
 
     return rc;
 }
@@ -561,7 +565,7 @@ grant_table_create(
     grant_table_t *t;
     int            i;
 
-    if ( (t = xmalloc(sizeof(*t))) == NULL )
+    if ( (t = xmalloc(grant_table_t)) == NULL )
         goto no_mem;
 
     /* Simple stuff. */
@@ -569,8 +573,8 @@ grant_table_create(
     spin_lock_init(&t->lock);
 
     /* Active grant table. */
-    if ( (t->active = xmalloc(sizeof(active_grant_entry_t) * 
-                              NR_GRANT_ENTRIES)) == NULL )
+    if ( (t->active = xmalloc_array(active_grant_entry_t, NR_GRANT_ENTRIES))
+         == NULL )
         goto no_mem;
     memset(t->active, 0, sizeof(active_grant_entry_t) * NR_GRANT_ENTRIES);
 
@@ -626,3 +630,13 @@ grant_table_init(
 {
     /* Nothing. */
 }
+
+/*
+ * Local variables:
+ * mode: C
+ * c-set-style: "BSD"
+ * c-basic-offset: 4
+ * tab-width: 4
+ * indent-tabs-mode: nil
+ * End:
+ */

@@ -25,8 +25,20 @@ static inline int pgd_present(pgd_t pgd)	{ return 1; }
  */
 #define set_pte_batched(pteptr, pteval) \
 	queue_l1_entry_update(pteptr, (pteval).pte_low)
+
+#ifdef CONFIG_SMP
+#define set_pte(pteptr, pteval) xen_l1_entry_update(pteptr, (pteval).pte_low)
+#if 0
+do { \
+  (*(pteptr) = pteval); \
+  HYPERVISOR_xen_version(0); \
+} while (0)
+#endif
+#define set_pte_atomic(pteptr, pteval) set_pte(pteptr, pteval)
+#else
 #define set_pte(pteptr, pteval) (*(pteptr) = pteval)
 #define set_pte_atomic(pteptr, pteval) set_pte(pteptr,pteval)
+#endif
 /*
  * (pmds are folded into pgds so this doesn't get actually called,
  * but the define is needed for a generic inline function.)
@@ -80,7 +92,7 @@ static inline pte_t ptep_get_and_clear(pte_t *xp)
  *      require. In all the cases we care about, the high bit gets shifted out
  *      (e.g., phys_to_machine()) so behaviour there is correct.
  */
-#define INVALID_P2M_ENTRY (~0UL)
+#define INVALID_P2M_ENTRY (~0U)
 #define FOREIGN_FRAME(_m) ((_m) | (1UL<<((sizeof(unsigned long)*8)-1)))
 #define pte_pfn(_pte)							\
 ({									\
