@@ -27,71 +27,189 @@
 #include <asm/fixmap.h>
 #include <asm/domain_page.h>
 
-static inline void set_pte_phys(unsigned long vaddr,
-                                l1_pgentry_t entry)
+void *safe_page_alloc(void)
 {
-    l4_pgentry_t *l4ent;
-    l3_pgentry_t *l3ent;
-    l2_pgentry_t *l2ent;
-    l1_pgentry_t *l1ent;
-
-    l4ent = &idle_pg_table[l4_table_offset(vaddr)];
-    l3ent = l4_pgentry_to_l3(*l4ent) + l3_table_offset(vaddr);
-    l2ent = l3_pgentry_to_l2(*l3ent) + l2_table_offset(vaddr);
-    l1ent = l2_pgentry_to_l1(*l2ent) + l1_table_offset(vaddr);
-    *l1ent = entry;
-
-    /* It's enough to flush this one mapping. */
-    __flush_tlb_one(vaddr);
+    extern int early_boot;
+    if ( early_boot )
+        return __va(alloc_boot_pages(PAGE_SIZE, PAGE_SIZE));
+    return (void *)alloc_xenheap_page();
 }
 
-
-void __set_fixmap(enum fixed_addresses idx, 
-                  l1_pgentry_t entry)
+/* Map physical byte range (@p, @p+@s) at virt address @v in pagetable @pt. */
+int map_pages(
+    pagetable_t *pt,
+    unsigned long v,
+    unsigned long p,
+    unsigned long s,
+    unsigned long flags)
 {
-    unsigned long address = fix_to_virt(idx);
+    l4_pgentry_t *pl4e;
+    l3_pgentry_t *pl3e;
+    l2_pgentry_t *pl2e;
+    l1_pgentry_t *pl1e;
+    void         *newpg;
 
-    if ( likely(idx < __end_of_fixed_addresses) )
-        set_pte_phys(address, entry);
-    else
-        printk("Invalid __set_fixmap\n");
+    while ( s != 0 )
+    {
+        pl4e = &pt[l4_table_offset(v)];
+        if ( !(l4_pgentry_val(*pl4e) & _PAGE_PRESENT) )
+        {
+            newpg = safe_page_alloc();
+            clear_page(newpg);
+            *pl4e = mk_l4_pgentry(__pa(newpg) | __PAGE_HYPERVISOR);
+        }
+
+        pl3e = l4_pgentry_to_l3(*pl4e) + l3_table_offset(v);
+        if ( !(l3_pgentry_val(*pl3e) & _PAGE_PRESENT) )
+        {
+            newpg = safe_page_alloc();
+            clear_page(newpg);
+            *pl3e = mk_l3_pgentry(__pa(newpg) | __PAGE_HYPERVISOR);
+        }
+
+        pl2e = l3_pgentry_to_l2(*pl3e) + l2_table_offset(v);
+
+        if ( ((s|v|p) & ((1<<L2_PAGETABLE_SHIFT)-1)) == 0 )
+        {
+            /* Super-page mapping. */
+            if ( (l2_pgentry_val(*pl2e) & _PAGE_PRESENT) )
+                __flush_tlb_pge();
+            *pl2e = mk_l2_pgentry(p|flags|_PAGE_PSE);
+
+            v += 1 << L2_PAGETABLE_SHIFT;
+            p += 1 << L2_PAGETABLE_SHIFT;
+            s -= 1 << L2_PAGETABLE_SHIFT;
+        }
+        else
+        {
+            /* Normal page mapping. */
+            if ( !(l2_pgentry_val(*pl2e) & _PAGE_PRESENT) )
+            {
+                newpg = safe_page_alloc();
+                clear_page(newpg);
+                *pl2e = mk_l2_pgentry(__pa(newpg) | __PAGE_HYPERVISOR);
+            }
+            pl1e = l2_pgentry_to_l1(*pl2e) + l1_table_offset(v);
+            if ( (l1_pgentry_val(*pl1e) & _PAGE_PRESENT) )
+                __flush_tlb_one(v);
+            *pl1e = mk_l1_pgentry(p|flags);
+
+            v += 1 << L1_PAGETABLE_SHIFT;
+            p += 1 << L1_PAGETABLE_SHIFT;
+            s -= 1 << L1_PAGETABLE_SHIFT;
+        }
+    }
+
+    return 0;
+}
+
+void __set_fixmap(
+    enum fixed_addresses idx, unsigned long p, unsigned long flags)
+{
+    if ( unlikely(idx >= __end_of_fixed_addresses) )
+        BUG();
+    map_pages(idle_pg_table, fix_to_virt(idx), p, PAGE_SIZE, flags);
 }
 
 
 void __init paging_init(void)
 {
-    void *ioremap_pt;
-    int i;
+    void *newpt;
+    unsigned long i, p, max;
 
-    /* Create page table for ioremap(). */
-    ioremap_pt = (void *)alloc_xenheap_page();
-    clear_page(ioremap_pt);
-    idle_pg_table[IOREMAP_VIRT_START >> L2_PAGETABLE_SHIFT] = 
-        mk_l2_pgentry(__pa(ioremap_pt) | __PAGE_HYPERVISOR);
+    /* Map all of physical memory. */
+    max = (max_page + (1UL << L2_PAGETABLE_SHIFT) - 1UL) &
+        ~((1UL << L2_PAGETABLE_SHIFT) - 1UL);
+    map_pages(idle_pg_table, PAGE_OFFSET, 0, max, PAGE_HYPERVISOR);
+
+    /*
+     * Allocate and map the machine-to-phys table.
+     * This also ensures L3 is present for ioremap().
+     */
+    for ( i = 0; i < max_page; i += ((1UL << L2_PAGETABLE_SHIFT) / 8) )
+    {
+        p = alloc_boot_pages(1UL << L2_PAGETABLE_SHIFT,
+                             1UL << L2_PAGETABLE_SHIFT);
+        if ( p == 0 )
+            panic("Not enough memory for m2p table\n");
+        map_pages(idle_pg_table, RDWR_MPT_VIRT_START + i*8, p, 
+                  1UL << L2_PAGETABLE_SHIFT, PAGE_HYPERVISOR);
+        memset((void *)(RDWR_MPT_VIRT_START + i*8), 0x55,
+               1UL << L2_PAGETABLE_SHIFT);
+    }
 
     /* Create read-only mapping of MPT for guest-OS use. */
-    idle_pg_table[RO_MPT_VIRT_START >> L2_PAGETABLE_SHIFT] =
-        mk_l2_pgentry(l2_pgentry_val(
-            idle_pg_table[RDWR_MPT_VIRT_START >> L2_PAGETABLE_SHIFT]) & 
+    newpt = (void *)alloc_xenheap_page();
+    clear_page(newpt);
+    idle_pg_table[l4_table_offset(RO_MPT_VIRT_START)] =
+        mk_l4_pgentry((__pa(newpt) | __PAGE_HYPERVISOR | _PAGE_USER) &
                       ~_PAGE_RW);
-
-    /* Set up mapping cache for domain pages. */
-    mapcache = (unsigned long *)alloc_xenheap_page();
-    clear_page(mapcache);
-    idle_pg_table[MAPCACHE_VIRT_START >> L2_PAGETABLE_SHIFT] =
-        mk_l2_pgentry(__pa(mapcache) | __PAGE_HYPERVISOR);
+    /* Copy the L3 mappings from the RDWR_MPT area. */
+    p  = l4_pgentry_val(idle_pg_table[l4_table_offset(RDWR_MPT_VIRT_START)]);
+    p &= PAGE_MASK;
+    p += l3_table_offset(RDWR_MPT_VIRT_START) * sizeof(l3_pgentry_t);
+    newpt = (void *)((unsigned long)newpt +
+                     (l3_table_offset(RO_MPT_VIRT_START) *
+                      sizeof(l3_pgentry_t)));
+    memcpy(newpt, __va(p),
+           (RDWR_MPT_VIRT_END - RDWR_MPT_VIRT_START) >> L3_PAGETABLE_SHIFT);
 
     /* Set up linear page table mapping. */
-    idle_pg_table[LINEAR_PT_VIRT_START >> L2_PAGETABLE_SHIFT] =
-        mk_l2_pgentry(__pa(idle_pg_table) | __PAGE_HYPERVISOR);
-
+    idle_pg_table[l4_table_offset(LINEAR_PT_VIRT_START)] =
+        mk_l4_pgentry(__pa(idle_pg_table) | __PAGE_HYPERVISOR);
 }
 
 void __init zap_low_mappings(void)
 {
-    idle_pg_table[0] = 0;
+    idle_pg_table[0] = mk_l4_pgentry(0);
+    flush_tlb_all_pge();
 }
 
+void subarch_init_memory(struct domain *dom_xen)
+{
+    unsigned long i, v, m2p_start_mfn;
+    l3_pgentry_t l3e;
+    l2_pgentry_t l2e;
+
+    /*
+     * We are rather picky about the layout of 'struct pfn_info'. The
+     * count_info and domain fields must be adjacent, as we perform atomic
+     * 64-bit operations on them.
+     */
+    if ( (offsetof(struct pfn_info, u.inuse._domain) != 
+          (offsetof(struct pfn_info, count_info) + sizeof(u32))) )
+    {
+        printk("Weird pfn_info layout (%ld,%ld,%d)\n",
+               offsetof(struct pfn_info, count_info),
+               offsetof(struct pfn_info, u.inuse._domain),
+               sizeof(struct pfn_info));
+        for ( ; ; ) ;
+    }
+
+    /* M2P table is mappable read-only by privileged domains. */
+    for ( v  = RDWR_MPT_VIRT_START; 
+          v != RDWR_MPT_VIRT_END;
+          v += 1 << L2_PAGETABLE_SHIFT )
+    {
+        l3e = l4_pgentry_to_l3(idle_pg_table[l4_table_offset(v)])[
+            l3_table_offset(v)];
+        if ( !(l3_pgentry_val(l3e) & _PAGE_PRESENT) )
+            continue;
+        l2e = l3_pgentry_to_l2(l3e)[l2_table_offset(v)];
+        if ( !(l2_pgentry_val(l2e) & _PAGE_PRESENT) )
+            continue;
+        m2p_start_mfn = l2_pgentry_to_pagenr(l2e);
+
+        for ( i = 0; i < ENTRIES_PER_L1_PAGETABLE; i++ )
+        {
+            frame_table[m2p_start_mfn+i].count_info = PGC_allocated | 1;
+            /* gdt to make sure it's only mapped read-only by non-privileged
+               domains. */
+            frame_table[m2p_start_mfn+i].u.inuse.type_info = PGT_gdt_page | 1;
+            page_set_owner(&frame_table[m2p_start_mfn+i], dom_xen);
+        }
+    }
+}
 
 /*
  * Allows shooting down of borrowed page-table use on specific CPUs.
@@ -99,9 +217,10 @@ void __init zap_low_mappings(void)
  */
 static void __synchronise_pagetables(void *mask)
 {
-    struct domain *d = current;
-    if ( ((unsigned long)mask & (1<<d->processor)) && is_idle_task(d) )
-        write_ptbase(&d->mm);
+    struct exec_domain *ed = current;
+    if ( ((unsigned long)mask & (1 << ed->processor)) &&
+         is_idle_task(ed->domain) )
+        write_ptbase(&ed->mm);
 }
 void synchronise_pagetables(unsigned long cpu_mask)
 {
@@ -111,18 +230,10 @@ void synchronise_pagetables(unsigned long cpu_mask)
 
 long do_stack_switch(unsigned long ss, unsigned long esp)
 {
-    int nr = smp_processor_id();
-    struct tss_struct *t = &init_tss[nr];
-
-    /* We need to do this check as we load and use SS on guest's behalf. */
-    if ( (ss & 3) == 0 )
+    if ( (ss & 3) != 3 )
         return -EPERM;
-
     current->thread.guestos_ss = ss;
     current->thread.guestos_sp = esp;
-    t->ss1  = ss;
-    t->esp1 = esp;
-
     return 0;
 }
 
@@ -163,9 +274,11 @@ int check_descriptor(unsigned long *d)
         if ( (b & _SEGMENT_TYPE) != 0xc00 )
             goto bad;
 
+#if 0
         /* Can't allow far jump to a Xen-private segment. */
         if ( !VALID_CODESEL(a>>16) )
             goto bad;
+#endif
 
         /* Reserved bits must be zero. */
         if ( (b & 0xe0) != 0 )
@@ -226,24 +339,25 @@ int check_descriptor(unsigned long *d)
 }
 
 
-void destroy_gdt(struct domain *d)
+void destroy_gdt(struct exec_domain *ed)
 {
     int i;
     unsigned long pfn;
 
     for ( i = 0; i < 16; i++ )
     {
-        if ( (pfn = l1_pgentry_to_pagenr(d->mm.perdomain_pt[i])) != 0 )
+        if ( (pfn = l1_pgentry_to_pagenr(ed->mm.perdomain_ptes[i])) != 0 )
             put_page_and_type(&frame_table[pfn]);
-        d->mm.perdomain_pt[i] = mk_l1_pgentry(0);
+        ed->mm.perdomain_ptes[i] = mk_l1_pgentry(0);
     }
 }
 
 
-long set_gdt(struct domain *d, 
+long set_gdt(struct exec_domain *ed, 
              unsigned long *frames,
              unsigned int entries)
 {
+    struct domain *d = ed->domain;
     /* NB. There are 512 8-byte entries per GDT page. */
     int i = 0, nr_pages = (entries + 511) / 512;
     struct desc_struct *vgdt;
@@ -284,15 +398,15 @@ long set_gdt(struct domain *d,
     unmap_domain_mem(vgdt);
 
     /* Tear down the old GDT. */
-    destroy_gdt(d);
+    destroy_gdt(ed);
 
     /* Install the new GDT. */
     for ( i = 0; i < nr_pages; i++ )
-        d->mm.perdomain_pt[i] =
+        ed->mm.perdomain_ptes[i] =
             mk_l1_pgentry((frames[i] << PAGE_SHIFT) | __PAGE_HYPERVISOR);
 
-    SET_GDT_ADDRESS(d, GDT_VIRT_START);
-    SET_GDT_ENTRIES(d, entries);
+    SET_GDT_ADDRESS(ed, GDT_VIRT_START(ed));
+    SET_GDT_ENTRIES(ed, entries);
 
     return 0;
 
@@ -339,7 +453,7 @@ long do_update_descriptor(
         return -EINVAL;
 
     page = &frame_table[pfn];
-    if ( unlikely(!get_page(page, current)) )
+    if ( unlikely(!get_page(page, current->domain)) )
         return -EINVAL;
 
     /* Check if the given frame is in use in an unsafe context. */
@@ -347,7 +461,7 @@ long do_update_descriptor(
     {
     case PGT_gdt_page:
         /* Disallow updates of Xen-reserved descriptors in the current GDT. */
-        if ( (l1_pgentry_to_pagenr(current->mm.perdomain_pt[0]) == pfn) &&
+        if ( (l1_pgentry_to_pagenr(current->mm.perdomain_ptes[0]) == pfn) &&
              (((pa&(PAGE_SIZE-1))>>3) >= FIRST_RESERVED_GDT_ENTRY) &&
              (((pa&(PAGE_SIZE-1))>>3) <= LAST_RESERVED_GDT_ENTRY) )
             goto out;
@@ -379,6 +493,14 @@ long do_update_descriptor(
 }
 
 #ifdef MEMORY_GUARD
+
+#if 1
+
+void *memguard_init(void *heap_start) { return heap_start; }
+void memguard_guard_range(void *p, unsigned long l) {}
+void memguard_unguard_range(void *p, unsigned long l) {}
+
+#else
 
 void *memguard_init(void *heap_start)
 {
@@ -442,14 +564,6 @@ void memguard_unguard_range(void *p, unsigned long l)
     __memguard_change_range(p, l, 0);
 }
 
-int memguard_is_guarded(void *p)
-{
-    l1_pgentry_t *l1;
-    l2_pgentry_t *l2;
-    unsigned long _p = (unsigned long)p;
-    l2  = &idle_pg_table[l2_table_offset(_p)];
-    l1  = l2_pgentry_to_l1(*l2) + l1_table_offset(_p);
-    return !(l1_pgentry_val(*l1) & _PAGE_PRESENT);
-}
+#endif
 
 #endif

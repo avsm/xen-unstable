@@ -30,6 +30,9 @@ struct pfn_info
     /* Each frame can be threaded onto a doubly-linked list. */
     struct list_head list;
 
+    /* Timestamp from 'TLB clock', used to reduce need for safety flushes. */
+    u32 tlbflush_timestamp;
+
     /* Reference count and various PGC_xxx flags and fields. */
     u32 count_info;
 
@@ -39,24 +42,22 @@ struct pfn_info
         /* Page is in use: ((count_info & PGC_count_mask) != 0). */
         struct {
             /* Owner of this page (NULL if page is anonymous). */
-            struct domain *domain;
+            u32 _domain; /* pickled format */
             /* Type reference count and various PGT_xxx flags and fields. */
             u32 type_info;
-        } inuse;
+        } PACKED inuse;
 
         /* Page is on a free list: ((count_info & PGC_count_mask) == 0). */
         struct {
             /* Mask of possibly-tainted TLBs. */
-            unsigned long cpu_mask;
+            u32 cpu_mask;
             /* Order-size of the free chunk this page is the head of. */
             u8 order;
-        } free;
+        } PACKED free;
 
-    } u;
+    } PACKED u;
 
-    /* Timestamp from 'TLB clock', used to reduce need for safety flushes. */
-    u32 tlbflush_timestamp;
-};
+} PACKED;
 
  /* The following page types are MUTUALLY EXCLUSIVE. */
 #define PGT_none            (0<<29) /* no special uses of this page */
@@ -97,9 +98,25 @@ struct pfn_info
 
 #define IS_XEN_HEAP_FRAME(_pfn) (page_to_phys(_pfn) < xenheap_phys_end)
 
+#if defined(__i386__)
+
+#define pickle_domptr(_d)   ((u32)(unsigned long)(_d))
+#define unpickle_domptr(_d) ((struct domain *)(unsigned long)(_d))
+
+#elif defined(__x86_64__)
+static inline struct domain *unpickle_domptr(u32 _domain)
+{ return (_domain == 0) ? NULL : __va(_domain); }
+static inline u32 pickle_domptr(struct domain *domain)
+{ return (domain == NULL) ? 0 : (u32)__pa(domain); }
+
+#endif
+
+#define page_get_owner(_p)    (unpickle_domptr((_p)->u.inuse._domain))
+#define page_set_owner(_p,_d) ((_p)->u.inuse._domain = pickle_domptr(_d))
+
 #define SHARE_PFN_WITH_DOMAIN(_pfn, _dom)                                   \
     do {                                                                    \
-        (_pfn)->u.inuse.domain = (_dom);                                    \
+        page_set_owner((_pfn), (_dom));                                     \
         /* The incremented type count is intended to pin to 'writable'. */  \
         (_pfn)->u.inuse.type_info = PGT_writable_page | PGT_validated | 1;  \
         wmb(); /* install valid domain ptr before updating refcnt. */       \
@@ -142,7 +159,8 @@ static inline int get_page(struct pfn_info *page,
                            struct domain *domain)
 {
     u32 x, nx, y = page->count_info;
-    struct domain *d, *nd = page->u.inuse.domain;
+    u32 d, nd = page->u.inuse._domain;
+    u32 _domain = pickle_domptr(domain);
 
     do {
         x  = y;
@@ -150,10 +168,10 @@ static inline int get_page(struct pfn_info *page,
         d  = nd;
         if ( unlikely((x & PGC_count_mask) == 0) ||  /* Not allocated? */
              unlikely((nx & PGC_count_mask) == 0) || /* Count overflow? */
-             unlikely(d != domain) )                 /* Wrong owner? */
+             unlikely(d != _domain) )                /* Wrong owner? */
         {
             DPRINTK("Error pfn %08lx: ed=%p, sd=%p, caf=%08x, taf=%08x\n",
-                    page_to_pfn(page), domain, d,
+                    page_to_pfn(page), domain, unpickle_domptr(d),
                     x, page->u.inuse.type_info);
             return 0;
         }
@@ -198,7 +216,7 @@ static inline int get_page_and_type(struct pfn_info *page,
     ASSERT(((_p)->u.inuse.type_info & PGT_count_mask) != 0)
 #define ASSERT_PAGE_IS_DOMAIN(_p, _d)                          \
     ASSERT(((_p)->count_info & PGC_count_mask) != 0);          \
-    ASSERT((_p)->u.inuse.domain == (_d))
+    ASSERT(page_get_owner(_p) == (_d))
 
 int check_descriptor(unsigned long *d);
 
@@ -215,14 +233,15 @@ void synchronise_pagetables(unsigned long cpu_mask);
  * contiguous (or near contiguous) physical memory.
  */
 #undef  machine_to_phys_mapping
-#ifdef __x86_64__
-extern unsigned long *machine_to_phys_mapping;
-#else
-/* Don't call virt_to_phys on this: it isn't direct mapped.  Using
-   m2p_start_mfn instead. */
+
+/*
+ * The phys_to_machine_mapping is the reversed mapping of MPT for full
+ * virtualization.
+ */
+#undef  phys_to_machine_mapping
+
 #define machine_to_phys_mapping ((unsigned long *)RDWR_MPT_VIRT_START)
-extern unsigned long m2p_start_mfn;
-#endif
+#define phys_to_machine_mapping ((unsigned long *)PERDOMAIN_VIRT_START)
 
 #define set_machinetophys(_mfn, _pfn) machine_to_phys_mapping[(_mfn)] = (_pfn)
 
@@ -233,12 +252,10 @@ extern unsigned long m2p_start_mfn;
 void *memguard_init(void *heap_start);
 void memguard_guard_range(void *p, unsigned long l);
 void memguard_unguard_range(void *p, unsigned long l);
-int memguard_is_guarded(void *p);
 #else
 #define memguard_init(_s)              (_s)
 #define memguard_guard_range(_p,_l)    ((void)0)
 #define memguard_unguard_range(_p,_l)  ((void)0)
-#define memguard_is_guarded(_p)        (0)
 #endif
 
 
@@ -275,6 +292,8 @@ extern ptwr_info_t ptwr_info[];
 
 void ptwr_flush(const int);
 int ptwr_do_page_fault(unsigned long);
+
+int new_guest_cr3(unsigned long pfn);
 
 #define __cleanup_writable_pagetable(_what)                                 \
 do {                                                                        \

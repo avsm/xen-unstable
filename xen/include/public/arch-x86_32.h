@@ -119,6 +119,7 @@ typedef u64 tsc_timestamp_t; /* RDTSC timestamp */
  */
 typedef struct {
 #define ECF_I387_VALID (1<<0)
+#define ECF_VMX_GUEST  (2<<0)
     unsigned long flags;
     execution_context_t cpu_ctxt;           /* User-level CPU registers     */
     char          fpu_ctxt[256];            /* User-level FPU registers     */
@@ -136,9 +137,8 @@ typedef struct {
 } PACKED full_execution_context_t;
 
 typedef struct {
-    u64 mfn_to_pfn_start;      /* MFN of start of m2p table */
-    u64 pfn_to_mfn_frame_list; /* MFN of a table of MFNs that 
-				  make up p2m table */
+    /* MFN of a table of MFNs that make up p2m table */
+    u64 pfn_to_mfn_frame_list;
 } PACKED arch_shared_info_t;
 
 #define ARCH_HAS_FAST_TRAP
