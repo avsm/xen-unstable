@@ -15,6 +15,7 @@
 4187c1c7IWmBinGdI19kL4MuZ6RLbQ docs/check_pkgs
 3f9e7d60PWZJeVh5xdnk0nLUdxlqEA docs/figs/xenlogo.eps
 418a3248xjIqmNKo0v_XQSfAvlBGFw docs/html.sty
+41c0c4116itF389v0CEWcmzue6zJkA docs/misc/VMX_changes.txt
 4022a73cgxX1ryj1HgS-IwwB6NUi2A docs/misc/XenDebugger-HOWTO
 412f4bd9sm5mCQ8BkrgKcAKZGadq7Q docs/misc/blkif-drivers-explained.txt
 40d6ccbfKKBq8jE0ula4eHEzBiQuDA docs/misc/xen_config.html
@@ -97,7 +98,6 @@
 40d70c240tW7TWArl1VUgIFH2nVO1A linux-2.4.28-xen-sparse/include/asm-xen/keyboard.h
 3e5a4e678ddsQOpbSiRdy1GRcDc9WA linux-2.4.28-xen-sparse/include/asm-xen/mmu_context.h
 40d06e5b2YWInUX1Xv9amVANwd_2Xg linux-2.4.28-xen-sparse/include/asm-xen/module.h
-3f8707e7ZmZ6TxyX0ZUEfvhA2Pb_xQ linux-2.4.28-xen-sparse/include/asm-xen/msr.h
 3e5a4e67mnQfh-R8KcQCaVo2Oho6yg linux-2.4.28-xen-sparse/include/asm-xen/page.h
 409ba2e7ZfV5hqTvIzxLtpClnxtIzg linux-2.4.28-xen-sparse/include/asm-xen/pci.h
 3e5a4e67uTYU5oEnIDjxuaez8njjqg linux-2.4.28-xen-sparse/include/asm-xen/pgalloc.h
@@ -150,6 +150,8 @@
 40f56238a8iOVDEoostsbun_sy2i4g linux-2.6.9-xen-sparse/arch/xen/i386/kernel/process.c
 40f56238YQIJoYG2ehDGEcdTgLmGbg linux-2.6.9-xen-sparse/arch/xen/i386/kernel/setup.c
 40f56238nWMQg7CKbyTy0KJNvCzbtg linux-2.6.9-xen-sparse/arch/xen/i386/kernel/signal.c
+41811cac4lkCB-fHir6CcxuEJ2pGsQ linux-2.6.9-xen-sparse/arch/xen/i386/kernel/smp.c
+41811ca9mbGpqBrZVrUGEiv8CTV3ng linux-2.6.9-xen-sparse/arch/xen/i386/kernel/smpboot.c
 40f56238UL9uv78ODDzMwLL9yryeFw linux-2.6.9-xen-sparse/arch/xen/i386/kernel/sysenter.c
 40f56238qVGkpO_ycnQA8k03kQzAgA linux-2.6.9-xen-sparse/arch/xen/i386/kernel/time.c
 40f56238NzTgeO63RGoxHrW5NQeO3Q linux-2.6.9-xen-sparse/arch/xen/i386/kernel/timers/Makefile
@@ -177,6 +179,7 @@
 412dfae9eA3_6e6bCGUtg1mj8b56fQ linux-2.6.9-xen-sparse/arch/xen/kernel/gnttab.c
 40f562392LBhwmOxVPsYdkYXMxI_ZQ linux-2.6.9-xen-sparse/arch/xen/kernel/reboot.c
 414c113396tK1HTVeUalm3u-1DF16g linux-2.6.9-xen-sparse/arch/xen/kernel/skbuff.c
+418f90e4lGdeJK9rmbOB1kN-IKSjsQ linux-2.6.9-xen-sparse/arch/xen/kernel/smp.c
 3f68905c5eiA-lBMQSvXLMWS1ikDEA linux-2.6.9-xen-sparse/arch/xen/kernel/xen_proc.c
 41261688yS8eAyy-7kzG4KBs0xbYCA linux-2.6.9-xen-sparse/drivers/Makefile
 4108f5c1WfTIrs0HZFeV39sttekCTw linux-2.6.9-xen-sparse/drivers/char/mem.c
@@ -195,6 +198,12 @@
 40f56239-JNIaTzlviVJohVdoYOUpw linux-2.6.9-xen-sparse/drivers/xen/blkfront/blkfront.c
 40f56239y9naBTXe40Pi2J_z3p-d1g linux-2.6.9-xen-sparse/drivers/xen/blkfront/block.h
 40f56239BVfPsXBiWQitXgDRtOsiqg linux-2.6.9-xen-sparse/drivers/xen/blkfront/vbd.c
+41a226e0vjAcDXHOnXE5ummcdUD2mg linux-2.6.9-xen-sparse/drivers/xen/blktap/Makefile
+41a226e0VeZA1N8tbU6nvJ3OxUcJmw linux-2.6.9-xen-sparse/drivers/xen/blktap/blktap.c
+41a226e1k4J5VMLnrYXDWRqElS49YQ linux-2.6.9-xen-sparse/drivers/xen/blktap/blktap.h
+41a226e1-A_Hy7utS8vJKaXnH_tzfA linux-2.6.9-xen-sparse/drivers/xen/blktap/blktap_controlmsg.c
+41a226e19NoUUTOvs7jumDMRYDIO4Q linux-2.6.9-xen-sparse/drivers/xen/blktap/blktap_datapath.c
+41a226e1MNSyWWK5dEVgvSQ5OW0fDA linux-2.6.9-xen-sparse/drivers/xen/blktap/blktap_userdev.c
 40f56239fsLjvtD8YBRAWphps4FDjg linux-2.6.9-xen-sparse/drivers/xen/console/Makefile
 3e5a4e651TH-SXHoufurnWjgl5bfOA linux-2.6.9-xen-sparse/drivers/xen/console/console.c
 40f56239KYxO0YabhPzCTeUuln-lnA linux-2.6.9-xen-sparse/drivers/xen/evtchn/Makefile
@@ -214,13 +223,14 @@
 4107adf1E5O4ztGHNGMzCCNhcvqNow linux-2.6.9-xen-sparse/include/asm-xen/asm-i386/dma-mapping.h
 40f5623akIoBsQ3KxSB2kufkbgONXQ linux-2.6.9-xen-sparse/include/asm-xen/asm-i386/fixmap.h
 41979925z1MsKU1SfuuheM1IFDQ_bA linux-2.6.9-xen-sparse/include/asm-xen/asm-i386/floppy.h
+41a64cdeQ5SWVEVbSZ0K-IeHHhIJ_w linux-2.6.9-xen-sparse/include/asm-xen/asm-i386/hardirq.h
 4118b6a418gnL6AZsTdglC92YGqYTg linux-2.6.9-xen-sparse/include/asm-xen/asm-i386/highmem.h
 40f5623aJVXQwpJMOLE99XgvGsfQ8Q linux-2.6.9-xen-sparse/include/asm-xen/asm-i386/io.h
 40f5623aKXkBBxgpLx2NcvkncQ1Yyw linux-2.6.9-xen-sparse/include/asm-xen/asm-i386/mach-xen/irq_vectors.h
 40f5623aDMCsWOFO0jktZ4e8sjwvEg linux-2.6.9-xen-sparse/include/asm-xen/asm-i386/mach-xen/setup_arch_post.h
 40f5623arsFXkGdPvIqvFi3yFXGR0Q linux-2.6.9-xen-sparse/include/asm-xen/asm-i386/mach-xen/setup_arch_pre.h
+41811f07Iri9hrvs97t-baxmhOwWDQ linux-2.6.9-xen-sparse/include/asm-xen/asm-i386/mach-xen/smpboot_hooks.h
 4120f807GCO0uqsLqdZj9csxR1Wthw linux-2.6.9-xen-sparse/include/asm-xen/asm-i386/mmu_context.h
-40f5623aFTyFTR-vdiA-KaGxk5JOKQ linux-2.6.9-xen-sparse/include/asm-xen/asm-i386/msr.h
 40f5623adgjZq9nAgCt0IXdWl7udSA linux-2.6.9-xen-sparse/include/asm-xen/asm-i386/page.h
 40f5623a54NuG-7qHihGYmw4wWQnMA linux-2.6.9-xen-sparse/include/asm-xen/asm-i386/param.h
 41137cc1kkvg0cg7uxddcEfjL7L67w linux-2.6.9-xen-sparse/include/asm-xen/asm-i386/pci.h
@@ -232,6 +242,7 @@
 412ea0afQL2CAI-f522TbLjLPMibPQ linux-2.6.9-xen-sparse/include/asm-xen/asm-i386/ptrace.h
 40f5623bzLvxr7WoJIxVf2OH4rCBJg linux-2.6.9-xen-sparse/include/asm-xen/asm-i386/segment.h
 40f5623bG_LzgG6-qwk292nTc5Wabw linux-2.6.9-xen-sparse/include/asm-xen/asm-i386/setup.h
+4198c32a8NzmcKVOzKaEJfaQxxiA0A linux-2.6.9-xen-sparse/include/asm-xen/asm-i386/spinlock.h
 40f5623bgzm_9vwxpzJswlAxg298Gg linux-2.6.9-xen-sparse/include/asm-xen/asm-i386/synch_bitops.h
 40f5623bVdKP7Dt7qm8twu3NcnGNbA linux-2.6.9-xen-sparse/include/asm-xen/asm-i386/system.h
 40f5623bc8LKPRO09wY5dGDnY_YCpw linux-2.6.9-xen-sparse/include/asm-xen/asm-i386/tlbflush.h
@@ -293,8 +304,6 @@
 413cb3b5F56TvQWAmO5TsuzhtzLFPQ netbsd-2.0-xen-sparse/sys/arch/xen/xen/xenkbc.c
 413cb3b53nyOv1OIeDSsCXhBFDXvJA netbsd-2.0-xen-sparse/sys/nfs/files.nfs
 413aa1d0oNP8HXLvfPuMe6cSroUfSA patches/linux-2.6.9/agpgart.patch
-413aa1d0ewvSv-ohnNnQQNGsbPTTNA patches/linux-2.6.9/drm.patch
-418abc69J3F638vPO9MYoDGeYilxoQ patches/linux-2.6.9/nettel.patch
 40e1b09db5mN69Ijj0X_Eol-S7dXiw tools/Make.defs
 3f776bd1Hy9rn69ntXBhPReUFw9IEA tools/Makefile
 4124b307nRyK3dhn1hAsvrY76NuV3g tools/check/Makefile
@@ -686,6 +695,9 @@
 3ddb79bc-Udq7ol-NX4q9XsYnN7A2Q xen/arch/x86/time.c
 3ddb79bccYVzXZJyVaxuv5T42Z1Fsw xen/arch/x86/trampoline.S
 3ddb79bcOftONV9h4QCxXOfiT0h91w xen/arch/x86/traps.c
+41c0c411tD3C7TpfDMiFTf7BaNd_Dg xen/arch/x86/vmx.c
+41c0c411ODt8uEmV-yUxpQLpqimE5Q xen/arch/x86/vmx_io.c
+41c0c4128URE0dxcO15JME_MuKBPfg xen/arch/x86/vmx_vmcs.c
 419cbedeQDg8IrO3izo3o5rQNlo0kQ xen/arch/x86/x86_32/asm-offsets.c
 3e32af9aRnYGl4GMOaDKp7JdfhOGhg xen/arch/x86/x86_32/domain_page.c
 3ddb79bcecupHj56ZbTa3B0FxDowMg xen/arch/x86/x86_32/entry.S
@@ -796,6 +808,7 @@
 3ddb79c34BFiXjBJ_cCKB0aCsV1IDw xen/include/asm-x86/desc.h
 40715b2dTokMLYGSuD58BnxOqyWVew xen/include/asm-x86/div64.h
 3e20b82fl1jmQiKdLy7fxMcutfpjWA xen/include/asm-x86/domain_page.h
+41c0c412Ufq5sAvri3dMHC1BXiO6Gw xen/include/asm-x86/e820.h
 3ddb79c3NU8Zy40OTrq3D-i30Y3t4A xen/include/asm-x86/fixmap.h
 3e2d29944GI24gf7vOP_7x8EyuqxeA xen/include/asm-x86/flushtlb.h
 3ddb79c39o75zPP0T1aQQ4mNrCAN2w xen/include/asm-x86/hardirq.h
@@ -825,6 +838,10 @@
 3ddb79c3ezddh34MdelJpa5tNR00Dw xen/include/asm-x86/system.h
 3ddb79c4HugMq7IYGxcQKFBpKwKhzA xen/include/asm-x86/types.h
 40cf1596saFaHD5DC5zvrSn7CDCWGQ xen/include/asm-x86/uaccess.h
+41c0c412k6GHYF3cJtDdw37ee3TVaw xen/include/asm-x86/vmx.h
+41c0c412hck3QX-6_MaXaISGkngQuA xen/include/asm-x86/vmx_cpu.h
+41c0c41243jC1mcArZx_t3YkBL4lTA xen/include/asm-x86/vmx_platform.h
+41c0c412lQ0NVVN9PsOSznQ-qhOiPA xen/include/asm-x86/vmx_vmcs.h
 418fbcfe_WliJPToeVM-9VStvym-hw xen/include/asm-x86/x86_32/asm_defns.h
 3ddb79c2ADvRmdexd9y3AYK9_NTx-Q xen/include/asm-x86/x86_32/current.h
 3ddb79c3mbqEM7QQr3zVq7NiBNhouA xen/include/asm-x86/x86_32/regs.h
@@ -845,6 +862,7 @@
 4121d149udGfSUGhn3k1ECz0bM31nQ xen/include/public/grant_table.h
 40f5623bqoi4GEoBiiUc6TZk1HjsMg xen/include/public/io/blkif.h
 40dc4076pVeE1kEEWzcUaNZin65kCA xen/include/public/io/domain_controller.h
+41c0c412FLc0gunlJl91qMYscFtXVA xen/include/public/io/ioreq.h
 40f5623cTZ80EwjWUBlh44A9F9i_Lg xen/include/public/io/netif.h
 4051db79512nOCGweabrFWO2M2h5ng xen/include/public/physdev.h
 40589968wmhPmV5-ENbBYmMjnedgKw xen/include/public/sched_ctl.h

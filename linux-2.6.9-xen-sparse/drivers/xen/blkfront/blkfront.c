@@ -44,6 +44,7 @@
 #include <linux/interrupt.h>
 #include <scsi/scsi.h>
 #include <asm-xen/ctrl_if.h>
+#include <asm-xen/evtchn.h>
 
 typedef unsigned char byte; /* from linux/ide.h */
 
@@ -1244,7 +1245,8 @@ static void blkif_status(blkif_fe_interface_status_t *status)
 {
     if ( status->handle != blkif_handle )
     {
-        WPRINTK(" Invalid blkif: handle=%u", status->handle);
+        WPRINTK(" Invalid blkif: handle=%u\n", status->handle);
+        unexpected(status);
         return;
     }
 
