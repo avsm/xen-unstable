@@ -20,6 +20,7 @@ all: $(TARGETS)
 install: all
 	mkdir -p $(prefix)/usr/bin
 	install -m0755 $(INSTALL) $(prefix)/usr/bin
+	install -m0755 netfix $(prefix)/usr/sbin
 	$(MAKE) -C miniterm install
 
 clean:
