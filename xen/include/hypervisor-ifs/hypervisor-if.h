@@ -19,9 +19,9 @@
  * NB. The reserved range is inclusive (that is, both FIRST_RESERVED_GDT_ENTRY
  * and LAST_RESERVED_GDT_ENTRY are reserved).
  */
-#define NR_RESERVED_GDT_ENTRIES         40
-#define FIRST_RESERVED_GDT_ENTRY	256
-#define LAST_RESERVED_GDT_ENTRY         \
+#define NR_RESERVED_GDT_ENTRIES    40
+#define FIRST_RESERVED_GDT_ENTRY   256
+#define LAST_RESERVED_GDT_ENTRY    \
   (FIRST_RESERVED_GDT_ENTRY + NR_RESERVED_GDT_ENTRIES - 1)
 
 /*
@@ -29,10 +29,10 @@
  * are also present in the initial GDT, many OSes will be able to avoid
  * installing their own GDT.
  */
-#define FLAT_RING1_CS		0x0819
-#define FLAT_RING1_DS		0x0821
-#define FLAT_RING3_CS		0x082b
-#define FLAT_RING3_DS		0x0833
+#define FLAT_RING1_CS 0x0819
+#define FLAT_RING1_DS 0x0821
+#define FLAT_RING3_CS 0x082b
+#define FLAT_RING3_DS 0x0833
 
 
 /*
@@ -40,25 +40,25 @@
  */
 
 /* EAX = vector; EBX, ECX, EDX, ESI, EDI = args 1, 2, 3, 4, 5. */
-#define __HYPERVISOR_set_trap_table	   0
-#define __HYPERVISOR_pt_update		   1
-#define __HYPERVISOR_console_write	   2
-#define __HYPERVISOR_set_gdt		   3
+#define __HYPERVISOR_set_trap_table        0
+#define __HYPERVISOR_mmu_update            1
+#define __HYPERVISOR_console_write         2
+#define __HYPERVISOR_set_gdt               3
 #define __HYPERVISOR_stack_switch          4
 #define __HYPERVISOR_set_callbacks         5
-#define __HYPERVISOR_net_update		   6
-#define __HYPERVISOR_fpu_taskswitch	   7
-#define __HYPERVISOR_yield		   8
-#define __HYPERVISOR_exit		   9
-#define __HYPERVISOR_dom0_op		  10
-#define __HYPERVISOR_network_op		  11
-#define __HYPERVISOR_block_io_op	  12
-#define __HYPERVISOR_set_debugreg	  13
-#define __HYPERVISOR_get_debugreg	  14
-#define __HYPERVISOR_update_descriptor	  15
-#define __HYPERVISOR_set_fast_trap	  16
-#define __HYPERVISOR_dom_mem_op		  17
-#define __HYPERVISOR_multicall		  18
+#define __HYPERVISOR_net_io_op             6
+#define __HYPERVISOR_fpu_taskswitch        7
+#define __HYPERVISOR_yield                 8
+#define __HYPERVISOR_exit                  9
+#define __HYPERVISOR_dom0_op              10
+#define __HYPERVISOR_network_op           11
+#define __HYPERVISOR_block_io_op          12
+#define __HYPERVISOR_set_debugreg         13
+#define __HYPERVISOR_get_debugreg         14
+#define __HYPERVISOR_update_descriptor    15
+#define __HYPERVISOR_set_fast_trap        16
+#define __HYPERVISOR_dom_mem_op           17
+#define __HYPERVISOR_multicall            18
 #define __HYPERVISOR_kbd_op               19
 #define __HYPERVISOR_update_va_mapping    20
 
@@ -111,37 +111,35 @@
 
 
 /*
- * PAGE UPDATE COMMANDS AND FLAGS
- * 
- * PGREQ_XXX: specified in least 2 bits of 'ptr' field. These bits are masked
+ * MMU_XXX: specified in least 2 bits of 'ptr' field. These bits are masked
  *  off to get the real 'ptr' value.
  * All requests specify relevent address in 'ptr'. This is either a
- * machine/physical address (PA), or linear/virtual address (VA).
+ * machine/physical address (MA), or linear/virtual address (VA).
  * Normal requests specify update value in 'value'.
  * Extended requests specify command in least 8 bits of 'value'. These bits
- *  are masked off to get the real 'val' value. Except for PGEXT_SET_LDT 
+ *  are masked off to get the real 'val' value. Except for MMUEXT_SET_LDT 
  *  which shifts the least bits out.
  */
 /* A normal page-table update request. */
-#define PGREQ_NORMAL_UPDATE     0 /* checked '*ptr = val'. ptr is VA.      */
+#define MMU_NORMAL_PT_UPDATE     0 /* checked '*ptr = val'. ptr is VA.      */
 /* DOM0 can make entirely unchecked updates which do not affect refcnts. */
-#define PGREQ_UNCHECKED_UPDATE  1 /* unchecked '*ptr = val'. ptr is VA.    */
+#define MMU_UNCHECKED_PT_UPDATE  1 /* unchecked '*ptr = val'. ptr is VA.    */
 /* Update an entry in the machine->physical mapping table. */
-#define PGREQ_MPT_UPDATE        2 /* ptr = PA of frame to modify entry for */
+#define MMU_MACHPHYS_UPDATE      2 /* ptr = MA of frame to modify entry for */
 /* An extended command. */
-#define PGREQ_EXTENDED_COMMAND  3 /* least 8 bits of val demux further     */
+#define MMU_EXTENDED_COMMAND     3 /* least 8 bits of val demux further     */
 /* Extended commands: */
-#define PGEXT_PIN_L1_TABLE      0 /* ptr = PA of frame to pin              */
-#define PGEXT_PIN_L2_TABLE      1 /* ptr = PA of frame to pin              */
-#define PGEXT_PIN_L3_TABLE      2 /* ptr = PA of frame to pin              */
-#define PGEXT_PIN_L4_TABLE      3 /* ptr = PA of frame to pin              */
-#define PGEXT_UNPIN_TABLE       4 /* ptr = PA of frame to unpin            */
-#define PGEXT_NEW_BASEPTR       5 /* ptr = PA of new pagetable base        */
-#define PGEXT_TLB_FLUSH         6 /* ptr = NULL                            */
-#define PGEXT_INVLPG            7 /* ptr = NULL ; val = page to invalidate */
-#define PGEXT_SET_LDT           8 /* ptr = VA of table; val = # entries    */
-#define PGEXT_CMD_MASK        255
-#define PGEXT_CMD_SHIFT         8
+#define MMUEXT_PIN_L1_TABLE      0 /* ptr = MA of frame to pin              */
+#define MMUEXT_PIN_L2_TABLE      1 /* ptr = MA of frame to pin              */
+#define MMUEXT_PIN_L3_TABLE      2 /* ptr = MA of frame to pin              */
+#define MMUEXT_PIN_L4_TABLE      3 /* ptr = MA of frame to pin              */
+#define MMUEXT_UNPIN_TABLE       4 /* ptr = MA of frame to unpin            */
+#define MMUEXT_NEW_BASEPTR       5 /* ptr = MA of new pagetable base        */
+#define MMUEXT_TLB_FLUSH         6 /* ptr = NULL                            */
+#define MMUEXT_INVLPG            7 /* ptr = NULL ; val = VA to invalidate   */
+#define MMUEXT_SET_LDT           8 /* ptr = VA of table; val = # entries    */
+#define MMUEXT_CMD_MASK        255
+#define MMUEXT_CMD_SHIFT         8
 
 /* These are passed as 'flags' to update_va_mapping. They can be ORed. */
 #define UVMF_FLUSH_TLB          1 /* Flush entire TLB. */
@@ -175,12 +173,12 @@ typedef struct trap_info_st
 } trap_info_t;
 
 /*
- * Send an array of these to HYPERVISOR_pt_update()
+ * Send an array of these to HYPERVISOR_mmu_update()
  */
 typedef struct
 {
     unsigned long ptr, val; /* *ptr = val */
-} page_update_request_t;
+} mmu_update_t;
 
 /*
  * Send an array of these to HYPERVISOR_multicall()
@@ -232,32 +230,35 @@ typedef struct shared_info_st {
     /*
      * Time: The following abstractions are exposed: System Time, Clock Time,
      * Domain Virtual Time. Domains can access Cycle counter time directly.
-     * 
-     * The following values are updated periodically (and atomically, from the
-     * p.o.v. of the guest OS). Th eguest OS detects this because the wc_version
-     * is incremented.
      */
-    u32		       wc_version;      /* a version number for info below */
-    unsigned int       rdtsc_bitshift;  /* use bits N:N+31 of TSC          */
-    u64		       cpu_freq;        /* to calculate ticks -> real time */
-    /* System Time */
-    long long	       system_time;     /* in ns */
-    unsigned long      st_timestamp;    /* cyclecounter at last update */
-    /* Wall Clock Time */
-    long	       tv_sec;          /* essentially a struct timeval */
-    long	       tv_usec;
-    long long	       wc_timestamp;    /* system time at last update */
+
+    unsigned int       rdtsc_bitshift;  /* tsc_timestamp uses N:N+31 of TSC. */
+    u64                cpu_freq;        /* CPU frequency (Hz).               */
+
+    /*
+     * The following values are updated periodically (and not necessarily
+     * atomically!). The guest OS detects this because 'time_version1' is
+     * incremented just before updating these values, and 'time_version2' is
+     * incremented immediately after. See Xenolinux code for an example of how 
+     * to read these values safely (arch/xeno/kernel/time.c).
+     */
+    unsigned long      time_version1;   /* A version number for info below.  */
+    unsigned long      time_version2;   /* A version number for info below.  */
+    unsigned long      tsc_timestamp;   /* TSC at last update of time vals.  */
+    u64                system_time;     /* Time, in nanosecs, since boot.    */
+    unsigned long      wc_sec;          /* Secs  00:00:00 UTC, Jan 1, 1970.  */
+    unsigned long      wc_usec;         /* Usecs 00:00:00 UTC, Jan 1, 1970.  */
     
     /* Domain Virtual Time */
-    unsigned long long domain_time;
+    u64                domain_time;
 	
     /*
      * Timeout values:
      * Allow a domain to specify a timeout value in system time and 
      * domain virtual time.
      */
-    unsigned long long wall_timeout;
-    unsigned long long domain_timeout;
+    u64                wall_timeout;
+    u64                domain_timeout;
 
     /*
      * The index structures are all stored here for convenience. The rings 
@@ -275,19 +276,19 @@ typedef struct shared_info_st {
  * NB. We expect that this struct is smaller than a page.
  */
 typedef struct start_info_st {
-    unsigned long nr_pages;	  /* total pages allocated to this domain */
-    shared_info_t *shared_info;	  /* VIRTUAL address of shared info struct */
-    unsigned long  pt_base;	  /* VIRTUAL address of page directory */
-    unsigned long mod_start;	  /* VIRTUAL address of pre-loaded module */
-    unsigned long mod_len;	  /* size (bytes) of pre-loaded module */
-    /* Machine address of net rings for each VIF. Will be page aligned. */
-    unsigned long net_rings[MAX_DOMAIN_VIFS];
-    unsigned char net_vmac[MAX_DOMAIN_VIFS][6];
-    /* Machine address of block-device ring. Will be page aligned. */
-    unsigned long blk_ring;
-    unsigned int  dom_id;
-    unsigned long flags; 
-    unsigned char cmd_line[1];	  /* variable-length */
+    /* THE FOLLOWING ARE ONLY FILLED IN ON INITIAL BOOT (NOT RESUME).      */
+    unsigned long pt_base;	  /* VIRTUAL address of page directory.    */
+    unsigned long mod_start;	  /* VIRTUAL address of pre-loaded module. */
+    unsigned long mod_len;	  /* Size (bytes) of pre-loaded module.    */
+    /* THE FOLLOWING ARE FILLED IN BOTH ON INITIAL BOOT AND ON RESUME.     */
+    unsigned long nr_pages;	  /* total pages allocated to this domain. */
+    unsigned long shared_info;	  /* MACHINE address of shared info struct.*/
+    unsigned int  dom_id;         /* Domain identifier.                    */
+    unsigned long flags;          /* SIF_xxx flags.                        */
+    unsigned long net_rings[MAX_DOMAIN_VIFS];   /* MACHINE address of ring.*/
+    unsigned char net_vmac[MAX_DOMAIN_VIFS][6]; /* MAC address of VIF.     */
+    unsigned long blk_ring;       /* MACHINE address of blkdev ring.       */
+    unsigned char cmd_line[1];	  /* Variable-length options.              */
 } start_info_t;
 
 /* These flags are passed in the 'flags' field of start_info_t. */

@@ -21,6 +21,8 @@
 #define DOM0_BUILDDOMAIN   13
 #define DOM0_IOPL          14
 #define DOM0_MSR           15
+#define DOM0_DEBUG         16
+#define DOM0_SETTIME       17
 
 #define MAX_CMD_LEN       256
 #define MAX_DOMAIN_NAME    16
@@ -55,7 +57,6 @@ typedef struct domain_launch
     unsigned int  domain;
     unsigned long l2_pgt_addr;
     unsigned long virt_load_addr;
-    unsigned long virt_shinfo_addr;
     unsigned long virt_startinfo_addr;
     unsigned int num_vifs;
     char cmd_line[MAX_CMD_LEN];
@@ -108,6 +109,26 @@ typedef struct dom0_msr_st
 
 } dom0_msr_t;
 
+typedef struct dom0_debug_st
+{
+    /* IN variables. */
+    int in1, in2;
+    /* OUT variables. */
+    int out1, out2;
+
+} dom0_debug_t;
+
+/*
+ * Set clock such that it would read <secs,usecs> after 00:00:00 UTC,
+ * 1 January, 1970 if the current system time was <system_time>.
+ */
+typedef struct dom0_settime_st
+{
+    /* IN variables. */
+    unsigned long secs, usecs;
+    u64 system_time;
+} dom0_settime_t;
+
 typedef struct dom0_op_st
 {
     unsigned long cmd;
@@ -122,6 +143,8 @@ typedef struct dom0_op_st
         dom0_getdominfo_t getdominfo;
         dom0_iopl_t iopl;
 	dom0_msr_t msr;
+	dom0_debug_t debug;
+	dom0_settime_t settime;
     }
     u;
 } dom0_op_t;

@@ -22,7 +22,7 @@ UCCL)
 esac
 
 DEST_DIR=${2:-xeno-clone}
-DEST_BK_REP=`basename ${BK_REP}`
+DEST_BK_REP=`basename "${BK_REP}"`
 
 echo usage: xen-clone bk_repository dest_dir orig_linux_dir
 echo Source BK Repository : ${BK_REP}
@@ -60,7 +60,13 @@ cd ${TOP}
 fi
 
 # identify this version of linux
-LINUX_VER=`/bin/ls -ld ${DEST_BK_REP}/xenolinux-sparse | sed -e 's!^.*xenolinux-\([0-9.]\+\)-sparse!\1!'`
+LINUX_VER=`( /bin/ls -ld ${DEST_BK_REP}/xenolinux-sparse || /bin/ls -ld ${DEST_BK_REP}/xenolinux-*-sparse ) 2>/dev/null | sed -e 's!^.*xenolinux-\(.\+\)-sparse!\1!'`
+
+if [ -z "${LINUX_VER}" ]
+then
+echo Unable to identify Linux version. Bailing.
+exit -1
+fi
 
 # copy in the master Linux tree for this kernel
 if [ ! -d linux-${LINUX_VER} ]

@@ -1,13 +1,15 @@
 
-#include "hypervisor-ifs/dom0_ops.h"
 #include "dom0_defs.h"
 #include "mem_defs.h"
 
+/* This string is written to the head of every guest kernel image. */
 #define GUEST_SIG   "XenoGues"
 #define SIG_LEN    8
 
 #define L1_PROT (_PAGE_PRESENT|_PAGE_RW|_PAGE_ACCESSED)
 #define L2_PROT (_PAGE_PRESENT|_PAGE_RW|_PAGE_ACCESSED|_PAGE_DIRTY|_PAGE_USER)
+
+static char *argv0 = "internal_domain_build";
 
 static long get_tot_pages(int domain_id)
 {
@@ -40,12 +42,12 @@ static int get_pfn_list(
     return (ret < 0) ? -1 : op.u.getmemlist.num_pfns;
 }
 
-static int send_pgupdates(page_update_request_t *updates, int nr_updates)
+static int send_pgupdates(mmu_update_t *updates, int nr_updates)
 {
     int ret = -1;
     privcmd_hypercall_t hypercall;
 
-    hypercall.op     = __HYPERVISOR_pt_update;
+    hypercall.op     = __HYPERVISOR_mmu_update;
     hypercall.arg[0] = (unsigned long)updates;
     hypercall.arg[1] = (unsigned long)nr_updates;
 
@@ -78,6 +80,7 @@ static int read_kernel_header(int fd, long dom_size,
 	return -1;
     }
 
+    /* Double the kernel image size to account for dynamic memory usage etc. */
     if ( (stat.st_size * 2) > (dom_size << 10) )
     {
         sprintf(status, "Kernel image size %ld larger than requested "
@@ -89,11 +92,12 @@ static int read_kernel_header(int fd, long dom_size,
     read(fd, signature, SIG_LEN);
     if ( strncmp(signature, GUEST_SIG, SIG_LEN) )
     {
-        ERROR("Kernel image does not contain required signature. "
+        ERROR("Kernel image does not contain required signature.\n"
               "Terminating.\n");
 	return -1;
     }
 
+    /* Read the load address which immediately follows the Xeno signature. */
     read(fd, load_addr, sizeof(unsigned long));
 
     *ksize = stat.st_size - SIG_LEN - sizeof(unsigned long);
@@ -147,7 +151,7 @@ static int setup_guestos(
     l1_pgentry_t *vl1tab = NULL, *vl1e = NULL;
     l2_pgentry_t *vl2tab = NULL, *vl2e = NULL;
     unsigned long *page_array = NULL;
-    page_update_request_t *pgt_update_arr = NULL, *pgt_updates = NULL;
+    mmu_update_t *pgt_update_arr = NULL, *pgt_updates = NULL;
     int alloc_index, num_pt_pages;
     unsigned long l2tab;
     unsigned long l1tab = 0;
@@ -159,8 +163,7 @@ static int setup_guestos(
     if ( init_pfn_mapper() < 0 )
         goto error_out;
 
-    pgt_updates = malloc((tot_pages + 1024) * 3
-                         * sizeof(page_update_request_t));
+    pgt_updates = malloc((tot_pages + 1024) * 3 * sizeof(mmu_update_t));
     page_array = malloc(tot_pages * sizeof(unsigned long));
     pgt_update_arr = pgt_updates;
     if ( (pgt_update_arr == NULL) || (page_array == NULL) )
@@ -207,6 +210,7 @@ static int setup_guestos(
             goto error_out;
         }
 
+        /* 'i' is 'ksize' rounded up to a page boundary. */
         meminfo->virt_mod_addr = virt_load_addr + i;
         meminfo->virt_mod_len  = isize;
 
@@ -226,12 +230,8 @@ static int setup_guestos(
 
     alloc_index = tot_pages - 1;
 
-    /*
-     * Count bottom-level PTs, rounding up. Include one PTE for shared info. We
-     * therefore add 1024 because 1 is for shared_info, 1023 is to round up.
-     */
-    num_pt_pages = 
-        (l1_table_offset(virt_load_addr) + tot_pages + 1024) / 1024;
+    /* Count bottom-level PTs, rounding up. */
+    num_pt_pages = (l1_table_offset(virt_load_addr) + tot_pages + 1023) / 1024;
 
     /* We must also count the page directory. */
     num_pt_pages++;
@@ -246,27 +246,22 @@ static int setup_guestos(
     l2tab = page_array[alloc_index] << PAGE_SHIFT;
     alloc_index--;
     meminfo->l2_pgt_addr = l2tab;
-    meminfo->virt_shinfo_addr = virt_load_addr + (tot_pages << PAGE_SHIFT);
 
     /*
      * Pin down l2tab addr as page dir page - causes hypervisor to provide
      * correct protection for the page
      */ 
-    pgt_updates->ptr = l2tab | PGREQ_EXTENDED_COMMAND;
-    pgt_updates->val = PGEXT_PIN_L2_TABLE;
+    pgt_updates->ptr = l2tab | MMU_EXTENDED_COMMAND;
+    pgt_updates->val = MMUEXT_PIN_L2_TABLE;
     pgt_updates++;
     num_pgt_updates++;
 
-    /*
-     * Initialise the page tables. The final iteration is for the shared_info
-     * PTE -- we break out before filling in the entry, as that is done by
-     * Xen during final setup.
-     */
+    /* Initialise the page tables. */
     if ( (vl2tab = map_pfn(l2tab >> PAGE_SHIFT)) == NULL )
         goto error_out;
     memset(vl2tab, 0, PAGE_SIZE);
     vl2e = vl2tab + l2_table_offset(virt_load_addr);
-    for ( count = 0; count < (tot_pages + 1); count++ )
+    for ( count = 0; count < tot_pages; count++ )
     {    
         if ( ((unsigned long)vl1e & (PAGE_SIZE-1)) == 0 ) 
         {
@@ -287,9 +282,6 @@ static int setup_guestos(
             vl2e++;
         }
 
-        /* The last PTE we consider is filled in later by Xen. */
-        if ( count == tot_pages ) break;
-		
         if ( count < pt_start )
         {
             pgt_updates->ptr = (unsigned long)vl1e;
@@ -309,7 +301,7 @@ static int setup_guestos(
         }
 
         pgt_updates->ptr = 
-	    (page_array[count] << PAGE_SHIFT) | PGREQ_MPT_UPDATE;
+	    (page_array[count] << PAGE_SHIFT) | MMU_MACHPHYS_UPDATE;
         pgt_updates->val = count;
         pgt_updates++;
         num_pgt_updates++;
@@ -336,8 +328,12 @@ static int setup_guestos(
 
 int main(int argc, char **argv)
 {
-    dom0_op_t launch_op;
+    /*
+     * NB. 'ksize' is the size in bytes of the main kernel image. It excludes
+     * the 8-byte signature and 4-byte load address.
+     */
     size_t ksize;
+    dom0_op_t launch_op;
     unsigned long load_addr;
     long tot_pages;
     int kernel_fd, initrd_fd = -1;
@@ -348,10 +344,13 @@ int main(int argc, char **argv)
     int domain_id;
     int rc;
 
+    if ( argv[0] != NULL ) 
+        argv0 = argv[0];
+
     if ( argc < 4 )
     {
-        fprintf(stderr, "Usage: dom_builder <domain_id> <image> <num_vifs> "
-                "[<initrd=initrd_name>] <boot_params>\n");
+        fprintf(stderr, "Usage: %s <domain_id> <image> <num_vifs> "
+                "[<initrd=initrd_name>] <boot_params>\n", argv0);
         return 1;
     }
 
