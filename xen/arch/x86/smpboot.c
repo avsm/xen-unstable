@@ -647,6 +647,7 @@ static void __init do_boot_cpu (int apicid)
  */
 {
     struct domain *idle;
+    struct exec_domain *ed;
     unsigned long boot_error = 0;
     int timeout, cpu;
     unsigned long start_eip, stack;
@@ -656,13 +657,15 @@ static void __init do_boot_cpu (int apicid)
     if ( (idle = do_createdomain(IDLE_DOMAIN_ID, cpu)) == NULL )
         panic("failed 'createdomain' for CPU %d", cpu);
 
-    set_bit(DF_IDLETASK, &idle->flags);
+    ed = idle->exec_domain[0];
 
-    idle->mm.pagetable = mk_pagetable(__pa(idle_pg_table));
+    set_bit(DF_IDLETASK, &idle->d_flags);
+
+    ed->mm.pagetable = mk_pagetable(__pa(idle_pg_table));
 
     map_cpu_to_boot_apicid(cpu, apicid);
 
-    idle_task[cpu] = idle;
+    idle_task[cpu] = ed;
 
     /* start_eip had better be page-aligned! */
     start_eip = setup_trampoline();
