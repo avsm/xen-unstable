@@ -109,6 +109,10 @@ gopts.var('cpu', val='CPU',
           fn=set_int, default=None,
           use="CPU to run the domain on.")
 
+gopts.var('vcpus', val='VCPUS',
+          fn=set_int, default=1,
+          use="# of Virtual CPUS in domain.")
+
 gopts.var('cpu_weight', val='WEIGHT',
           fn=set_float, default=None,
           use="""Set the new domain's cpu weight.
@@ -245,7 +249,10 @@ def configure_image(config, vals):
         config_image.append(['root', cmdline_root])
     if vals.extra:
         config_image.append(['args', vals.extra])
+    if vals.vcpus:
+        config_image.append(['vcpus', vals.vcpus])
     config.append(['image', config_image ])
+
     
 def configure_disks(config_devs, vals):
     """Create the config for disks (virtual block devices).
@@ -295,14 +302,18 @@ def configure_vifs(config_devs, vals):
         if idx < len(vifs):
             d = vifs[idx]
             mac = d.get('mac')
+            if not mac:
+                mac = randomMAC()
             bridge = d.get('bridge')
             script = d.get('script')
             backend = d.get('backend')
+            ip = d.get('ip')
         else:
             mac = randomMAC()
             bridge = None
             script = None
             backend = None
+            ip = None
         config_vif = ['vif']
         config_vif.append(['mac', mac])
         if bridge:
@@ -311,6 +322,8 @@ def configure_vifs(config_devs, vals):
             config_vif.append(['script', script])
         if backend:
             config_vif.append(['backend', backend])
+        if ip:
+            config_vif.append(['ip', ip])
         config_devs.append(['device', config_vif])
 
 def configure_vfr(config, vals):
@@ -399,7 +412,7 @@ def preprocess_vifs(opts, vals):
             (k, v) = b.strip().split('=', 1)
             k = k.strip()
             v = v.strip()
-            if k not in ['mac', 'bridge', 'script', 'backend']:
+            if k not in ['mac', 'bridge', 'script', 'backend', 'ip']:
                 opts.err('Invalid vif specifier: ' + vif)
             d[k] = v
         vifs.append(d)
