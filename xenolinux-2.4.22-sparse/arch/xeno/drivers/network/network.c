@@ -98,6 +98,8 @@ static void dbg_network_int(int irq, void *dev_id, struct pt_regs *ptregs)
            " rx_req_prod = %d, rx_resp_prod = %d, rx_event = %d\n",
            np->rx_resp_cons, np->net_idx->rx_req_prod,
            np->net_idx->rx_resp_prod, np->net_idx->rx_event);
+
+    show_registers(ptregs);
 }
 
 
@@ -187,7 +189,7 @@ static void network_tx_buf_gc(struct net_device *dev)
         /* Set a new event, then check for race with update of tx_cons. */
         np->net_idx->tx_event =
             TX_RING_ADD(prod, (atomic_read(&np->tx_entries)>>1) + 1);
-        smp_mb();
+        mb();
     }
     while ( prod != np->net_idx->tx_resp_prod );
 
@@ -318,7 +320,7 @@ static int network_start_xmit(struct sk_buff *skb, struct net_device *dev)
     np->stats.tx_packets++;
 
     /* Only notify Xen if there are no outstanding responses. */
-    smp_mb();
+    mb();
     if ( np->net_idx->tx_resp_prod == i )
         HYPERVISOR_net_update();
 
@@ -392,7 +394,7 @@ static void network_interrupt(int irq, void *dev_id, struct pt_regs *ptregs)
     network_alloc_rx_buffers(dev);
     
     /* Deal with hypervisor racing our resetting of rx_event. */
-    smp_mb();
+    mb();
     if ( np->net_idx->rx_resp_prod != i ) goto again;
 }
 
