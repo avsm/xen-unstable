@@ -49,13 +49,17 @@
  */
 #define FLAT_RING1_CS 0x0819    /* GDT index 259 */
 #define FLAT_RING1_DS 0x0821    /* GDT index 260 */
+#define FLAT_RING1_SS 0x0821    /* GDT index 260 */
 #define FLAT_RING3_CS 0x082b    /* GDT index 261 */
 #define FLAT_RING3_DS 0x0833    /* GDT index 262 */
+#define FLAT_RING3_SS 0x0833    /* GDT index 262 */
 
 #define FLAT_GUESTOS_CS FLAT_RING1_CS
 #define FLAT_GUESTOS_DS FLAT_RING1_DS
+#define FLAT_GUESTOS_SS FLAT_RING1_SS
 #define FLAT_USER_CS    FLAT_RING3_CS
 #define FLAT_USER_DS    FLAT_RING3_DS
+#define FLAT_USER_SS    FLAT_RING3_SS
 
 /* And the trap vector is... */
 #define TRAP_INSTR "int $0x82"
@@ -119,6 +123,7 @@ typedef u64 tsc_timestamp_t; /* RDTSC timestamp */
  */
 typedef struct {
 #define ECF_I387_VALID (1<<0)
+#define ECF_VMX_GUEST  (2<<0)
     unsigned long flags;
     execution_context_t cpu_ctxt;           /* User-level CPU registers     */
     char          fpu_ctxt[256];            /* User-level FPU registers     */
@@ -136,10 +141,12 @@ typedef struct {
 } PACKED full_execution_context_t;
 
 typedef struct {
-    u64 mfn_to_pfn_start;      /* MFN of start of m2p table */
-    u64 pfn_to_mfn_frame_list; /* MFN of a table of MFNs that 
-				  make up p2m table */
+    /* MFN of a table of MFNs that make up p2m table */
+    u64 pfn_to_mfn_frame_list;
 } PACKED arch_shared_info_t;
+
+typedef struct {
+} PACKED arch_vcpu_info_t;
 
 #define ARCH_HAS_FAST_TRAP
 
