@@ -181,7 +181,6 @@
 40e1b09dMYB4ItGCqcMIzirdMd9I-w tools/libxutil/Makefile
 40e033325Sjqs-_4TuzeUEprP_gYFg tools/libxutil/allocate.c
 40e03332KYz7o1bn2MG_KPbBlyoIMA tools/libxutil/allocate.h
-40e03332IyRttYoXKoJla5qCC514SQ tools/libxutil/debug.h
 40e03332p5Dc_owJQRuN72ymJZddFQ tools/libxutil/file_stream.c
 40e03332jWfB2viAhLSkq1WK0r_iDQ tools/libxutil/file_stream.h
 40e03332rUjNMGg11n2rN6V4DCrvOg tools/libxutil/gzip_stream.c
@@ -192,7 +191,6 @@
 40e03332aK0GkgpDdc-PVTkWKTeOBg tools/libxutil/kernel_stream.h
 40e03332KT_tnnoAMbPVAZBB7kSOAQ tools/libxutil/string_stream.c
 40e03332-VtK6_OZa1vMHXFil8uq6w tools/libxutil/string_stream.h
-40e03332gKUInsqtxQOV4mPiMqf_dg tools/libxutil/sys_ctype.h
 40e03332Rkvq6nn_UNjzAAK_Tk9v1g tools/libxutil/sys_net.c
 40e03332lQHvQHw4Rh7VsT1_sui29A tools/libxutil/sys_net.h
 40e033321smklZd7bDSdWvQCeIshtg tools/libxutil/sys_string.c
@@ -203,6 +201,8 @@
 3f6dc140C8tAeBfroAF24VrmCS4v_w tools/misc/miniterm/README
 3f6dc142IHaf6XIcAYGmhV9nNSIHFQ tools/misc/miniterm/miniterm.c
 40c9c469kT0H9COWzA4XzPBjWK0WsA tools/misc/netfix
+4022a73cEKvrYe_DVZW2JlAxobg9wg tools/misc/nsplitd/Makefile
+4022a73cKms4Oq030x2JBzUB426lAQ tools/misc/nsplitd/nsplitd.c
 3f870808_8aFBAcZbWiWGdgrGQyIEw tools/misc/p4perf.h
 3f5ef5a2ir1kVAthS14Dc5QIRCEFWg tools/misc/xen-clone
 3f5ef5a2dTZP0nnsFoeq2jRf3mWDDg tools/misc/xen-clone.README
@@ -283,7 +283,8 @@
 3ddb79bcBQF85CfLS4i1WGZ4oLLaCA xen/arch/x86/Rules.mk
 3e5636e5FAYZ5_vQnmgwFJfSdmO5Mw xen/arch/x86/acpi.c
 3ddb79bcsjinG9k1KcvbVBuas1R2dA xen/arch/x86/apic.c
-3ddb79bcSC_LvnmFlX-T5iTgaR0SKg xen/arch/x86/boot/boot.S
+3ddb79bcSC_LvnmFlX-T5iTgaR0SKg xen/arch/x86/boot/x86_32.S
+40e42bdbNu4MjI750THP_8J1S-Sa0g xen/arch/x86/boot/x86_64.S
 3ddb79bcUrk2EIaM5VsT6wUudH1kkg xen/arch/x86/delay.c
 3e32af9aRnYGl4GMOaDKp7JdfhOGhg xen/arch/x86/domain_page.c
 3ddb79bcecupHj56ZbTa3B0FxDowMg xen/arch/x86/entry.S
