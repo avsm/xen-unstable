@@ -5,6 +5,36 @@ import struct
 
 ##### Networking-related functions
 
+def readlines(fd):
+    """Version of readlines safe against EINTR.
+    """
+    import errno
+    
+    lines = []
+    while 1:
+        try:
+            line = fd.readline()
+        except IOError, ex:
+            if ex.errno == errno.EINTR:
+                continue
+            else:
+                raise
+        if line == '': break
+        lines.append(line)
+    return lines
+
+def readline(fd):
+    """Version of readline safe against EINTR.
+    """
+    while 1:
+        try:
+            return fd.readline()
+        except IOError, ex:
+            if ex.errno == errno.EINTR:
+                continue
+            else:
+                raise
+        
 def get_current_ipaddr(dev='eth0'):
     """Return a string containing the primary IP address for the given
     network interface (default 'eth0').

@@ -8,6 +8,7 @@ BitKeeper/*/*
 PENDING/*
 TAGS
 extras/mini-os/h/hypervisor-ifs
+install
 install/*
 linux-*-xen/*
 linux-*.tar.gz
@@ -30,4 +31,5 @@ xen/include/xen/compile.h
 xen/tools/elf-reloc
 xen/tools/figlet/figlet
 xen/xen
+xen/xen-syms
 xen/xen.*
