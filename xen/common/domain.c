@@ -19,6 +19,7 @@
 #include <xen/console.h>
 #include <xen/vbd.h>
 #include <asm/i387.h>
+#include <xen/shadow.h>
 
 #ifdef CONFIG_X86_64BITMODE
 #define ELFSIZE 64
@@ -381,6 +382,8 @@ void free_all_dom_mem(struct task_struct *p)
     unsigned long x, y;
 
     INIT_LIST_HEAD(&zombies);
+
+    if ( p->mm.shadow_mode ) shadow_mode_disable(p);
 
     /* STEP 1. Drop the in-use reference to the page-table base. */
     put_page_and_type(&frame_table[pagetable_val(p->mm.pagetable) >>
@@ -1018,7 +1021,7 @@ int construct_dom0(struct task_struct *p,
     set_bit(PF_CONSTRUCTED, &p->flags);
 
 #if 0 // XXXXX DO NOT CHECK IN ENABLED !!! (but useful for testing so leave) 
-    shadow_mode_enable(p, SHM_test); 
+    shadow_mode_enable(&p->mm, SHM_test); 
 #endif
 
     new_thread(p, vkern_entry, vstack_end, vstartinfo_start);

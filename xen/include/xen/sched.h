@@ -187,6 +187,7 @@ struct task_struct
  *                       arbitrary event or timer.
  * TASK_STOPPED:         Domain is stopped.
  * TASK_DYING:           Domain is about to cross over to the land of the dead.
+ * TASK_PAUSED:          Task currently removed from scheduling.
  */
 
 #define TASK_RUNNING             0
@@ -194,7 +195,7 @@ struct task_struct
 #define TASK_UNINTERRUPTIBLE     2
 #define TASK_STOPPED             4
 #define TASK_DYING               8
-#define TASK_SCHED_PRIV          16
+#define TASK_PAUSED             16
 
 #include <asm/uaccess.h> /* for KERNEL_DS */
 
@@ -274,6 +275,7 @@ int  sched_rem_domain(struct task_struct *p);
 long sched_ctl(struct sched_ctl_cmd *);
 long sched_adjdom(struct sched_adjdom_cmd *);
 int  sched_id();
+void sched_pause_sync(struct task_struct *);
 void init_idle_task(void);
 void __wake_up(struct task_struct *p);
 void wake_up(struct task_struct *p);

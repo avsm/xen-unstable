@@ -169,7 +169,6 @@ int sched_rem_domain(struct task_struct *p)
     return 1;
 }
 
-
 void init_idle_task(void)
 {
     unsigned long flags;
@@ -281,6 +280,40 @@ long do_sched_op(unsigned long op)
     }
 
     return ret;
+}
+
+
+/* sched_pause_sync - synchronously pause a domain's execution 
+
+XXXX This is horibly broken -- here just as a place holder at present,
+                               do not use.
+
+*/
+
+void sched_pause_sync(struct task_struct *p)
+{
+    unsigned long flags;
+    int cpu = p->processor;
+
+    spin_lock_irqsave(&schedule_lock[cpu], flags);
+
+    if ( schedule_data[cpu].curr != p )
+        /* if not the current task, we can remove it from scheduling now */
+        SCHED_OP(pause, p);
+
+    p->state = TASK_PAUSED;
+    
+    spin_unlock_irqrestore(&schedule_lock[cpu], flags);
+
+    /* spin until domain is descheduled by its local scheduler */
+    while ( schedule_data[cpu].curr == p )
+    {
+		send_hyp_event(p, _HYP_EVENT_NEED_RESCHED );
+		do_yield();
+    }
+    
+    
+    /* The domain will not be scheduled again until we do a wake_up(). */
 }
 
 /* Per-domain one-shot-timer hypercall. */

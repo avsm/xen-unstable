@@ -223,6 +223,24 @@ typedef struct dom0_sched_id_st
     int sched_id;
 } dom0_sched_id_t;
 
+/* 
+ * Control shadow pagetables operation
+ */
+#define DOM0_SHADOW_CONTROL   25
+
+#define DOM0_SHADOW_CONTROL_OP_OFF         0
+#define DOM0_SHADOW_CONTROL_OP_ENABLE_TEST 1
+#define DOM0_SHADOW_CONTROL_OP_ENABLE_LOGDIRTY 2
+#define DOM0_SHADOW_CONTROL_OP_FLUSH       10
+#define DOM0_SHADOW_CONTROL_OP_CLEAN       11
+typedef struct dom0_shadow_control_st
+{
+    /* IN variables. */
+    domid_t      domain;
+    int          op;
+} dom0_shadow_control_t;
+
+
 typedef struct dom0_op_st
 {
     unsigned long cmd;
@@ -249,6 +267,7 @@ typedef struct dom0_op_st
         dom0_physinfo_t         physinfo;
         dom0_pcidev_access_t    pcidev_access;
         dom0_sched_id_t         sched_id;
+	dom0_shadow_control_t   shadow_control;
     } u;
 } dom0_op_t;
 

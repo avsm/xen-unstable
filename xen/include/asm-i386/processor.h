@@ -11,6 +11,7 @@
 #include <asm/types.h>
 #include <asm/cpufeature.h>
 #include <asm/desc.h>
+#include <asm/flushtlb.h>
 #include <xen/config.h>
 #include <xen/spinlock.h>
 #include <hypervisor-ifs/hypervisor-if.h>
@@ -233,6 +234,8 @@ static inline void clear_in_cr4 (unsigned long mask)
             :"ax");
 }
 
+
+
 /*
  *      Cyrix CPU configuration register indexes
  */
@@ -423,14 +426,33 @@ struct mm_struct {
     struct shadow_status *shadow_ht;
     struct shadow_status *shadow_ht_free;
     struct shadow_status *shadow_ht_extras; // extra allocation units
+    unsigned int *shadow_dirty_bitmap;
+    unsigned int shadow_dirty_bitmap_size;  // in pages, bit per page
     unsigned int shadow_page_count;
     unsigned int shadow_max_page_count;
+    unsigned int shadow_extras_count;
 
     /* Current LDT details. */
     unsigned long ldt_base, ldt_ents, shadow_ldt_mapcnt;
     /* Next entry is passed to LGDT on domain switch. */
     char gdt[6];
 };
+
+static inline void write_ptbase( struct mm_struct *m )
+{
+/*    printk("write_ptbase mode=%08x pt=%08lx st=%08lx\n",
+	   m->shadow_mode, pagetable_val(m->pagetable),
+	   pagetable_val(m->shadow_table) );
+ */
+    if( m->shadow_mode )
+      {
+	//check_pagetable( m, m->pagetable, "write_ptbase" );
+	write_cr3_counted(pagetable_val(m->shadow_table));
+      }
+    else
+      write_cr3_counted(pagetable_val(m->pagetable));
+}
+
 
 #define IDLE0_MM                                                    \
 {                                                                   \
