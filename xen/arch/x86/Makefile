@@ -1,16 +1,18 @@
 
 include $(BASEDIR)/Rules.mk
 
-ifneq ($(debugger),y)
-OBJS := $(subst pdb-linux.o,,$(OBJS))
-OBJS := $(subst pdb-stub.o,,$(OBJS))
-endif
-
 OBJS += $(patsubst %.S,%.o,$(wildcard $(TARGET_SUBARCH)/*.S))
 OBJS += $(patsubst %.c,%.o,$(wildcard $(TARGET_SUBARCH)/*.c))
 OBJS += $(patsubst %.c,%.o,$(wildcard mtrr/*.c))
 
 OBJS := $(subst $(TARGET_SUBARCH)/asm-offsets.o,,$(OBJS))
+
+ifneq ($(TARGET_SUBARCH),x86_32)
+OBJS := $(subst vmx.o,,$(OBJS))
+OBJS := $(subst vmx_io.o,,$(OBJS))
+OBJS := $(subst vmx_platform.o,,$(OBJS))
+OBJS := $(subst vmx_vmcs.o,,$(OBJS))
+endif
 
 default: $(TARGET)
 

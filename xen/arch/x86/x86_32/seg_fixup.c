@@ -105,7 +105,7 @@ static unsigned char insn_decode[256] = {
  */
 int get_baselimit(u16 seg, unsigned long *base, unsigned long *limit)
 {
-    struct domain *d = current;
+    struct exec_domain *d = current;
     unsigned long *table, a, b;
     int            ldt = !!(seg & 4);
     int            idx = (seg >> 3) & 8191;
@@ -113,7 +113,7 @@ int get_baselimit(u16 seg, unsigned long *base, unsigned long *limit)
     /* Get base and check limit. */
     if ( ldt )
     {
-        table = (unsigned long *)LDT_VIRT_START;
+        table = (unsigned long *)LDT_VIRT_START(d);
         if ( idx >= d->mm.ldt_ents )
             goto fail;
     }
@@ -171,7 +171,7 @@ int linearise_address(u16 seg, unsigned long off, unsigned long *linear)
 
 int fixup_seg(u16 seg, unsigned long offset)
 {
-    struct domain *d = current;
+    struct exec_domain *d = current;
     unsigned long *table, a, b, base, limit;
     int            ldt = !!(seg & 4);
     int            idx = (seg >> 3) & 8191;
@@ -179,7 +179,7 @@ int fixup_seg(u16 seg, unsigned long offset)
     /* Get base and check limit. */
     if ( ldt )
     {
-        table = (unsigned long *)LDT_VIRT_START;
+        table = (unsigned long *)LDT_VIRT_START(d);
         if ( idx >= d->mm.ldt_ents )
         {
             DPRINTK("Segment %04x out of LDT range (%ld)\n",
@@ -282,7 +282,7 @@ void *decode_reg(struct xen_regs *regs, u8 b)
  */
 int gpf_emulate_4gb(struct xen_regs *regs)
 {
-    struct domain *d = current;
+    struct exec_domain *d = current;
     trap_info_t   *ti;
     struct trap_bounce *tb;
     u8            modrm, mod, reg, rm, decode;
@@ -292,7 +292,7 @@ int gpf_emulate_4gb(struct xen_regs *regs)
     u32           disp32 = 0;
     u8            *eip;         /* ptr to instruction start */
     u8            *pb, b;       /* ptr into instr. / current instr. byte */
-    unsigned int  *pseg = NULL; /* segment for memory operand (NULL=default) */
+    unsigned long *pseg = NULL; /* segment for memory operand (NULL=default) */
 
     /* WARNING: We only work for ring-3 segments. */
     if ( unlikely(VM86_MODE(regs)) || unlikely(!RING_3(regs)) )
@@ -464,7 +464,7 @@ int gpf_emulate_4gb(struct xen_regs *regs)
     perfc_incrc(seg_fixups);
 
     /* If requested, give a callback on otherwise unused vector 15. */
-    if ( VM_ASSIST(d, VMASST_TYPE_4gb_segments_notify) )
+    if ( VM_ASSIST(d->domain, VMASST_TYPE_4gb_segments_notify) )
     {
         ti  = &d->thread.traps[15];
         tb = &d->thread.trap_bounce;
@@ -473,7 +473,7 @@ int gpf_emulate_4gb(struct xen_regs *regs)
         tb->cs         = ti->cs;
         tb->eip        = ti->address;
         if ( TI_GET_IF(ti) )
-            d->shared_info->vcpu_data[0].evtchn_upcall_mask = 1;
+            d->vcpu_info->evtchn_upcall_mask = 1;
     }
 
     return EXCRET_fault_fixed;

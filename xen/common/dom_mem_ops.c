@@ -1,3 +1,4 @@
+/* -*-  Mode:C; c-basic-offset:4; tab-width:4; indent-tabs-mode:nil -*- */
 /******************************************************************************
  * dom_mem_ops.c
  *
@@ -28,7 +29,7 @@
             __HYPERVISOR_dom_mem_op, 5,             \
             (_op) | (i << START_EXTENT_SHIFT),      \
             extent_list, nr_extents, extent_order,  \
-            (d == current) ? DOMID_SELF : d->id)
+            (d == current->domain) ? DOMID_SELF : d->id);
 
 static long
 alloc_dom_mem(struct domain *d, 
@@ -44,7 +45,7 @@ alloc_dom_mem(struct domain *d,
                                    nr_extents, sizeof(*extent_list))) )
         return start_extent;
 
-    if ( (extent_order != 0) && !IS_CAPABLE_PHYSDEV(current) )
+    if ( (extent_order != 0) && !IS_CAPABLE_PHYSDEV(current->domain) )
     {
         DPRINTK("Only I/O-capable domains may allocate > order-0 memory.\n");
         return start_extent;
@@ -137,29 +138,33 @@ do_dom_mem_op(unsigned long  op,
         return -EINVAL;
 
     if ( likely(domid == DOMID_SELF) )
-        d = current;
-    else if ( unlikely(!IS_PRIV(current)) )
+        d = current->domain;
+    else if ( unlikely(!IS_PRIV(current->domain)) )
         return -EPERM;
     else if ( unlikely((d = find_domain_by_id(domid)) == NULL) )
-	return -ESRCH;
+        return -ESRCH;
+
+    LOCK_BIGLOCK(d);
 
     switch ( op )
     {
     case MEMOP_increase_reservation:
         rc = alloc_dom_mem(
             d, extent_list, start_extent, nr_extents, extent_order);
-	break;
+        break;
     case MEMOP_decrease_reservation:
         rc = free_dom_mem(
             d, extent_list, start_extent, nr_extents, extent_order);
-	break;
+        break;
     default:
         rc = -ENOSYS;
         break;
     }
 
     if ( unlikely(domid != DOMID_SELF) )
-	put_domain(d);
+        put_domain(d);
+
+    UNLOCK_BIGLOCK(d);
 
     return rc;
 }
