@@ -211,6 +211,8 @@ int  sched_id();
 void init_idle_task(void);
 void domain_wake(struct domain *d);
 void domain_sleep(struct domain *d);
+void pause_domain(struct domain *d);
+void unpause_domain(struct domain *d);
 
 void __enter_scheduler(void);
 
@@ -261,14 +263,14 @@ static inline void domain_pause(struct domain *d)
 {
     ASSERT(d != current);
     atomic_inc(&d->pausecnt);
-    domain_sleep(d);
+    pause_domain(d);
 }
 
 static inline void domain_unpause(struct domain *d)
 {
     ASSERT(d != current);
     if ( atomic_dec_and_test(&d->pausecnt) )
-        domain_wake(d);
+        unpause_domain(d);
 }
 
 static inline void domain_unblock(struct domain *d)
@@ -281,13 +283,13 @@ static inline void domain_pause_by_systemcontroller(struct domain *d)
 {
     ASSERT(d != current);
     if ( !test_and_set_bit(DF_CTRLPAUSE, &d->flags) )
-        domain_sleep(d);
+        pause_domain(d);
 }
 
 static inline void domain_unpause_by_systemcontroller(struct domain *d)
 {
     if ( test_and_clear_bit(DF_CTRLPAUSE, &d->flags) )
-        domain_wake(d);
+        unpause_domain(d);
 }
 
 
