@@ -15,6 +15,7 @@
 #include <asm/flushtlb.h>
 #include <asm/msr.h>
 #include <xeno/multiboot.h>
+#include <xeno/blkdev.h>
 
 #define L1_PROT (_PAGE_PRESENT|_PAGE_RW|_PAGE_USER|_PAGE_ACCESSED)
 #define L2_PROT (_PAGE_PRESENT|_PAGE_RW|_PAGE_USER|_PAGE_ACCESSED|_PAGE_DIRTY)
@@ -28,7 +29,7 @@ rwlock_t tasklist_lock __cacheline_aligned = RW_LOCK_UNLOCKED;
 /*
  * create a new domain
  */
-struct task_struct *do_newdomain(void)
+struct task_struct *do_newdomain(unsigned int dom_id, unsigned int cpu)
 {
     int retval;
     struct task_struct *p = NULL;
@@ -38,8 +39,17 @@ struct task_struct *do_newdomain(void)
     p = alloc_task_struct();
     if (!p) goto newdomain_out;
     memset(p, 0, sizeof(*p));
+
+    p->domain    = dom_id;
+    p->processor = cpu;
+
+    spin_lock_init(&p->blk_ring_lock);
+
     p->shared_info = (void *)get_free_page(GFP_KERNEL);
     memset(p->shared_info, 0, PAGE_SIZE);
+    SHARE_PFN_WITH_DOMAIN(virt_to_page(p->shared_info), dom_id);
+
+    init_blkdev_info(p);
 
     SET_GDT_ENTRIES(p, DEFAULT_GDT_ENTRIES);
     SET_GDT_ADDRESS(p, DEFAULT_GDT_ADDRESS);
@@ -49,13 +59,7 @@ struct task_struct *do_newdomain(void)
     p->active_mm  = &p->mm;
     p->num_net_vifs = 0;
 
-    /*
-     * KAF: Passing in newdomain struct to this function is gross!
-     * Therefore, for now we just allocate the single blk_ring
-     * before the multiople net_rings :-)
-     */
-    p->blk_ring_base = (blk_ring_t *)(p->shared_info + 1);
-    p->net_ring_base = (net_ring_t *)(p->blk_ring_base + 1);
+    p->net_ring_base = (net_ring_t *)(p->shared_info + 1);
     INIT_LIST_HEAD(&p->pg_head);
     p->tot_pages = 0;
     write_lock_irqsave(&tasklist_lock, flags);
@@ -209,44 +213,15 @@ void release_task(struct task_struct *p)
         destroy_net_vif(p);
     }
     if ( p->mm.perdomain_pt ) free_page((unsigned long)p->mm.perdomain_pt);
+
+    destroy_blkdev_info(p);
+
+    UNSHARE_PFN(virt_to_page(p->shared_info));
     free_page((unsigned long)p->shared_info);
 
     free_all_dom_mem(p);
 
     free_task_struct(p);
-}
-
-
-void construct_cmdline(char *dst, struct task_struct *p)
-{
-    int dom = p->domain;
-    unsigned char boot[150];
-    unsigned char ipbase[20], nfsserv[20], gateway[20], netmask[20];
-    unsigned char nfsroot[70];
-
-    if ( strcmp("",opt_nfsroot) )
-    {
-        /* NFS root for Xenolinux. */
-        snprintf(nfsroot, 70, opt_nfsroot, dom); 
-        snprintf(boot, 200,
-                " root=/dev/nfs ip=%s:%s:%s:%s::eth0:off nfsroot=%s",
-                 quad_to_str(opt_ipbase + dom, ipbase),
-                 quad_to_str(opt_nfsserv, nfsserv),
-                 quad_to_str(opt_gateway, gateway),
-                 quad_to_str(opt_netmask, netmask),
-                 nfsroot);
-    }
-    else
-    {   
-        /* Non-NFS root for Xenolinux. */
-        snprintf(boot, 200,
-                " ip=%s::%s:%s::eth0:off",
-                 quad_to_str(opt_ipbase + dom, ipbase),
-                 quad_to_str(opt_gateway, gateway),
-                 quad_to_str(opt_netmask, netmask));
-    }
-
-    strcpy(dst, boot);
 }
 
 
@@ -277,8 +252,6 @@ int final_setup_guestos(struct task_struct * p, dom_meminfo_t * meminfo)
     unsigned long phys_l2tab;
     net_ring_t *net_ring;
     net_vif_t *net_vif;
-    char *dst;    // temporary
-    int i;        // temporary
 
     /* entries 0xe0000000 onwards in page table must contain hypervisor
      * mem mappings - set them up.
@@ -341,21 +314,10 @@ int final_setup_guestos(struct task_struct * p, dom_meminfo_t * meminfo)
     virt_startinfo_addr->num_net_rings = p->num_net_vifs;
 
     /* Add block io interface */
-    virt_startinfo_addr->blk_ring = (blk_ring_t *)SH2G(p->blk_ring_base);
+    virt_startinfo_addr->blk_ring = virt_to_phys(p->blk_ring_base);
 
-    dst = virt_startinfo_addr->cmd_line;
-    if ( mod[0].string )
-    {
-        char *modline = (char *)__va(mod[0].string);
-        for ( i = 0; i < 255; i++ )
-        {
-            if ( modline[i] == '\0' ) break;
-            *dst++ = modline[i];
-        }
-    }
-    *dst = '\0';
-
-    construct_cmdline(dst, p);
+    /* Copy the command line */
+    strcpy(virt_startinfo_addr->cmd_line, meminfo->cmd_line);
 
     /* Reinstate the caller's page tables. */
     __asm__ __volatile__ (
@@ -584,9 +546,7 @@ int setup_guestos(struct task_struct *p, dom0_newdomain_t *params)
     virt_startinfo_address->num_net_rings = p->num_net_vifs;
 
     /* Add block io interface */
-    virt_startinfo_address->blk_ring = 
-	(blk_ring_t *)SHIP2GUEST(p->blk_ring_base); 
-
+    virt_startinfo_address->blk_ring = virt_to_phys(p->blk_ring_base); 
 
     /* We tell OS about any modules we were given. */
     if ( nr_mods > 1 )
@@ -608,9 +568,6 @@ int setup_guestos(struct task_struct *p, dom0_newdomain_t *params)
         }
     }
     *dst = '\0';
-
-    construct_cmdline(dst, p);
-
 
     /* Reinstate the caller's page tables. */
     __write_cr3_counted(pagetable_val(current->mm.pagetable));
