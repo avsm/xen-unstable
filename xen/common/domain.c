@@ -16,6 +16,8 @@
 #include <asm/msr.h>
 #include <xeno/blkdev.h>
 #include <xeno/console.h>
+#include <hypervisor-ifs/block.h>
+#include <xeno/physdisk.h>
 
 /*
  * NB. No ring-3 access in initial guestOS pagetables. Note that we allow
@@ -52,6 +54,7 @@ struct task_struct *do_newdomain(unsigned int dom_id, unsigned int cpu)
 
     spin_lock_init(&p->blk_ring_lock);
     spin_lock_init(&p->page_lock);
+    spin_lock_init(&p->physdev_lock);
 
     p->shared_info = (void *)get_free_page(GFP_KERNEL);
     memset(p->shared_info, 0, PAGE_SIZE);
@@ -61,6 +64,8 @@ struct task_struct *do_newdomain(unsigned int dom_id, unsigned int cpu)
     memset(p->mm.perdomain_pt, 0, PAGE_SIZE);
 
     init_blkdev_info(p);
+
+    INIT_LIST_HEAD(&p->physdisk_aces);
 
     SET_GDT_ENTRIES(p, DEFAULT_GDT_ENTRIES);
     SET_GDT_ADDRESS(p, DEFAULT_GDT_ADDRESS);
@@ -302,6 +307,9 @@ void release_task(struct task_struct *p)
      * actually uses the task_struct refcnt.
      */
     destroy_blkdev_info(p);
+
+    /* Free up the physdisk access control info */
+    destroy_physdisk_aces(p);
 
     /* Free all memory associated with this domain. */
     free_page((unsigned long)p->mm.perdomain_pt);

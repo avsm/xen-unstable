@@ -18,6 +18,7 @@
 #include <xeno/interrupt.h>
 #include <xeno/segment.h>
 #include <xeno/slab.h>
+#include <xeno/physdisk.h>
 
 #if 0
 #define DPRINTK(_f, _a...) printk( _f , ## _a )
@@ -104,6 +105,8 @@ static void dispatch_probe_seg(struct task_struct *p, int index);
 static void dispatch_debug_block_io(struct task_struct *p, int index);
 static void dispatch_create_segment(struct task_struct *p, int index);
 static void dispatch_delete_segment(struct task_struct *p, int index);
+static void dispatch_grant_physdev(struct task_struct *p, int index);
+static void dispatch_probe_physdev(struct task_struct *p, int index);
 static void make_response(struct task_struct *p, unsigned long id, 
                           unsigned short op, unsigned long st);
 
@@ -396,6 +399,14 @@ static int do_block_io_op_domain(struct task_struct *p, int max_to_do)
 	    dispatch_delete_segment(p, i);
 	    break;
 
+	case XEN_BLOCK_PHYSDEV_GRANT:
+  	    dispatch_grant_physdev(p, i);
+	    break;
+
+	case XEN_BLOCK_PHYSDEV_PROBE:
+ 	    dispatch_probe_physdev(p, i);
+	    break;
+
 	default:
             DPRINTK("error: unknown block io operation [%d]\n",
                     blk_ring->ring[i].req.operation);
@@ -414,6 +425,72 @@ static void dispatch_debug_block_io(struct task_struct *p, int index)
     DPRINTK("dispatch_debug_block_io: unimplemented\n"); 
 }
 
+static void dispatch_probe_physdev(struct task_struct *p, int index)
+{
+    blk_ring_t *blk_ring = p->blk_ring_base;
+    unsigned long flags, buffer;
+    physdisk_probebuf_t *buf;
+    int result;
+
+    buffer = blk_ring->ring[index].req.buffer_and_sects[0] & ~0x1FF;
+
+    spin_lock_irqsave(&p->page_lock, flags);
+    if ( !__buffer_is_valid(p, buffer, sizeof(*buf), 1) )
+    {
+        spin_unlock_irqrestore(&p->page_lock, flags);
+        result = 1;
+        goto out;
+    }
+    __lock_buffer(buffer, sizeof(*buf), 1);
+    spin_unlock_irqrestore(&p->page_lock, flags);
+
+    buf = phys_to_virt(buffer);
+    result = xen_physdisk_probe(p, buf);
+
+    unlock_buffer(p, buffer, sizeof(*buf), 1);
+
+ out:
+    make_response(p, blk_ring->ring[index].req.id, 
+                  XEN_BLOCK_PHYSDEV_PROBE, result); 
+}
+
+static void dispatch_grant_physdev(struct task_struct *p, int index)
+{
+    blk_ring_t *blk_ring = p->blk_ring_base;
+    unsigned long flags, buffer;
+    xp_disk_t *xpd;
+    int result;
+
+    if ( p->domain != 0 )
+    {
+        DPRINTK("dispatch_grant_physdev called by dom%d\n", p->domain);
+        result = 1;
+        goto out;
+    }
+
+    buffer = blk_ring->ring[index].req.buffer_and_sects[0] & ~0x1FF;
+
+    spin_lock_irqsave(&p->page_lock, flags);
+    if ( !__buffer_is_valid(p, buffer, sizeof(xv_disk_t), 1) )
+    {
+        DPRINTK("Bad buffer in dispatch_grant_physdev\n");
+        spin_unlock_irqrestore(&p->page_lock, flags);
+        result = 1;
+        goto out;
+    }
+    __lock_buffer(buffer, sizeof(xv_disk_t), 1);
+    spin_unlock_irqrestore(&p->page_lock, flags);
+
+    xpd = phys_to_virt(buffer);
+    result = xen_physdisk_grant(xpd);
+
+    unlock_buffer(p, buffer, sizeof(xp_disk_t), 1);
+
+ out:
+    make_response(p, blk_ring->ring[index].req.id, 
+                  XEN_BLOCK_PHYSDEV_GRANT, result); 
+}
+  
 static void dispatch_create_segment(struct task_struct *p, int index)
 {
     blk_ring_t *blk_ring = p->blk_ring_base;
@@ -584,10 +661,17 @@ static void dispatch_rw_block_io(struct task_struct *p, int index)
         }
         else
         {
-            phys_seg[nr_psegs].dev           = xendev_to_physdev(req->device);
+	    phys_seg[nr_psegs].dev           = req->device;
             phys_seg[nr_psegs].sector_number = req->sector_number + tot_sects;
             phys_seg[nr_psegs].buffer        = buffer;
             phys_seg[nr_psegs].nr_sects      = nr_sects;
+	    if (p->domain != 0 &&
+		!xen_physdisk_access_okay(&phys_seg[nr_psegs], p, operation)) {
+	      DPRINTK("access denied\n");
+	      /* XXX not quite right, but close enough. */
+	      goto bad_descriptor;
+	    }
+	    phys_seg[nr_psegs].dev           = xendev_to_physdev(req->device);
             if ( phys_seg[nr_psegs].dev == 0 ) 
 	    {
 	        DPRINTK("bad device\n");
