@@ -159,7 +159,7 @@ __gnttab_activate_grant_ref(
 
         /* rmb(); */ /* not on x86 */
 
-        frame = __translate_gpfn_to_mfn(granting_d, sha->frame);
+        frame = __gpfn_to_mfn_foreign(granting_d, sha->frame);
 
         if ( unlikely(!pfn_is_ram(frame)) ||
              unlikely(!((dev_hst_ro_flags & GNTMAP_readonly) ?
