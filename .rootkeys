@@ -103,6 +103,7 @@
 3e5a4e67X7JyupgdYkgDX19Huj2sAw linux-2.4.26-xen-sparse/include/asm-xen/pgtable-2level.h
 3e5a4e67gr4NLGtQ5CvSLimMYZlkOA linux-2.4.26-xen-sparse/include/asm-xen/pgtable.h
 3e5a4e676uK4xErTBDH6XJREn9LSyg linux-2.4.26-xen-sparse/include/asm-xen/processor.h
+41224663YBCUMX1kVo_HRUtgaHTi7w linux-2.4.26-xen-sparse/include/asm-xen/queues.h
 3e5a4e68uJz-xI0IBVMD7xRLQKJDFg linux-2.4.26-xen-sparse/include/asm-xen/segment.h
 3e5a4e68Nfdh6QcOKUTGCaYkf2LmYA linux-2.4.26-xen-sparse/include/asm-xen/smp.h
 4062f7e2PzFOUGT0PaE7A0VprTU3JQ linux-2.4.26-xen-sparse/include/asm-xen/synch_bitops.h
@@ -118,7 +119,6 @@
 3e6e7c1efbQe93xCvOpOVCnXTMmQ5w linux-2.4.26-xen-sparse/mkbuildtree
 406aeeafkrnCuIVWLFv3kfn4uAD5Eg linux-2.4.26-xen-sparse/mm/highmem.c
 3e5a4e68GxCIaFH4sy01v1wjapetaA linux-2.4.26-xen-sparse/mm/memory.c
-411ce99d_uOUTK61pkqbdIAi1CIaSA linux-2.4.26-xen-sparse/mm/mmap.c
 3f108af5VxPkLv13tXpXgoRKALQtXQ linux-2.4.26-xen-sparse/mm/mprotect.c
 3e5a4e681xMPdF9xCMwpyfuYMySU5g linux-2.4.26-xen-sparse/mm/mremap.c
 409ba2e7akOFqQUg6Qyg2s28xcXiMg linux-2.4.26-xen-sparse/mm/page_alloc.c
@@ -159,7 +159,6 @@
 40f562383SKvDStdtrvzr5fyCbW4rw linux-2.6.7-xen-sparse/arch/xen/i386/mm/hypervisor.c
 40f56239xcNylAxuGsQHwi1AyMLV8w linux-2.6.7-xen-sparse/arch/xen/i386/mm/init.c
 41062ab7CjxC1UBaFhOMWWdhHkIUyg linux-2.6.7-xen-sparse/arch/xen/i386/mm/ioremap.c
-411b9db3oFpYQc4C-_mO2lRTcSz8UQ linux-2.6.7-xen-sparse/arch/xen/i386/mm/mmap.c
 40f5623906UYHv1rsVUeRc0tFT0dWw linux-2.6.7-xen-sparse/arch/xen/i386/mm/pgtable.c
 4107adf12ndy94MidCaivDibJ3pPAg linux-2.6.7-xen-sparse/arch/xen/i386/pci/Makefile
 4107adf1WcCgkhsdLTRGX52cOG1vJg linux-2.6.7-xen-sparse/arch/xen/i386/pci/direct.c
@@ -218,6 +217,7 @@
 41062ab7HMSSuaUv3_Z4agLpjSO88A linux-2.6.7-xen-sparse/include/asm-xen/asm-i386/mach-xen/pci-functions.h
 40f5623aDMCsWOFO0jktZ4e8sjwvEg linux-2.6.7-xen-sparse/include/asm-xen/asm-i386/mach-xen/setup_arch_post.h
 40f5623arsFXkGdPvIqvFi3yFXGR0Q linux-2.6.7-xen-sparse/include/asm-xen/asm-i386/mach-xen/setup_arch_pre.h
+4120f807GCO0uqsLqdZj9csxR1Wthw linux-2.6.7-xen-sparse/include/asm-xen/asm-i386/mmu_context.h
 40f5623aFTyFTR-vdiA-KaGxk5JOKQ linux-2.6.7-xen-sparse/include/asm-xen/asm-i386/msr.h
 40f5623adgjZq9nAgCt0IXdWl7udSA linux-2.6.7-xen-sparse/include/asm-xen/asm-i386/page.h
 40f5623a54NuG-7qHihGYmw4wWQnMA linux-2.6.7-xen-sparse/include/asm-xen/asm-i386/param.h
@@ -239,10 +239,10 @@
 40f5623aGPlsm0u1LTO-NVZ6AGzNRQ linux-2.6.7-xen-sparse/include/asm-xen/hypervisor.h
 40f5623cndVUFlkxpf7Lfx7xu8madQ linux-2.6.7-xen-sparse/include/asm-xen/multicall.h
 3f108af1ylCIm82H052FVTfXACBHrw linux-2.6.7-xen-sparse/include/asm-xen/proc_cmd.h
+4122466356eIBnC9ot44WSVVIFyhQA linux-2.6.7-xen-sparse/include/asm-xen/queues.h
 3fa8e3f0kBLeE4To2vpdi3cpJbIkbQ linux-2.6.7-xen-sparse/include/asm-xen/suspend.h
 3f689063BoW-HWV3auUJ-OqXfcGArw linux-2.6.7-xen-sparse/include/asm-xen/xen_proc.h
 40f56a0ddHCSs3501MY4hRf22tctOw linux-2.6.7-xen-sparse/mkbuildtree
-411b9db3dpQAK-pcP8WwcRHZGn2eKg linux-2.6.7-xen-sparse/mm/mmap.c
 410a94a4KT6I6X0LVc7djB39tRDp4g linux-2.6.7-xen-sparse/mm/page_alloc.c
 40e1b09db5mN69Ijj0X_Eol-S7dXiw tools/Make.defs
 3f776bd1Hy9rn69ntXBhPReUFw9IEA tools/Makefile
@@ -442,6 +442,7 @@
 40cf2937Z8WCNOnO2FcWdubvEAF9QQ tools/python/xen/xm/shutdown.py
 40fcefb2K1xqVVT4D-p7nL2GzS4scg tools/sv/Main.rpy
 40ffbcb66Dj5F-1kCK9BcgSqCWkt1w tools/sv/Makefile
+4120b0e5L_nW-u0MWRfIdXg4ng4OjA tools/sv/images/destroy.png
 4107c921_OR9NTSv2dKFiLCXxrXoxA tools/sv/images/finish.png
 40fcefb3wXQMsl9WkgQAVtdrupm4sw tools/sv/images/left-end-highlight.jpg
 40fcefb3K6ESt5sQhD9aCQRscQIlXQ tools/sv/images/left-end-no-highlight.jpg
@@ -459,6 +460,9 @@
 40fcefb3dgsa24WLk_BJeYQHrDLuOg tools/sv/images/seperator-right-highlight.jpg
 40fcefb3FtiX4Pd2kT8wDlp8u8xRhQ tools/sv/images/seperator.jpg
 41013a82sUdUqBv8EoAUJii3gsZ-4g tools/sv/images/shutdown.png
+4120b0e5RyNoIQNMjUs4A2kshovjaQ tools/sv/images/small-destroy.png
+4120b0e6vW66wW6WvjQyFD0AZH2tng tools/sv/images/small-pause.png
+4120b0e6USof7ieyGxEvtCdTMpxaQw tools/sv/images/small-unpause.png
 4104ffca-jPHLVOrW0n0VghEXXtKxg tools/sv/images/unpause.png
 40fcefb3yMSrZvApO9ToIi-iQwnchA tools/sv/images/xen.png
 41013a83z27rKvWIxAfUBMVZ1eDCDg tools/sv/inc/script.js
@@ -682,6 +686,7 @@
 404f1bc7IwU-qnH8mJeVu0YsNGMrcw xen/include/hypervisor-ifs/arch-x86_64.h
 3ddb79c2PMeWTK86y4C3F4MzHw4A1g xen/include/hypervisor-ifs/dom0_ops.h
 403cd194j2pyLqXD8FJ-ukvZzkPenw xen/include/hypervisor-ifs/event_channel.h
+4121d149udGfSUGhn3k1ECz0bM31nQ xen/include/hypervisor-ifs/grant_table.h
 3ddb79c25UE59iu4JJcbRalx95mvcg xen/include/hypervisor-ifs/hypervisor-if.h
 40f5623bqoi4GEoBiiUc6TZk1HjsMg xen/include/hypervisor-ifs/io/blkif.h
 40dc4076pVeE1kEEWzcUaNZin65kCA xen/include/hypervisor-ifs/io/domain_controller.h
