@@ -146,6 +146,8 @@ int allocate_rid_range(struct domain *d, unsigned long ridbits)
 	d->rid_bits = ridbits;
 	d->starting_rid = i << IA64_MIN_IMPL_RID_BITS;
 	d->ending_rid = (i+n_rid_blocks) << IA64_MIN_IMPL_RID_BITS;
+printf("###allocating rid_range, domain %p: starting_rid=%lx, ending_rid=%lx\n",
+d,d->starting_rid, d->ending_rid);
 	
 	return 1;
 }
@@ -249,7 +251,7 @@ static inline int validate_page_size(unsigned long ps)
 // NOTE: DOES NOT SET VCPU's rrs[x] value!!
 int set_one_rr(unsigned long rr, unsigned long val)
 {
-	struct domain *d = current;
+	struct exec_domain *ed = current;
 	unsigned long rreg = REGION_NUMBER(rr);
 	ia64_rr rrv, newrrv, memrrv;
 	unsigned long newrid;
@@ -258,16 +260,16 @@ int set_one_rr(unsigned long rr, unsigned long val)
 
 	rrv.rrval = val;
 	newrrv.rrval = 0;
-	newrid = d->starting_rid + rrv.rid;
+	newrid = ed->domain->starting_rid + rrv.rid;
 
-	if (newrid > d->ending_rid) return 0;
+	if (newrid > ed->domain->ending_rid) return 0;
 
 	memrrv.rrval = rrv.rrval;
 	if (rreg == 7) {
 		newrrv.rid = newrid;
 		newrrv.ve = VHPT_ENABLED_REGION_7;
 		newrrv.ps = IA64_GRANULE_SHIFT;
-		ia64_new_rr7(vmMangleRID(newrrv.rrval));
+		ia64_new_rr7(vmMangleRID(newrrv.rrval),ed->vcpu_info);
 	}
 	else {
 		newrrv.rid = newrid;
@@ -310,43 +312,45 @@ int set_all_rr( u64 rr0, u64 rr1, u64 rr2, u64 rr3,
 	return 1;
 }
 
-void init_all_rr(struct domain *d)
+void init_all_rr(struct exec_domain *ed)
 {
 	ia64_rr rrv;
 
 	rrv.rrval = 0;
-	rrv.rid = d->metaphysical_rid;
+	rrv.rid = ed->domain->metaphysical_rid;
 	rrv.ps = PAGE_SHIFT;
 	rrv.ve = 1;
-	d->shared_info->arch.rrs[0] = -1;
-	d->shared_info->arch.rrs[1] = rrv.rrval;
-	d->shared_info->arch.rrs[2] = rrv.rrval;
-	d->shared_info->arch.rrs[3] = rrv.rrval;
-	d->shared_info->arch.rrs[4] = rrv.rrval;
-	d->shared_info->arch.rrs[5] = rrv.rrval;
-	d->shared_info->arch.rrs[6] = rrv.rrval;
-//	d->shared_info->arch.rrs[7] = rrv.rrval;
+if (!ed->vcpu_info) { printf("Stopping in init_all_rr\n"); dummy(); }
+	ed->vcpu_info->arch.rrs[0] = -1;
+	ed->vcpu_info->arch.rrs[1] = rrv.rrval;
+	ed->vcpu_info->arch.rrs[2] = rrv.rrval;
+	ed->vcpu_info->arch.rrs[3] = rrv.rrval;
+	ed->vcpu_info->arch.rrs[4] = rrv.rrval;
+	ed->vcpu_info->arch.rrs[5] = rrv.rrval;
+	rrv.ve = 0; 
+	ed->vcpu_info->arch.rrs[6] = rrv.rrval;
+//	ed->shared_info->arch.rrs[7] = rrv.rrval;
 }
 
 
 /* XEN/ia64 INTERNAL ROUTINES */
 
-unsigned long physicalize_rid(struct domain *d, unsigned long rid)
+unsigned long physicalize_rid(struct exec_domain *ed, unsigned long rid)
 {
 	ia64_rr rrv;
 	    
 	rrv.rrval = rid;
-	rrv.rid += d->starting_rid;
+	rrv.rid += ed->domain->starting_rid;
 	return rrv.rrval;
 }
 
 unsigned long
-virtualize_rid(struct domain *d, unsigned long rid)
+virtualize_rid(struct exec_domain *ed, unsigned long rid)
 {
 	ia64_rr rrv;
 	    
 	rrv.rrval = rid;
-	rrv.rid -= d->starting_rid;
+	rrv.rid -= ed->domain->starting_rid;
 	return rrv.rrval;
 }
 
@@ -357,43 +361,47 @@ virtualize_rid(struct domain *d, unsigned long rid)
 // rr7 (because we have to to assembly and physical mode
 // to change rr7).  If no change to rr7 is required, returns 0.
 //
-unsigned long load_region_regs(struct domain *d)
+unsigned long load_region_regs(struct exec_domain *ed)
 {
-	unsigned long rr0, rr1,rr2, rr3, rr4, rr5, rr6;
-	unsigned long oldrr7, newrr7;
+	unsigned long rr0, rr1,rr2, rr3, rr4, rr5, rr6, rr7;
 	// TODO: These probably should be validated
 
-	if (d->metaphysical_mode) {
+	if (ed->vcpu_info->arch.metaphysical_mode) {
 		ia64_rr rrv;
 
-		rrv.rid = d->metaphysical_rid;
+		rrv.rrval = 0;
+		rrv.rid = ed->domain->metaphysical_rid;
 		rrv.ps = PAGE_SHIFT;
 		rrv.ve = 1;
-		rr0 = rr1 = rr2 = rr3 = rr4 = rr5 = rr6 = newrr7 = rrv.rrval;
+		rr0 = rr1 = rr2 = rr3 = rr4 = rr5 = rrv.rrval;
+		rrv.ve = 0;
+		rr6 = rrv.rrval;
+		set_rr_no_srlz(0x0000000000000000L, rr0);
+		set_rr_no_srlz(0x2000000000000000L, rr1);
+		set_rr_no_srlz(0x4000000000000000L, rr2);
+		set_rr_no_srlz(0x6000000000000000L, rr3);
+		set_rr_no_srlz(0x8000000000000000L, rr4);
+		set_rr_no_srlz(0xa000000000000000L, rr5);
+		set_rr_no_srlz(0xc000000000000000L, rr6);
 	}
 	else {
-		rr0 = physicalize_rid(d, d->shared_info->arch.rrs[0]);
-		rr1 = physicalize_rid(d, d->shared_info->arch.rrs[1]);
-		rr2 = physicalize_rid(d, d->shared_info->arch.rrs[2]);
-		rr3 = physicalize_rid(d, d->shared_info->arch.rrs[3]);
-		rr4 = physicalize_rid(d, d->shared_info->arch.rrs[4]);
-		rr5 = physicalize_rid(d, d->shared_info->arch.rrs[5]);
-		rr6 = physicalize_rid(d, d->shared_info->arch.rrs[6]);
-		newrr7 = physicalize_rid(d, d->shared_info->arch.rrs[7]);
+		rr0 = physicalize_rid(ed, ed->vcpu_info->arch.rrs[0]);
+		rr1 = physicalize_rid(ed, ed->vcpu_info->arch.rrs[1]);
+		rr2 = physicalize_rid(ed, ed->vcpu_info->arch.rrs[2]);
+		rr3 = physicalize_rid(ed, ed->vcpu_info->arch.rrs[3]);
+		rr4 = physicalize_rid(ed, ed->vcpu_info->arch.rrs[4]);
+		rr5 = physicalize_rid(ed, ed->vcpu_info->arch.rrs[5]);
+		rr6 = physicalize_rid(ed, ed->vcpu_info->arch.rrs[6]);
+		set_one_rr(0x0000000000000000L, rr0);
+		set_one_rr(0x2000000000000000L, rr1);
+		set_one_rr(0x4000000000000000L, rr2);
+		set_one_rr(0x6000000000000000L, rr3);
+		set_one_rr(0x8000000000000000L, rr4);
+		set_one_rr(0xa000000000000000L, rr5);
+		set_one_rr(0xc000000000000000L, rr6);
+		ia64_srlz_d();
 	}
-
-	set_rr_no_srlz(0x0000000000000000L, rr0);
-	set_rr_no_srlz(0x2000000000000000L, rr1);
-	set_rr_no_srlz(0x4000000000000000L, rr2);
-	set_rr_no_srlz(0x6000000000000000L, rr3);
-	set_rr_no_srlz(0x8000000000000000L, rr4);
-	set_rr_no_srlz(0xa000000000000000L, rr5);
-	set_rr_no_srlz(0xc000000000000000L, rr6);
+	rr7 = physicalize_rid(ed, ed->vcpu_info->arch.rrs[7]);
+	set_one_rr(0xe000000000000000L, rr7);
 	ia64_srlz_d();
-	oldrr7 = get_rr(0xe000000000000000L);
-	if (oldrr7 != newrr7) {
-		newrr7 = (newrr7 & ~0xff) | (PAGE_SHIFT << 2) | 1;
-		return vmMangleRID(newrr7);
-	}
-	else return 0;
 }

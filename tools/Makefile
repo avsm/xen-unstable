@@ -8,6 +8,8 @@ all:
 	$(MAKE) -C xentrace
 	$(MAKE) -C python
 	$(MAKE) -C xfrd
+	$(MAKE) -C xcs
+	$(MAKE) -C ioemu
 
 install: 
 	$(MAKE) -C check
@@ -19,6 +21,8 @@ install:
 	$(MAKE) -C python install
 	$(MAKE) -C xfrd install
 	$(MAKE) -C sv install
+	$(MAKE) -C xcs install
+	$(MAKE) -C ioemu install
 
 clean build:
 	$(MAKE) -C check $@
@@ -29,4 +33,5 @@ clean build:
 	$(MAKE) -C xentrace $@
 	$(MAKE) -C python $@
 	$(MAKE) -C xfrd $@
-
+	$(MAKE) -C xcs clean
+	$(MAKE) -C ioemu clean

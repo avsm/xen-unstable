@@ -1,5 +1,4 @@
-/* -*-  Mode:C; c-basic-offset:4; tab-width:4 -*-
- ****************************************************************************
+/****************************************************************************
  * (c) 2004 - Rolf Neugebauer - Intel Research Cambridge
  * (c) 2004 - Keir Fraser - University of Cambridge
  ****************************************************************************
@@ -86,99 +85,63 @@ static phys_dev_t *find_pdev(struct domain *p, struct pci_dev *dev)
 }
 
 /* Add a device to a per-domain device-access list. */
-static void add_dev_to_task(struct domain *p, 
-                            struct pci_dev *dev, int acc)
+static int add_dev_to_task(struct domain *p, struct pci_dev *dev, 
+                           int acc)
 {
-    phys_dev_t *pdev;
+    phys_dev_t *physdev;
     
-    if ( (pdev = find_pdev(p, dev)) )
-    {
-        /* Sevice already on list: update access permissions. */
-        pdev->flags = acc;
-        return;
-    }
-
-    if ( (pdev = xmalloc(sizeof(phys_dev_t))) == NULL )
+    if ( (physdev = xmalloc(phys_dev_t)) == NULL )
     {
         INFO("Error allocating pdev structure.\n");
-        return;
+        return -ENOMEM;
     }
     
-    pdev->dev = dev;
-    pdev->flags = acc;
-    pdev->state = 0;
-    list_add(&pdev->node, &p->pcidev_list);
+    physdev->dev = dev;
+    physdev->flags = acc;
+    physdev->state = 0;
+    list_add(&physdev->node, &p->pcidev_list);
 
     if ( acc == ACC_WRITE )
-        pdev->owner = p;
+        physdev->owner = p;
+
+    return 0;
 }
 
-/*
- * physdev_pci_access_modify:
- * Allow/disallow access to a specific PCI device.  Guests should not be
- * allowed to see bridge devices as it needlessly complicates things (one
- * possible exception to this is the AGP bridge).  If the given device is a
- * bridge, then the domain should get access to all the leaf devices below
- * that bridge (XXX this is unimplemented!).
- */
-int physdev_pci_access_modify(
-    domid_t dom, int bus, int dev, int func, int enable)
+/* Remove a device from a per-domain device-access list. */
+static void remove_dev_from_task(struct domain *p, struct pci_dev *dev)
 {
-    struct domain *p;
-    struct pci_dev *pdev;
-    int i, j, rc = 0;
- 
-    if ( !IS_PRIV(current) )
+    phys_dev_t *physdev = find_pdev(p, dev);
+
+    if ( physdev == NULL )
         BUG();
+    
+    list_del(&physdev->node);
 
-    if ( (bus > PCI_BUSMAX) || (dev > PCI_DEVMAX) || (func > PCI_FUNCMAX) )
-        return -EINVAL;
+    xfree(physdev);
+}
 
-    if ( !enable )
-    {
-        INFO("Disallowing access is not yet supported.\n");
-        return -EINVAL;
-    }
-
-    INFO("physdev_pci_access_modify: %02x:%02x:%02x\n", bus, dev, func);
-
-    if ( (p = find_domain_by_id(dom)) == NULL ) 
-        return -ESRCH;
-
-    /* Make the domain privileged. */
-    set_bit(DF_PHYSDEV, &p->flags);
-    /* FIXME: MAW for now make the domain REALLY privileged so that it
-     * can run a backend driver (hw access should work OK otherwise) */
-    set_bit(DF_PRIVILEGED, &p->flags);
-
-    /* Grant write access to the specified device. */
-    if ( (pdev = pci_find_slot(bus, PCI_DEVFN(dev, func))) == NULL )
-    {
-        INFO("  dev does not exist\n");
-        rc = -ENODEV;
-        goto out;
-    }
-    add_dev_to_task(p, pdev, ACC_WRITE);
-
-    INFO("  add RW %02x:%02x:%02x\n", pdev->bus->number,
-         PCI_SLOT(pdev->devfn), PCI_FUNC(pdev->devfn));
-
-    /* Is the device a bridge or cardbus? */
-    if ( pdev->hdr_type != PCI_HEADER_TYPE_NORMAL )
-        INFO("XXX can't give access to bridge devices yet\n");
+static int setup_ioport_memory_access(domid_t dom, struct domain* p, 
+                                      struct exec_domain* ed,
+                                      struct pci_dev *pdev)
+{
+    struct exec_domain* edc;
+    int i, j;
 
     /* Now, setup access to the IO ports and memory regions for the device. */
-
-    if ( p->thread.io_bitmap == NULL )
+    if ( ed->arch.io_bitmap == NULL )
     {
-        if ( (p->thread.io_bitmap = xmalloc(IOBMP_BYTES)) == NULL )
-        {
-            rc = -ENOMEM;
-            goto out;
-        }
-        memset(p->thread.io_bitmap, 0xFF, IOBMP_BYTES);
+        if ( (ed->arch.io_bitmap = xmalloc_array(u8, IOBMP_BYTES)) == NULL )
+            return -ENOMEM;
 
-        p->thread.io_bitmap_sel = ~0ULL;
+        memset(ed->arch.io_bitmap, 0xFF, IOBMP_BYTES);
+
+        ed->arch.io_bitmap_sel = ~0ULL;
+
+        for_each_exec_domain(p, edc) {
+            if (edc == ed)
+                continue;
+            edc->arch.io_bitmap = ed->arch.io_bitmap;
+        }
     }
 
     for ( i = 0; i < DEVICE_COUNT_RESOURCE; i++ )
@@ -195,14 +158,111 @@ int physdev_pci_access_modify(
                  "for device %s\n", dom, r->start, r->end, pdev->slot_name);
             for ( j = r->start; j < r->end + 1; j++ )
             {
-                clear_bit(j, p->thread.io_bitmap);
-                clear_bit(j / IOBMP_BITS_PER_SELBIT, &p->thread.io_bitmap_sel);
+                clear_bit(j, ed->arch.io_bitmap);
+                clear_bit(j / IOBMP_BITS_PER_SELBIT, &ed->arch.io_bitmap_sel);
             }
         }
-
         /* rights to IO memory regions are checked when the domain maps them */
     }
- out:
+
+    for_each_exec_domain(p, edc) {
+        if (edc == ed)
+            continue;
+        edc->arch.io_bitmap_sel = ed->arch.io_bitmap_sel;
+    }
+
+    return 0;
+}
+
+/*
+ * physdev_pci_access_modify:
+ * Allow/disallow access to a specific PCI device.  Guests should not be
+ * allowed to see bridge devices as it needlessly complicates things (one
+ * possible exception to this is the AGP bridge).  If the given device is a
+ * bridge, then the domain should get access to all the leaf devices below
+ * that bridge (XXX this is unimplemented!).
+ */
+int physdev_pci_access_modify(domid_t dom, int bus, int dev, int func, 
+                              int enable)
+{
+    struct domain *p;
+    struct exec_domain *ed;
+    struct pci_dev *pdev;
+    phys_dev_t *physdev;
+    int rc = 0;
+    int oldacc = -1, allocated_physdev = 0;
+
+    if ( !IS_PRIV(current->domain) )
+        BUG();
+
+    if ( (bus > PCI_BUSMAX) || (dev > PCI_DEVMAX) || (func > PCI_FUNCMAX) )
+        return -EINVAL;
+
+    if ( !enable )
+    {
+        INFO("Disallowing access is not yet supported.\n");
+        return -EINVAL;
+    }
+
+    INFO("physdev_pci_access_modify: %02x:%02x:%02x\n", bus, dev, func);
+
+    if ( (p = find_domain_by_id(dom)) == NULL ) 
+        return -ESRCH;
+
+    ed = p->exec_domain[0];     /* XXX */
+
+    /* Make the domain privileged. */
+    set_bit(DF_PHYSDEV, &p->d_flags);
+    /* FIXME: MAW for now make the domain REALLY privileged so that it
+     * can run a backend driver (hw access should work OK otherwise) */
+    set_bit(DF_PRIVILEGED, &p->d_flags);
+
+    /* Grant write access to the specified device. */
+    if ( (pdev = pci_find_slot(bus, PCI_DEVFN(dev, func))) == NULL )
+    {
+        INFO("  dev does not exist\n");
+        rc = -ENODEV;
+        goto clear_privilege;
+    }
+    
+    if ( (physdev = find_pdev(p, pdev)) != NULL) {
+        /* Sevice already on list: update access permissions. */
+        oldacc = physdev->flags;
+        physdev->flags = ACC_WRITE;
+    } else {
+        if ( (rc = add_dev_to_task(p, pdev, ACC_WRITE)) < 0)
+            goto clear_privilege;
+        allocated_physdev = 1;
+    }
+
+    INFO("  add RW %02x:%02x:%02x\n", pdev->bus->number,
+         PCI_SLOT(pdev->devfn), PCI_FUNC(pdev->devfn));
+
+    /* Is the device a bridge or cardbus? */
+    if ( pdev->hdr_type != PCI_HEADER_TYPE_NORMAL ) {
+        INFO("XXX can't give access to bridge devices yet\n");
+        rc = -EPERM;
+        goto remove_dev;
+    }
+
+    if ( (rc = setup_ioport_memory_access(dom, p, ed, pdev)) < 0 )
+        goto remove_dev;
+
+    put_domain(p);
+    return rc;
+
+remove_dev:
+    if (allocated_physdev) {
+        /* new device was added - remove it from the list */
+        remove_dev_from_task(p, pdev);
+    } else {
+        /* device already existed - just undo the access changes */
+        physdev->flags = oldacc;
+    }
+    
+clear_privilege:
+    clear_bit(DF_PHYSDEV, &p->d_flags);
+    clear_bit(DF_PRIVILEGED, &p->d_flags);
     put_domain(p);
     return rc;
 }
@@ -215,7 +275,7 @@ int domain_iomem_in_pfn(struct domain *p, unsigned long pfn)
     phys_dev_t *phys_dev;
 
     VERBOSE_INFO("Checking if physdev-capable domain %u needs access to "
-                 "pfn %08lx\n", p->id, pfn);
+                 "pfn %p\n", p->id, pfn);
     
     spin_lock(&p->pcidev_lock);
 
@@ -241,7 +301,7 @@ int domain_iomem_in_pfn(struct domain *p, unsigned long pfn)
     
     spin_unlock(&p->pcidev_lock);
 
-    VERBOSE_INFO("Domain %u %s mapping of pfn %08lx\n",
+    VERBOSE_INFO("Domain %u %s mapping of pfn %p\n",
                  p->id, ret ? "allowed" : "disallowed", pfn);
 
     return ret;
@@ -489,7 +549,7 @@ static long pci_cfgreg_read(int bus, int dev, int func, int reg,
     int ret;
     phys_dev_t *pdev;
 
-    if ( (ret = check_dev_acc(current, bus, dev, func, &pdev)) != 0 )
+    if ( (ret = check_dev_acc(current->domain, bus, dev, func, &pdev)) != 0 )
     {
         /* PCI spec states that reads from non-existent devices should return
          * all 1s.  In this case the domain has no read access, which should
@@ -556,7 +616,7 @@ static long pci_cfgreg_write(int bus, int dev, int func, int reg,
     int ret;
     phys_dev_t *pdev;
 
-    if ( (ret = check_dev_acc(current, bus, dev, func, &pdev)) != 0 )
+    if ( (ret = check_dev_acc(current->domain, bus, dev, func, &pdev)) != 0 )
         return ret;
 
     /* special treatment for some registers */
@@ -619,7 +679,7 @@ static long pci_probe_root_buses(u32 *busmask)
 
     memset(busmask, 0, 256/8);
 
-    list_for_each_entry ( pdev, &current->pcidev_list, node )
+    list_for_each_entry ( pdev, &current->domain->pcidev_list, node )
         set_bit(pdev->dev->bus->number, busmask);
 
     return 0;
@@ -660,7 +720,7 @@ long do_physdev_op(physdev_op_t *uop)
         break;
 
     case PHYSDEVOP_PCI_INITIALISE_DEVICE:
-        if ( (ret = check_dev_acc(current, 
+        if ( (ret = check_dev_acc(current->domain, 
                                   op.u.pci_initialise_device.bus, 
                                   op.u.pci_initialise_device.dev, 
                                   op.u.pci_initialise_device.func, 
@@ -673,7 +733,7 @@ long do_physdev_op(physdev_op_t *uop)
         break;
 
     case PHYSDEVOP_IRQ_UNMASK_NOTIFY:
-        ret = pirq_guest_unmask(current);
+        ret = pirq_guest_unmask(current->domain);
         break;
 
     case PHYSDEVOP_IRQ_STATUS_QUERY:
@@ -693,7 +753,9 @@ long do_physdev_op(physdev_op_t *uop)
         break;
     }
 
-    copy_to_user(uop, &op, sizeof(op));
+    if (copy_to_user(uop, &op, sizeof(op)))
+        ret = -EFAULT;
+
     return ret;
 }
 
@@ -733,7 +795,12 @@ void physdev_init_dom0(struct domain *p)
             continue;
         }
 
-        pdev = xmalloc(sizeof(phys_dev_t));
+
+        if ( (pdev = xmalloc(phys_dev_t)) == NULL ) {
+            INFO("failed to allocate physical device structure!\n");
+            break;
+        }
+
         pdev->dev = dev;
         pdev->flags = ACC_WRITE;
         pdev->state = 0;
@@ -741,6 +808,16 @@ void physdev_init_dom0(struct domain *p)
         list_add(&pdev->node, &p->pcidev_list);
     }
 
-    set_bit(DF_PHYSDEV, &p->flags);
+    set_bit(DF_PHYSDEV, &p->d_flags);
 }
 
+
+/*
+ * Local variables:
+ * mode: C
+ * c-set-style: "BSD"
+ * c-basic-offset: 4
+ * tab-width: 4
+ * indent-tabs-mode: nil
+ * End:
+ */
