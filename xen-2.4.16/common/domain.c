@@ -8,6 +8,7 @@
 #include <xeno/interrupt.h>
 #include <xeno/delay.h>
 #include <xeno/event.h>
+#include <xeno/time.h>
 #include <xeno/dom0_ops.h>
 #include <asm/io.h>
 #include <asm/domain_page.h>
@@ -23,24 +24,9 @@ extern unsigned char *cmdline;
 
 rwlock_t tasklist_lock __cacheline_aligned = RW_LOCK_UNLOCKED;
 
-schedule_data_t schedule_data[NR_CPUS];
-
-int wake_up(struct task_struct *p)
-{
-    unsigned long flags;
-    int ret = 0;
-    spin_lock_irqsave(&schedule_data[p->processor].lock, flags);
-    if ( __task_on_runqueue(p) ) goto out;
-    p->state = TASK_RUNNING;
-    __add_to_runqueue(p);
-    ret = 1;
-
- out:
-    spin_unlock_irqrestore(&schedule_data[p->processor].lock, flags);
-    return ret;
-}
-
-
+/*
+ * create a new domain
+ */
 struct task_struct *do_newdomain(void)
 {
     int retval;
@@ -77,97 +63,6 @@ struct task_struct *do_newdomain(void)
 
  newdomain_out:
     return(p);
-}
-
-
-void reschedule(struct task_struct *p)
-{
-    int cpu = p->processor;
-    struct task_struct *curr;
-    unsigned long flags;
-
-    if ( p->has_cpu ) return;
-
-    spin_lock_irqsave(&schedule_data[cpu].lock, flags);
-    curr = schedule_data[cpu].curr;
-    if ( is_idle_task(curr) ) 
-    {
-        set_bit(_HYP_EVENT_NEED_RESCHED, &curr->hyp_events);
-        spin_unlock_irqrestore(&schedule_data[cpu].lock, flags);
-#ifdef CONFIG_SMP
-        if ( cpu != smp_processor_id() ) smp_send_event_check_cpu(cpu);
-#endif
-    }
-    else
-    {
-        spin_unlock_irqrestore(&schedule_data[cpu].lock, flags);
-    }
-}
-
-
-static void process_timeout(unsigned long __data)
-{
-    struct task_struct * p = (struct task_struct *) __data;
-    wake_up(p);
-}
-
-long schedule_timeout(long timeout)
-{
-    struct timer_list timer;
-    unsigned long expire;
-    
-    switch (timeout)
-    {
-    case MAX_SCHEDULE_TIMEOUT:
-        /*
-         * These two special cases are useful to be comfortable in the caller.
-         * Nothing more. We could take MAX_SCHEDULE_TIMEOUT from one of the
-         * negative value but I' d like to return a valid offset (>=0) to allow
-         * the caller to do everything it want with the retval.
-         */
-        schedule();
-        goto out;
-    default:
-        /*
-         * Another bit of PARANOID. Note that the retval will be 0 since no
-         * piece of kernel is supposed to do a check for a negative retval of
-         * schedule_timeout() (since it should never happens anyway). You just
-         * have the printk() that will tell you if something is gone wrong and
-         * where.
-         */
-        if (timeout < 0)
-        {
-            printk(KERN_ERR "schedule_timeout: wrong timeout "
-                   "value %lx from %p\n", timeout,
-                   __builtin_return_address(0));
-            current->state = TASK_RUNNING;
-            goto out;
-        }
-    }
-    
-    expire = timeout + jiffies;
-    
-    init_timer(&timer);
-    timer.expires = expire;
-    timer.data = (unsigned long) current;
-    timer.function = process_timeout;
-    
-    add_timer(&timer);
-    schedule();
-    del_timer_sync(&timer);
-    
-    timeout = expire - jiffies;
-    
- out:
-    return timeout < 0 ? 0 : timeout;
-}
-
-
-long do_yield(void)
-{
-    current->state = TASK_INTERRUPTIBLE;
-    schedule();
-    return 0;
 }
 
 /* Get a pointer to the specified domain.  Consider replacing this
@@ -245,8 +140,6 @@ long kill_other_domain(unsigned int dom)
 void release_task(struct task_struct *p)
 {
     struct list_head *list_ent, *tmp;
-
-    ASSERT(!__task_on_runqueue(p));
     ASSERT(p->state == TASK_DYING);
     ASSERT(!p->has_cpu);
     write_lock_irq(&tasklist_lock);
@@ -275,78 +168,6 @@ void release_task(struct task_struct *p)
 
     free_task_struct(p);
 }
-
-
-asmlinkage void schedule(void)
-{
-    struct task_struct *prev, *next;
-    struct list_head *tmp;
-    int this_cpu;
-
- need_resched_back:
-    prev = current;
-    this_cpu = prev->processor;
-
-    spin_lock_irq(&schedule_data[this_cpu].lock);
-
-    ASSERT(!in_interrupt());
-    ASSERT(__task_on_runqueue(prev));
-
-    if ( !prev->counter )
-    {
-        prev->counter = 2;
-        __move_last_runqueue(prev);
-    }
-
-    switch ( prev->state )
-    {
-    case TASK_INTERRUPTIBLE:
-        if ( signal_pending(prev) )
-        {
-            prev->state = TASK_RUNNING;
-            break;
-        }
-    default:
-        __del_from_runqueue(prev);
-    case TASK_RUNNING:;
-    }
-    clear_bit(_HYP_EVENT_NEED_RESCHED, &prev->hyp_events);
-
-    /* Round-robin, skipping idle where possible. */
-    next = NULL;
-    list_for_each(tmp, &schedule_data[smp_processor_id()].runqueue) {
-        next = list_entry(tmp, struct task_struct, run_list);
-        if ( next->domain != IDLE_DOMAIN_ID ) break;
-    }
-
-    prev->has_cpu = 0;
-    next->has_cpu = 1;
-
-    schedule_data[this_cpu].prev = prev;
-    schedule_data[this_cpu].curr = next;
-
-    spin_unlock_irq(&schedule_data[this_cpu].lock);
-
-    if ( unlikely(prev == next) )
-    {
-        /* We won't go through the normal tail, so do this by hand */
-        prev->policy &= ~SCHED_YIELD;
-        goto same_process;
-    }
-
-    prepare_to_switch();
-    switch_to(prev, next);
-    prev = schedule_data[this_cpu].prev;
-    
-    prev->policy &= ~SCHED_YIELD;
-    if ( prev->state == TASK_DYING ) release_task(prev);
-
- same_process:
-    if ( test_bit(_HYP_EVENT_NEED_RESCHED, &current->hyp_events) )
-        goto need_resched_back;
-    return;
-}
-
 
 unsigned int alloc_new_dom_mem(struct task_struct *p, unsigned int kbytes)
 {
@@ -403,7 +224,6 @@ int final_setup_guestos(struct task_struct * p, dom_meminfo_t * meminfo)
     l1_pgentry_t * l1tab;
     start_info_t * virt_startinfo_addr;
     unsigned long virt_stack_addr;
-    unsigned long long time;
     unsigned long phys_l2tab;
     net_ring_t *net_ring;
     net_vif_t *net_vif;
@@ -436,10 +256,9 @@ int final_setup_guestos(struct task_struct * p, dom_meminfo_t * meminfo)
     unmap_domain_mem((void *)((unsigned long)l1tab & PAGE_MASK));
 
     /* set up the shared info structure */
-    rdtscll(time);
-    p->shared_info->wall_time    = time;
-    p->shared_info->domain_time  = time;
-    p->shared_info->ticks_per_ms = ticks_per_usec * 1000;
+	update_dom_time(p->shared_info);
+	p->shared_info->cpu_freq	 = cpu_freq;
+    p->shared_info->domain_time  = 0;
 
     /* we pass start info struct to guest os as function parameter on stack */
     virt_startinfo_addr = (start_info_t *)meminfo->virt_startinfo_addr;
@@ -538,7 +357,6 @@ int setup_guestos(struct task_struct *p, dom0_newdomain_t *params)
     unsigned long cur_address, alloc_address;
     unsigned long virt_load_address, virt_stack_address, virt_shinfo_address;
     start_info_t  *virt_startinfo_address;
-    unsigned long long time;
     unsigned long count;
     unsigned long alloc_index;
     l2_pgentry_t *l2tab, *l2start;
@@ -686,10 +504,10 @@ int setup_guestos(struct task_struct *p, dom0_newdomain_t *params)
     unmap_domain_mem(l1start);
 
     /* Set up shared info area. */
-    rdtscll(time);
-    p->shared_info->wall_time    = time;
-    p->shared_info->domain_time  = time;
-    p->shared_info->ticks_per_ms = ticks_per_usec * 1000;
+	update_dom_time(p->shared_info);
+	p->shared_info->cpu_freq	 = cpu_freq;
+    p->shared_info->domain_time  = 0;
+
 
     virt_startinfo_address = (start_info_t *)
         (virt_load_address + ((alloc_index - 1) << PAGE_SHIFT));
@@ -788,14 +606,10 @@ int setup_guestos(struct task_struct *p, dom0_newdomain_t *params)
     return 0;
 }
 
+
 void __init domain_init(void)
 {
-    int i;
-    for ( i = 0; i < NR_CPUS; i++ )
-    {
-        INIT_LIST_HEAD(&schedule_data[i].runqueue);
-        spin_lock_init(&schedule_data[i].lock);
-        schedule_data[i].prev = &idle0_task;
-        schedule_data[i].curr = &idle0_task;
-    }
+	printk("Initialising domains\n");
 }
+
+

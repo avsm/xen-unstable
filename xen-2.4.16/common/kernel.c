@@ -185,6 +185,7 @@ void cmain (unsigned long magic, multiboot_info_t *mbi)
     {
         panic("Could not set up DOM0 guest OS\n");
     }
+	update_dom_time(new_dom->shared_info);
     wake_up(new_dom);
 
     cpu_idle();

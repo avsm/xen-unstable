@@ -588,7 +588,6 @@ void do_timer(struct pt_regs *regs)
 {
     struct task_struct *p;
     shared_info_t *s;
-    unsigned long long wall;
     unsigned long cpu_mask = 0;
 
     (*(unsigned long *)&jiffies)++;
@@ -596,13 +595,11 @@ void do_timer(struct pt_regs *regs)
     if ( !using_apic_timer )
         update_process_times(user_mode(regs));
 
-    rdtscll(wall);
-
+	/* XXX RN: Move this for virtual domain time timer interrupts */
     read_lock(&tasklist_lock);
     p = &idle0_task;
     do {
         s = p->shared_info;
-        s->wall_time = s->domain_time = wall;
         cpu_mask |= mark_guest_event(p, _EVENT_TIMER);
     }
     while ( (p = p->next_task) != &idle0_task );

@@ -81,7 +81,7 @@ typedef struct
 #define __HYPERVISOR_stack_and_ldt_switch  4
 #define __HYPERVISOR_net_update            5
 #define __HYPERVISOR_fpu_taskswitch        6
-#define __HYPERVISOR_yield                 7
+#define __HYPERVISOR_sched_op              7
 #define __HYPERVISOR_exit                  8
 #define __HYPERVISOR_dom0_op               9
 #define __HYPERVISOR_network_op           10
@@ -165,35 +165,36 @@ typedef struct shared_info_st {
      */
     unsigned long failsafe_address;
 
-    /*
-     * CPU ticks since start of day.
-     * `wall_time' counts CPU ticks in real time.
-     * `domain_time' counts CPU ticks during which this domain has run.
+	/*
+     * Time:
+     * The following abstractions are exposed: System Time, Wall Clock 
+     * Time, Domain Virtual Time. Domains can access Cycle counter time
+     * directly. 
+	 * XXX RN: Need something to pass NTP scaling to GuestOS.
      */
-    unsigned long ticks_per_ms; /* CPU ticks per millisecond */
-    /*
-     * Current wall_time can be found by rdtsc. Only possible use of
-     * variable below is that it provides a timestamp for last update
-     * of domain_time.
-     */
-    unsigned long long wall_time;
-    unsigned long long domain_time;
 
-    /*
-     * Timeouts for points at which guest OS would like a callback.
-     * This will probably be backed up by a timer heap in the guest OS.
-     * In Linux we use timeouts to update 'jiffies'.
+	u64           cpu_freq;	    /* to calculate ticks -> real time */
+
+	/* System Time */
+	long long          system_time;     /* in ns */
+	unsigned long      st_timestamp;    /* cyclecounter at last update */
+
+	/* Wall Clock Time */
+	u32                wc_version;      /* a version number for info below */
+	long               tv_sec;          /* essentially a struct timeval */
+	long               tv_usec;
+	long long          wc_timestamp;    /* system time at last update */
+
+	/* Domain Virtual Time */
+	unsigned long long domain_time;
+	
+	/*
+     * Timeout values:
+     * Allow a domain to specify a timeout value in system time and 
+     * domain virtual time.
      */
     unsigned long long wall_timeout;
     unsigned long long domain_timeout;
-
-    /*
-     * Real-Time Clock. This shows time, in seconds, since 1.1.1980.
-     * The timestamp shows the CPU 'wall time' when RTC was last read.
-     * Thus it allows a mapping between 'real time' and 'wall time'.
-     */
-    unsigned long      rtc_time;
-    unsigned long long rtc_timestamp;
 
 } shared_info_t;
 
