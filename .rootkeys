@@ -21,7 +21,6 @@
 410a4c2bAO_m_l4RsiiPHnZ4ixHWbQ docs/misc/xend.tex
 3f9e7d564bWFB-Czjv1qdmE6o0GqNg docs/src/interface.tex
 410144afnSd2Yw68AHGO5gXu2m3y6A docs/src/user.tex
-3f9e7d5bz8BwYkNuwyiPVu7JJG441A docs/xenstyle.cls
 3f815144d1vI2777JI-dO4wk49Iw7g extras/mini-os/Makefile
 3f815144zTnCV5591ulIJQrpe5b-5Q extras/mini-os/README
 3f815144wiiDekmfMl9LIPIvhR83Uw extras/mini-os/entry.S
@@ -212,6 +211,7 @@
 40f56239YAjS52QG2FIAQpHDZAdGHg linux-2.6.9-xen-sparse/include/asm-xen/asm-i386/desc.h
 4107adf1E5O4ztGHNGMzCCNhcvqNow linux-2.6.9-xen-sparse/include/asm-xen/asm-i386/dma-mapping.h
 40f5623akIoBsQ3KxSB2kufkbgONXQ linux-2.6.9-xen-sparse/include/asm-xen/asm-i386/fixmap.h
+41979925z1MsKU1SfuuheM1IFDQ_bA linux-2.6.9-xen-sparse/include/asm-xen/asm-i386/floppy.h
 4118b6a418gnL6AZsTdglC92YGqYTg linux-2.6.9-xen-sparse/include/asm-xen/asm-i386/highmem.h
 40f5623aJVXQwpJMOLE99XgvGsfQ8Q linux-2.6.9-xen-sparse/include/asm-xen/asm-i386/io.h
 40f5623aKXkBBxgpLx2NcvkncQ1Yyw linux-2.6.9-xen-sparse/include/asm-xen/asm-i386/mach-xen/irq_vectors.h
@@ -528,6 +528,12 @@
 40fcefb3yMSrZvApO9ToIi-iQwnchA tools/sv/images/xen.png
 41013a83z27rKvWIxAfUBMVZ1eDCDg tools/sv/inc/script.js
 40fcefb3zGC9XNBkSwTEobCoq8YClA tools/sv/inc/style.css
+4194e861IgTabTt8HOuh143QIJFD1Q tools/x2d2/Makefile
+4194e861M2gcBz4i94cQYpqzi8n6UA tools/x2d2/cntrl_con.c
+4194e861xToz-o2KH6VT_CPJqVGMCg tools/x2d2/domain_controller.h
+4194e8612TrrMvC8ZlA4h2ZYCPWz4g tools/x2d2/main.c
+4194e861x2eqNCD61RYPCUEBVdMYuw tools/x2d2/minixend.h
+4194e861A4V9VbD_FYmgXpYEj5YwVg tools/x2d2/util.c
 403a3edbrr8RE34gkbR40zep98SXbg tools/xentrace/Makefile
 40a107afN60pFdURgBv9KwEzgRl5mQ tools/xentrace/formats
 4050c413PhhLNAYk3TEwP37i_iLw9Q tools/xentrace/xentrace.8
@@ -699,6 +705,7 @@
 404f1b920OQVnrbnXnySS-WxrH9Wzw xen/include/asm-x86/config.h
 3ddb79c2LLt11EQHjrd6sB7FUqvFfA xen/include/asm-x86/cpufeature.h
 40cf1596ajIU1KJfF22XD-tSLfH6XA xen/include/asm-x86/current.h
+4194efbdvxUXjCLobbopgLOojisO4Q xen/include/asm-x86/debugger.h
 3ddb79c2jFkPAZTDmU35L6IUssYMgQ xen/include/asm-x86/debugreg.h
 3ddb79c3r9-31dIsewPV3P3i8HALsQ xen/include/asm-x86/delay.h
 3ddb79c34BFiXjBJ_cCKB0aCsV1IDw xen/include/asm-x86/desc.h
@@ -732,6 +739,7 @@
 3ddb79c3ezddh34MdelJpa5tNR00Dw xen/include/asm-x86/system.h
 3ddb79c4HugMq7IYGxcQKFBpKwKhzA xen/include/asm-x86/types.h
 40cf1596saFaHD5DC5zvrSn7CDCWGQ xen/include/asm-x86/uaccess.h
+418fbcfe_WliJPToeVM-9VStvym-hw xen/include/asm-x86/x86_32/asm_defns.h
 3ddb79c2ADvRmdexd9y3AYK9_NTx-Q xen/include/asm-x86/x86_32/current.h
 3ddb79c3mbqEM7QQr3zVq7NiBNhouA xen/include/asm-x86/x86_32/regs.h
 3e7f358aG11EvMI9VJ4_9hD4LUO7rQ xen/include/asm-x86/x86_32/string.h
