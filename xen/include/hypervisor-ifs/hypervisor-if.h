@@ -10,7 +10,13 @@
 /* GCC-specific way to pack structure definitions (no implicit padding). */
 #define PACKED __attribute__ ((packed))
 
-#include "arch/hypervisor-if.h"
+#if defined(__i386__)
+#include "arch-x86_32.h"
+#elif defined(__x86_64__)
+#include "arch-x86_64.h"
+#else
+#error "Unsupported architecture"
+#endif
 
 /*
  * HYPERVISOR "SYSTEM CALLS"
@@ -23,12 +29,9 @@
 #define __HYPERVISOR_set_gdt               3
 #define __HYPERVISOR_stack_switch          4
 #define __HYPERVISOR_set_callbacks         5
-#define __HYPERVISOR_net_io_op             6
 #define __HYPERVISOR_fpu_taskswitch        7
 #define __HYPERVISOR_sched_op              8
 #define __HYPERVISOR_dom0_op               9
-#define __HYPERVISOR_network_op           10
-#define __HYPERVISOR_block_io_op          11
 #define __HYPERVISOR_set_debugreg         12
 #define __HYPERVISOR_get_debugreg         13
 #define __HYPERVISOR_update_descriptor    14
@@ -59,19 +62,20 @@
  * 
  * Virtual interrupts that a guest OS may receive from the hypervisor.
  */
-#define VIRQ_BLKDEV     0  /* A block device response has been queued. */
+#define VIRQ_BLKDEV     0  /* (OBS) A block device response has been queued. */
 #define VIRQ_TIMER      1  /* A timeout has been updated. */
-#define VIRQ_DIE        2  /* OS is about to be killed. Clean up please! */
+#define VIRQ_DIE        2  /* (OBS) OS is about to be killed. Clean up! */
 #define VIRQ_DEBUG      3  /* Request guest to dump debug info (gross!) */
-#define VIRQ_NET        4  /* There are packets for transmission. */
-#define VIRQ_PS2        5  /* PS/2 keyboard or mouse event(s) */
-#define VIRQ_STOP       6  /* Prepare for stopping and possible pickling */
+#define VIRQ_NET        4  /* (OBS) There are packets for transmission. */
+#define VIRQ_PS2        5  /* (OBS) PS/2 keyboard or mouse event(s) */
+#define VIRQ_STOP       6  /* (OBS) Prepare for stopping and pickling */
 #define VIRQ_EVTCHN     7  /* Event pending on an event channel */
-#define VIRQ_VBD_UPD    8  /* Event to signal VBDs should be reprobed */
-#define VIRQ_CONSOLE    9  /* This is only for domain-0 initial console. */
-#define VIRQ_PHYSIRQ   10  /* Event to signal pending physical IRQs. */
+#define VIRQ_VBD_UPD    8  /* (OBS) Event to signal VBDs should be reprobed */
+#define VIRQ_CONSOLE    9  /* (DOM0) bytes received on master console. */
+#define VIRQ_PHYSIRQ   10  /* Pending physical IRQs. */
 #define VIRQ_MISDIRECT 11  /* Catch-all virtual interrupt. */
-#define NR_VIRQS       12
+#define VIRQ_DOM_EXC   12  /* (DOM0) Exceptional event for some domain. */
+#define NR_VIRQS       13
 
 /*
  * MMU-UPDATE REQUESTS
@@ -169,8 +173,9 @@
  */
 #define SCHEDOP_yield           0   /* Give up the CPU voluntarily.      */
 #define SCHEDOP_block           1   /* Block until an event is received. */
-#define SCHEDOP_exit            3   /* Exit and kill this domain.        */
 #define SCHEDOP_stop            4   /* Stop executing this domain.       */
+#define SCHEDOP_cmdmask       255   /* 8-bit command. */
+#define SCHEDOP_reasonshift     8   /* 8-bit stop code. (SCHEDOP_stop only) */
 
 /*
  * Commands to HYPERVISOR_console_io().
@@ -189,9 +194,6 @@
 typedef u32 domid_t;
 /* DOMID_SELF is used in certain contexts to refer to oneself. */
 #define DOMID_SELF (0x7FFFFFFEU)
-
-#include "network.h"
-#include "block.h"
 
 /*
  * Send an array of these to HYPERVISOR_mmu_update().
@@ -329,15 +331,7 @@ typedef struct shared_info_st
     u64                wall_timeout;    /* 440 */
     u64                domain_timeout;  /* 448 */
 
-    /*
-     * The index structures are all stored here for convenience. The rings 
-     * themselves are allocated by Xen but the guestos must create its own 
-     * mapping -- the machine address is given in the startinfo structure to 
-     * allow this to happen.
-     */
-    net_idx_t net_idx[MAX_DOMAIN_VIFS];
-
-    execution_context_t execution_context;
+    execution_context_t execution_context; /* 456 */
 
 } PACKED shared_info_t;
 

@@ -1,12 +1,17 @@
 
 debug       ?= n
 debugger    ?= n
-old_drivers ?= n
 perfc       ?= n
 trace       ?= n
 
-COMPILE_ARCH := $(shell uname -m | sed -e s/i.86/i386/)
-TARGET_ARCH  ?= $(COMPILE_ARCH)
+# Currently supported architectures:
+#  {COMPILE,TARGET}_ARCH    := x86
+#  {COMPILE,TARGET}_SUBARCH := x86_32 | x86_64
+COMPILE_ARCH    := x86
+COMPILE_SUBARCH := $(shell uname -m | sed -e s/i.86/x86_32/)
+
+TARGET_ARCH     ?= $(COMPILE_ARCH)
+TARGET_SUBARCH  ?= $(COMPILE_SUBARCH)
 
 TARGET  := $(BASEDIR)/xen
 HDRS    := $(wildcard $(BASEDIR)/include/xen/*.h)
@@ -26,15 +31,6 @@ ALL_OBJS := $(BASEDIR)/common/common.o
 ALL_OBJS += $(BASEDIR)/drivers/char/driver.o
 ALL_OBJS += $(BASEDIR)/drivers/acpi/driver.o
 ALL_OBJS += $(BASEDIR)/drivers/pci/driver.o
-ifeq ($(old_drivers),y)
-ALL_OBJS += $(BASEDIR)/net/network.o
-ALL_OBJS += $(BASEDIR)/drivers/net/driver.o
-ALL_OBJS += $(BASEDIR)/drivers/block/driver.o
-ALL_OBJS += $(BASEDIR)/drivers/cdrom/driver.o
-ALL_OBJS += $(BASEDIR)/drivers/ide/driver.o
-ALL_OBJS += $(BASEDIR)/drivers/scsi/driver.o
-ALL_OBJS += $(BASEDIR)/drivers/message/fusion/driver.o
-endif
 ALL_OBJS += $(BASEDIR)/arch/$(TARGET_ARCH)/arch.o
 
 HOSTCC     = gcc
@@ -48,10 +44,6 @@ endif
 
 ifeq ($(debugger),y)
 CFLAGS += -DXEN_DEBUGGER
-endif
-
-ifeq ($(old_drivers),y)
-CFLAGS += -DOLD_DRIVERS
 endif
 
 ifeq ($(perfc),y)

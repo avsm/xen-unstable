@@ -12,10 +12,8 @@
 #include <types.h>
 
 /* include the hypervisor interface */
-#include <hypervisor-ifs/network.h>
-#include <hypervisor-ifs/block.h>
 #include <hypervisor-ifs/hypervisor-if.h>
-
+#include "../../../tools/xend/lib/domain_controller.h"
 
 /*
  * a placeholder for the start of day information passed up from the hypervisor
@@ -112,17 +110,6 @@ static __inline__ int HYPERVISOR_set_callbacks(
     return ret;
 }
 
-static __inline__ int HYPERVISOR_net_io_op(netop_t *op)
-{
-    int ret;
-    __asm__ __volatile__ (
-        TRAP_INSTR
-        : "=a" (ret) : "0" (__HYPERVISOR_net_io_op),
-        "b" (op) : "memory" );
-
-    return ret;
-}
-
 static __inline__ int HYPERVISOR_fpu_taskswitch(void)
 {
     int ret;
@@ -155,25 +142,39 @@ static __inline__ int HYPERVISOR_block(void)
     return ret;
 }
 
-static __inline__ int HYPERVISOR_exit(void)
+static inline int HYPERVISOR_shutdown(void)
 {
     int ret;
     __asm__ __volatile__ (
         TRAP_INSTR
         : "=a" (ret) : "0" (__HYPERVISOR_sched_op),
-        "b" (SCHEDOP_exit) : "memory" );
+        "b" (SCHEDOP_stop | (STOPCODE_shutdown << SCHEDOP_reasonshift))
+        : "memory" );
 
     return ret;
 }
 
-static __inline__ int HYPERVISOR_stop(unsigned long srec)
+static inline int HYPERVISOR_reboot(void)
+{
+    int ret;
+    __asm__ __volatile__ (
+        TRAP_INSTR
+        : "=a" (ret) : "0" (__HYPERVISOR_sched_op),
+        "b" (SCHEDOP_stop | (STOPCODE_reboot << SCHEDOP_reasonshift))
+        : "memory" );
+
+    return ret;
+}
+
+static inline int HYPERVISOR_suspend(unsigned long srec)
 {
     int ret;
     /* NB. On suspend, control software expects a suspend record in %esi. */
     __asm__ __volatile__ (
         TRAP_INSTR
         : "=a" (ret) : "0" (__HYPERVISOR_sched_op),
-        "b" (SCHEDOP_stop), "S" (srec) : "memory" );
+        "b" (SCHEDOP_stop | (STOPCODE_suspend << SCHEDOP_reasonshift)), 
+        "S" (srec) : "memory" );
 
     return ret;
 }
@@ -196,28 +197,6 @@ static __inline__ int HYPERVISOR_dom0_op(void *dom0_op)
         TRAP_INSTR
         : "=a" (ret) : "0" (__HYPERVISOR_dom0_op),
         "b" (dom0_op) : "memory" );
-
-    return ret;
-}
-
-static __inline__ int HYPERVISOR_network_op(void *network_op)
-{
-    int ret;
-    __asm__ __volatile__ (
-        TRAP_INSTR
-        : "=a" (ret) : "0" (__HYPERVISOR_network_op),
-        "b" (network_op) : "memory" );
-
-    return ret;
-}
-
-static __inline__ int HYPERVISOR_block_io_op(unsigned int op)
-{
-    int ret;
-    __asm__ __volatile__ (
-        TRAP_INSTR
-        : "=a" (ret) : "0" (__HYPERVISOR_block_io_op),
-        "b" (op) : "memory" ); 
 
     return ret;
 }

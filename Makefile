@@ -2,6 +2,8 @@
 # Grand Unified Makefile for Xen.
 #
 
+INSTALL_DIR ?= $(shell pwd)/install
+
 all: make-symlinks
 	$(MAKE) -C xen
 	$(MAKE) -C tools
@@ -9,36 +11,55 @@ all: make-symlinks
 install: all
 	$(MAKE) -C xen install
 	$(MAKE) -C tools install
+	$(shell cp -a install/boot/*$(LINUX_VER)* /boot/)
 
 dist: all
-	$(MAKE) prefix=`pwd`/../install dist=yes -C xen install
-	$(MAKE) prefix=`pwd`/../install dist=yes -C tools install
+	$(MAKE) prefix=$(INSTALL_DIR) dist=yes -C xen install
+	$(MAKE) prefix=$(INSTALL_DIR) dist=yes -C tools install
 
-LINUX_SRC        ?= ../linux-2.4.26.tar.gz
-LINUX_CONFIG_DIR ?= ../install/config
+LINUX_VER        ?= $(shell ( /bin/ls -ld linux-*-xen-sparse ) 2>/dev/null | sed -e 's!^.*linux-\(.\+\)-xen-sparse!\1!' )
+LINUX_SRC        ?= linux-$(LINUX_VER).tar.gz
+LINUX_CONFIG_DIR ?= $(INSTALL_DIR)/boot
+
+pristine-linux-src:
+	[ -e $(LINUX_SRC) ] || wget ftp://ftp.kernel.org/pub/linux/kernel/v2.4/linux-$(LINUX_VER).tar.gz -O- > $(LINUX_SRC)
+
+linux-$(LINUX_VER)-xen: pristine-linux-src
+	$(RM) -rf linux-$(LINUX_VER)-xen
+	tar -x -z -f $(LINUX_SRC)
+	mv linux-$(LINUX_VER) linux-$(LINUX_VER)-xen
+	( cd linux-$(LINUX_VER)-xen-sparse ; ./mkbuildtree ../linux-$(LINUX_VER)-xen )
+
+config_%: linux-$(LINUX_VER)-xen
+	$(MAKE) -C linux-$(LINUX_VER)-xen ARCH=xen mrproper
+	cp $(LINUX_CONFIG_DIR)/config-$(LINUX_VER)-$(subst config_,,$(@)) .config || $(MAKE) -C linux-$(LINUX_VER)-xen ARCH=xen $(subst config_,,$(@))_config
+	$(MAKE) -C linux-$(LINUX_VER)-xen ARCH=xen oldconfig
+	$(MAKE) -C linux-$(LINUX_VER)-xen ARCH=xen dep
+
+build_%: 
+	$(MAKE) -C linux-$(LINUX_VER)-xen ARCH=xen bzImage
+	$(MAKE) -C linux-$(LINUX_VER)-xen ARCH=xen INSTALL_NAME=$(subst build_,$(LINUX_VER)-,$(@)) prefix=$(INSTALL_DIR) install
+
+
 world: dist
-	$(RM) ../linux-2.4.26-xen
-	tar -x -z -C .. -f $(LINUX_SRC)
-	mv ../linux-2.4.26 ../linux-2.4.26-xen
-	cd ../linux-2.4.26-xen
-	cp $(LINUX_CONFIG_DIR)/dom0 .config
-	ARCH=xen make oldconfig; ARCH=xen make dep; ARCH=xen make bzImage
-	install -m0644 arch/xen/boot/bzImage \
-		../install/boot/vmlinuz-2.4.26-xen0
-	install -m0644 vmlinux ../install/boot/vmlinux-syms-2.4.26-xen0
-	ARCH=xen make mrproper
-	cp $(LINUX_CONFIG_DIR)/unprivileged .config
-	ARCH=xen make oldconfig; ARCH=xen make dep; ARCH=xen make bzImage
-	install -m0644 arch/xen/boot/bzImage \
-		../install/boot/vmlinuz-2.4.26-xen
-	install -m0644 vmlinux ../install/boot/vmlinux-syms-2.4.26-xen
+	$(MAKE) config_xenU 
+	$(MAKE) build_xenU
+	$(MAKE) config_xen0 
+	$(MAKE) build_xen0
+
 
 clean: delete-symlinks
 	$(MAKE) -C xen clean
 	$(MAKE) -C tools clean
 
-make-symlinks:
-	ln -sf linux-2.4.26-xen-sparse linux-xen-sparse
+mrproper: clean
+	rm -rf install linux-$(LINUX_VER)-xen linux-$(LINUX_VER).tar.gz
+
+
+make-symlinks: delete-symlinks
+	ln -sf linux-$(LINUX_VER)-xen-sparse linux-xen-sparse
 
 delete-symlinks:
 	$(RM) linux-xen-sparse
+
+

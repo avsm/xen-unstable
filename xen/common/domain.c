@@ -1,10 +1,10 @@
+
 #include <xen/config.h>
 #include <xen/init.h>
 #include <xen/lib.h>
 #include <xen/errno.h>
 #include <xen/sched.h>
 #include <xen/mm.h>
-#include <xen/skbuff.h>
 #include <xen/interrupt.h>
 #include <xen/delay.h>
 #include <xen/event.h>
@@ -15,13 +15,11 @@
 #include <asm/domain_page.h>
 #include <asm/flushtlb.h>
 #include <asm/msr.h>
-#include <xen/blkdev.h>
 #include <xen/console.h>
-#include <xen/vbd.h>
 #include <asm/i387.h>
 #include <xen/shadow.h>
 
-#ifdef CONFIG_X86_64BITMODE
+#if defined(__x86_64__)
 #define ELFSIZE 64
 #else
 #define ELFSIZE 32
@@ -79,8 +77,6 @@ struct task_struct *do_createdomain(domid_t dom_id, unsigned int cpu)
         strncpy(p->name, buf, MAX_DOMAIN_NAME);
         p->name[MAX_DOMAIN_NAME-1] = '\0';
 
-        spin_lock_init(&p->blk_ring_lock);
-
         p->addr_limit = USER_DS;
         
         spin_lock_init(&p->page_list_lock);
@@ -98,8 +94,6 @@ struct task_struct *do_createdomain(domid_t dom_id, unsigned int cpu)
         machine_to_phys_mapping[virt_to_phys(p->mm.perdomain_pt) >> 
                                PAGE_SHIFT] = 0x0fffdeadUL;  /* debug */
 
-        init_blkdev_info(p);
-        
         /* Per-domain PCI-device list. */
         spin_lock_init(&p->pcidev_lock);
         INIT_LIST_HEAD(&p->pcidev_list);
@@ -170,16 +164,8 @@ struct task_struct *find_last_domain(void)
 }
 
 
-void kill_domain_with_errmsg(const char *err)
-{
-    printk("DOM%u FATAL ERROR: %s\n", current->domain, err);
-    kill_domain();
-}
-
-
 void __kill_domain(struct task_struct *p)
 {
-    int i;
     struct task_struct **pp;
     unsigned long flags;
 
@@ -196,14 +182,7 @@ void __kill_domain(struct task_struct *p)
 
     DPRINTK("Killing domain %u\n", p->domain);
 
-    unlink_blkdev_info(p);
-
-    for ( i = 0; i < MAX_DOMAIN_VIFS; i++ )
-        unlink_net_vif(p->net_vif_list[i]);
-
     destroy_event_channels(p);
-
-    delete_all_domain_vfr_rules(p);
 
     /*
      * Note this means that find_domain_by_id may fail, even when the caller
@@ -245,7 +224,7 @@ long kill_other_domain(domid_t dom, int force)
     if ( (p = find_domain_by_id(dom)) == NULL )
         return -ESRCH;
 
-    if ( p->state == TASK_STOPPED )
+    if ( (p->state == TASK_STOPPED) || (p->state == TASK_CRASHED) )
         __kill_domain(p);
     else if ( force )
         send_hyp_event(p, _HYP_EVENT_DIE);
@@ -256,8 +235,34 @@ long kill_other_domain(domid_t dom, int force)
     return 0;
 }
 
-void stop_domain(void)
+
+void crash_domain(void)
 {
+    struct task_struct *p;
+
+    set_current_state(TASK_CRASHED);
+    
+    p = find_domain_by_id(0);
+    send_guest_virq(p, VIRQ_DOM_EXC);
+    put_task_struct(p);
+    
+    __enter_scheduler();
+    BUG();
+}
+
+
+void stop_domain(u8 reason)
+{
+    struct task_struct *p;
+
+    if ( current->domain == 0 )
+    {
+        extern void machine_restart(char *);
+        printk("Domain 0 halted: rebooting machine!\n");
+        machine_restart(0);
+    }
+
+    current->stop_code = reason;
     memcpy(&current->shared_info->execution_context, 
            get_execution_context(), 
            sizeof(execution_context_t));
@@ -265,13 +270,9 @@ void stop_domain(void)
     wmb(); /* All CPUs must see saved info in state TASK_STOPPED. */
     set_current_state(TASK_STOPPED);
 
-    /* OK, this is grim, but helps speed up live migrate. When a domain stops,
-       kick Dom0 */
-    {
-        struct task_struct *p;
-        guest_schedule_to_run( p = find_domain_by_id(0ULL) );
-        put_task_struct(p);
-    }
+    p = find_domain_by_id(0);
+    send_guest_virq(p, VIRQ_DOM_EXC);
+    put_task_struct(p);
 
     __enter_scheduler();
 }
@@ -299,11 +300,7 @@ struct pfn_info *alloc_domain_page(struct task_struct *p)
     unsigned long flags, mask, pfn_stamp, cpu_stamp;
     int i;
 
-#ifdef OLD_DRIVERS
-    ASSERT((p == NULL) || !in_irq());
-#else
     ASSERT(!in_irq());
-#endif
 
     spin_lock_irqsave(&free_list_lock, flags);
     if ( likely(!list_empty(&free_list)) )
@@ -332,15 +329,7 @@ struct pfn_info *alloc_domain_page(struct task_struct *p)
 
         if ( unlikely(mask != 0) )
         {
-#ifdef OLD_DRIVERS
-            /* In IRQ ctxt, flushing is best-effort only, to avoid deadlock. */
-            if ( likely(!in_irq()) )
-                flush_tlb_mask(mask);
-            else if ( unlikely(!try_flush_tlb_mask(mask)) )
-                goto free_and_exit;
-#else
             flush_tlb_mask(mask);
-#endif
             perfc_incrc(need_flush_tlb_flush);
         }
     }
@@ -559,12 +548,6 @@ void release_task(struct task_struct *p)
 
     DPRINTK("Releasing task %u\n", p->domain);
 
-    /*
-     * This frees up blkdev rings and vbd-access lists. Totally safe since
-     * blkdev ref counting actually uses the task_struct refcnt.
-     */
-    destroy_blkdev_info(p);
-
     /* Free all memory associated with this domain. */
     free_page((unsigned long)p->mm.perdomain_pt);
     UNSHARE_PFN(virt_to_page(p->shared_info));
@@ -640,10 +623,6 @@ int final_setup_guestos(struct task_struct *p, dom0_builddomain_t *builddomain)
 
     /* Set up the shared info structure. */
     update_dom_time(p->shared_info);
-
-    /* Add virtual network interfaces and point to them in startinfo. */
-    while ( builddomain->num_vifs-- > 0 )
-        (void)create_net_vif(p->domain);
 
     set_bit(PF_CONSTRUCTED, &p->flags);
 
@@ -773,7 +752,6 @@ static int loadelfimage(char *elfbase)
 int construct_dom0(struct task_struct *p, 
                    unsigned long alloc_start,
                    unsigned long alloc_end,
-                   unsigned int num_vifs,
                    char *image_start, unsigned long image_len, 
                    char *initrd_start, unsigned long initrd_len,
                    char *cmdline)
@@ -814,14 +792,6 @@ int construct_dom0(struct task_struct *p,
     unsigned long mpt_alloc;
 
     extern void physdev_init_dom0(struct task_struct *);
-
-#ifdef OLD_DRIVERS
-    extern void ide_probe_devices(xen_disk_info_t *);
-    extern void scsi_probe_devices(xen_disk_info_t *);
-    extern void cciss_probe_devices(xen_disk_info_t *);
-    xen_disk_info_t xdi;
-    xen_disk_t *xd;
-#endif
 
     /* Sanity! */
     if ( p->domain != 0 ) 
@@ -1073,34 +1043,6 @@ int construct_dom0(struct task_struct *p,
     
     /* Give up the VGA console if DOM0 is configured to grab it. */
     console_endboot(strstr(cmdline, "tty0") != NULL);
-
-    /* Add virtual network interfaces. */
-    while ( num_vifs-- > 0 )
-        (void)create_net_vif(0);
-
-#ifdef OLD_DRIVERS
-    /* DOM0 gets access to all real block devices. */
-#define MAX_REAL_DISKS 256
-    xd = kmalloc(MAX_REAL_DISKS * sizeof(xen_disk_t), GFP_KERNEL);
-    xdi.max   = MAX_REAL_DISKS;
-    xdi.count = 0;
-    xdi.disks = xd;
-    ide_probe_devices(&xdi);
-    scsi_probe_devices(&xdi);
-    cciss_probe_devices(&xdi);
-    for ( i = 0; i < xdi.count; i++ )
-    {
-        xen_extent_t e;
-        e.device       = xd[i].device;
-        e.start_sector = 0;
-        e.nr_sectors   = xd[i].capacity;
-        if ( (__vbd_create(p, xd[i].device, VBD_MODE_R|VBD_MODE_W, 
-                           xd[i].info) != 0) ||
-             (__vbd_grow(p, xd[i].device, &e) != 0) )
-            BUG();
-    }
-    kfree(xd);
-#endif
 
     /* DOM0 gets access to everything. */
     physdev_init_dom0(p);
