@@ -12,6 +12,10 @@
 #include <hypervisor-ifs/hypervisor-if.h>
 #include <xeno/dom0_ops.h>
 
+#include <xeno/list.h>
+#include <xeno/time.h>
+#include <xeno/ac_timer.h>
+
 extern unsigned long volatile jiffies;
 extern rwlock_t tasklist_lock;
 
@@ -59,17 +63,47 @@ extern struct mm_struct init_mm;
 
 struct task_struct {
 
-    int processor;
-    int state;
-    int hyp_events;
-    unsigned int domain;
+    /*
+     * DO NOT CHANGE THE ORDER OF THE FOLLOWING.
+     * There offsets are hardcoded in entry.S
+     */
+
+    int processor;               /* 00: current processor */
+    int state;                   /* 04: current run state */
+    int hyp_events;              /* 08: pending events */
+    unsigned int domain;         /* 12: domain id */
 
     /* An unsafe pointer into a shared data area. */
-    shared_info_t *shared_info;
+    shared_info_t *shared_info;  /* 16: shared data area */
+
+    /*
+     * From here on things can be added and shuffled without special attention
+     */
     
     struct list_head pg_head;
     unsigned int tot_pages;     /* number of pages currently possesed */
     unsigned int max_pages;     /* max number of pages that can be possesed */
+
+    /* scheduling */
+    struct list_head run_list;      /* the run list  */
+    int              has_cpu;
+    int              policy;
+    int              counter;
+    
+    struct ac_timer blt;            /* blocked timeout */
+
+    s_time_t lastschd;              /* time this domain was last scheduled */
+    s_time_t cpu_time;              /* total CPU time received till now */
+
+    unsigned long mcu_advance;      /* inverse of weight */
+    s32  avt;                       /* actual virtual time */
+    s32  evt;                       /* effective virtual time */
+    long warp;                      /* virtual time warp */
+    long warpl;                     /* warp limit */
+    long warpu;                     /* unwarp time requirement */
+    long warped;                    /* time it ran warped last time */
+    long uwarped;                   /* time it ran unwarped last time */
+
 
     /* Network I/O */
     net_ring_t *net_ring_base;
@@ -85,10 +119,7 @@ struct task_struct {
     segment_t *segment_list[XEN_MAX_SEGMENTS];                        /* vhd */
     int segment_count;
 
-    int has_cpu, policy, counter;
-
-    struct list_head run_list;
-    
+    /* VM */
     struct mm_struct mm;
     /* We need this lock to check page types and frob reference counts. */
     spinlock_t page_lock;
@@ -127,7 +158,7 @@ struct task_struct {
 #define TASK_RUNNING            0
 #define TASK_INTERRUPTIBLE      1
 #define TASK_UNINTERRUPTIBLE    2
-#define TASK_WAIT				4
+#define TASK_WAIT               4
 #define TASK_DYING              16
 /* #define TASK_STOPPED            8  not really used */
 
@@ -141,6 +172,8 @@ struct task_struct {
     domain:      IDLE_DOMAIN_ID, \
     state:       TASK_RUNNING,   \
     has_cpu:     0,              \
+    evt:         0xffffffff,     \
+    avt:         0xffffffff,     \
     mm:          IDLE0_MM,       \
     addr_limit:  KERNEL_DS,      \
     active_mm:   &idle0_task.mm, \
@@ -154,7 +187,7 @@ extern struct task_struct *idle_task[NR_CPUS];
 #define is_idle_task(_p) ((_p)->domain == IDLE_DOMAIN_ID)
 
 #ifndef IDLE0_TASK_SIZE
-#define IDLE0_TASK_SIZE	2048*sizeof(long)
+#define IDLE0_TASK_SIZE 2048*sizeof(long)
 #endif
 
 union task_union {
@@ -203,6 +236,9 @@ void scheduler_init(void);
 void schedulers_start(void);
 void sched_add_domain(struct task_struct *p);
 void sched_rem_domain(struct task_struct *p);
+long sched_bvtctl(unsigned long ctx_allow);
+long sched_adjdom(int dom, unsigned long mcu_adv, unsigned long warp, 
+                  unsigned long warpl, unsigned long warpu);
 int  wake_up(struct task_struct *p);
 long schedule_timeout(long timeout);
 long do_yield(void);

@@ -1,9 +1,6 @@
 #include <xeno/keyhandler.h> 
 #include <xeno/reboot.h>
 
-extern void perfc_printall (u_char key, void *dev_id, struct pt_regs *regs);
-extern void perfc_reset (u_char key, void *dev_id, struct pt_regs *regs);
-
 #define KEY_MAX 256
 #define STR_MAX  64
 
@@ -117,6 +114,12 @@ void do_task_queues(u_char key, void *dev_id, struct pt_regs *regs)
 }
 
 
+extern void perfc_printall (u_char key, void *dev_id, struct pt_regs *regs);
+extern void perfc_reset (u_char key, void *dev_id, struct pt_regs *regs);
+extern void dump_timerq(u_char key, void *dev_id, struct pt_regs *regs);
+extern void dump_runq(u_char key, void *dev_id, struct pt_regs *regs);
+
+
 void initialize_keytable() 
 {
     int i; 
@@ -126,13 +129,15 @@ void initialize_keytable()
 	key_table[i].handler = (key_handler *)NULL; 
 	
     /* setup own handlers */
+    add_key_handler('a', dump_timerq,    "dump ac_timer queues");
     add_key_handler('d', dump_registers, "dump registers"); 
     add_key_handler('h', show_handlers, "show this message");
     add_key_handler('p', perfc_printall, "print performance counters"); 
     add_key_handler('P', perfc_reset,    "reset performance counters"); 
     add_key_handler('q', do_task_queues, "dump task queues + guest state");
-    add_key_handler('B', kill_dom0, "reboot machine gracefully"); 
-    add_key_handler('R', halt_machine, "reboot machine ungracefully"); 
+    add_key_handler('r', dump_runq,      "dump run queues");
+    add_key_handler('B', kill_dom0,      "reboot machine gracefully"); 
+    add_key_handler('R', halt_machine,   "reboot machine ungracefully"); 
     
     return; 
 }
