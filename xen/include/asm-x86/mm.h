@@ -30,25 +30,24 @@ struct pfn_info
     /* Each frame can be threaded onto a doubly-linked list. */
     struct list_head list;
 
+    /* Reference count and various PGC_xxx flags and fields. */
+    u32 count_info;
+
     /* Context-dependent fields follow... */
     union {
 
-        /* Page is in use by a domain. */
+        /* Page is in use: ((count_info & PGC_count_mask) != 0). */
         struct {
-            /* Owner of this page. */
+            /* Owner of this page (NULL if page is anonymous). */
             struct domain *domain;
-            /* Reference count and various PGC_xxx flags and fields. */
-            u32 count_info;
             /* Type reference count and various PGT_xxx flags and fields. */
             u32 type_info;
         } inuse;
 
-        /* Page is on a free list. */
+        /* Page is on a free list: ((count_info & PGC_count_mask) == 0). */
         struct {
             /* Mask of possibly-tainted TLBs. */
             unsigned long cpu_mask;
-            /* Must be at same offset as 'u.inuse.count_flags'. */
-            u32 __unavailable;
             /* Order-size of the free chunk this page is the head of. */
             u8 order;
         } free;
@@ -67,7 +66,7 @@ struct pfn_info
 #define PGT_l4_page_table   (4<<29) /* using this page as an L4 page table? */
 #define PGT_gdt_page        (5<<29) /* using this page in a GDT? */
 #define PGT_ldt_page        (6<<29) /* using this page in an LDT? */
-#define PGT_writeable_page  (7<<29) /* has writable mappings of this page? */
+#define PGT_writable_page   (7<<29) /* has writable mappings of this page? */
 #define PGT_type_mask       (7<<29) /* Bits 29-31. */
  /* Has this page been validated for use as its current type? */
 #define _PGT_validated      28
@@ -87,9 +86,11 @@ struct pfn_info
  /* Cleared when the owning guest 'frees' this page. */
 #define _PGC_allocated                29
 #define PGC_allocated                 (1<<_PGC_allocated)
- /* 28-bit count of references to this frame. */
-#define PGC_count_mask                ((1<<29)-1)
-
+ /* This bit is always set, guaranteeing that the count word is never zero. */
+#define _PGC_always_set               28
+#define PGC_always_set                (1<<_PGC_always_set)
+ /* 27-bit count of references to this frame. */
+#define PGC_count_mask                ((1<<28)-1)
 
 /* We trust the slab allocator in slab.c, and our use of it. */
 #define PageSlab(page)		(1)
@@ -101,12 +102,13 @@ struct pfn_info
 #define SHARE_PFN_WITH_DOMAIN(_pfn, _dom)                                   \
     do {                                                                    \
         (_pfn)->u.inuse.domain = (_dom);                                    \
-        /* The incremented type count is intended to pin to 'writeable'. */ \
-        (_pfn)->u.inuse.type_info  = PGT_writeable_page | PGT_validated | 1;\
+        /* The incremented type count is intended to pin to 'writable'. */  \
+        (_pfn)->u.inuse.type_info  = PGT_writable_page | PGT_validated | 1; \
         wmb(); /* install valid domain ptr before updating refcnt. */       \
         spin_lock(&(_dom)->page_alloc_lock);                                \
         /* _dom holds an allocation reference */                            \
-        (_pfn)->u.inuse.count_info = PGC_allocated | 1;                     \
+        ASSERT((_pfn)->count_info == PGC_always_set);                       \
+        (_pfn)->count_info |= PGC_allocated | 1;                            \
         if ( unlikely((_dom)->xenheap_pages++ == 0) )                       \
             get_knownalive_domain(_dom);                                    \
         list_add_tail(&(_pfn)->list, &(_dom)->xenpage_list);                \
@@ -123,13 +125,13 @@ void free_page_type(struct pfn_info *page, unsigned int type);
 
 static inline void put_page(struct pfn_info *page)
 {
-    u32 nx, x, y = page->u.inuse.count_info;
+    u32 nx, x, y = page->count_info;
 
     do {
         x  = y;
         nx = x - 1;
     }
-    while ( unlikely((y = cmpxchg(&page->u.inuse.count_info, x, nx)) != x) );
+    while ( unlikely((y = cmpxchg(&page->count_info, x, nx)) != x) );
 
     if ( unlikely((nx & PGC_count_mask) == 0) )
         free_domheap_page(page);
@@ -139,7 +141,7 @@ static inline void put_page(struct pfn_info *page)
 static inline int get_page(struct pfn_info *page,
                            struct domain *domain)
 {
-    u32 x, nx, y = page->u.inuse.count_info;
+    u32 x, nx, y = page->count_info;
     struct domain *p, *np = page->u.inuse.domain;
 
     do {
@@ -150,18 +152,16 @@ static inline int get_page(struct pfn_info *page,
              unlikely((nx & PGC_count_mask) == 0) || /* Count overflow? */
              unlikely(p != domain) )                 /* Wrong owner? */
         {
-            DPRINTK("Error pfn %08lx: ed=%p(%u), sd=%p(%u),"
-                    " caf=%08x, taf=%08x\n",
-                    page_to_pfn(page), domain, domain->domain,
-                    p, (p && !((x & PGC_count_mask) == 0))?p->domain:999, 
+            DPRINTK("Error pfn %08lx: ed=%p, sd=%p, caf=%08x, taf=%08x\n",
+                    page_to_pfn(page), domain, p,
                     x, page->u.inuse.type_info);
             return 0;
         }
         __asm__ __volatile__(
             LOCK_PREFIX "cmpxchg8b %3"
-            : "=a" (np), "=d" (y), "=b" (p),
-              "=m" (*(volatile u64 *)(&page->u.inuse.domain))
-            : "0" (p), "1" (x), "b" (p), "c" (nx) );
+            : "=d" (np), "=a" (y), "=c" (p),
+              "=m" (*(volatile u64 *)(&page->count_info))
+            : "0" (p), "1" (x), "c" (p), "b" (nx) );
     }
     while ( unlikely(np != p) || unlikely(y != x) );
 
@@ -221,8 +221,8 @@ static inline int get_page_type(struct pfn_info *page, u32 type)
             {
                 nx &= ~(PGT_type_mask | PGT_validated);
                 nx |= type;
-                /* No extra validation needed for writeable pages. */
-                if ( type == PGT_writeable_page )
+                /* No extra validation needed for writable pages. */
+                if ( type == PGT_writable_page )
                     nx |= PGT_validated;
             }
         }
@@ -253,7 +253,7 @@ static inline int get_page_type(struct pfn_info *page, u32 type)
             DPRINTK("Error while validating pfn %08lx for type %08x."
                     " caf=%08x taf=%08x\n",
                     page_to_pfn(page), type,
-		    page->u.inuse.count_info,
+		    page->count_info,
 		    page->u.inuse.type_info);
             put_page_type(page);
             return 0;
@@ -291,7 +291,7 @@ static inline int get_page_and_type(struct pfn_info *page,
     ASSERT(((_p)->u.inuse.type_info & PGT_type_mask) == (_t)); \
     ASSERT(((_p)->u.inuse.type_info & PGT_count_mask) != 0)
 #define ASSERT_PAGE_IS_DOMAIN(_p, _d)                          \
-    ASSERT(((_p)->u.inuse.count_info & PGC_count_mask) != 0);  \
+    ASSERT(((_p)->count_info & PGC_count_mask) != 0);          \
     ASSERT((_p)->u.inuse.domain == (_d))
 
 int check_descriptor(unsigned long *d);
@@ -364,16 +364,21 @@ void ptwr_reconnect_disconnected(unsigned long addr);
 void ptwr_flush_inactive(void);
 int ptwr_do_page_fault(unsigned long);
 
-static inline void cleanup_writable_pagetable(const int what)
-{
-    int cpu = smp_processor_id();
+#define __cleanup_writable_pagetable(_what)                               \
+do {                                                                      \
+    int cpu = smp_processor_id();                                         \
+    if ((_what) & PTWR_CLEANUP_ACTIVE)                                    \
+        if (ptwr_info[cpu].disconnected != ENTRIES_PER_L2_PAGETABLE)      \
+            ptwr_reconnect_disconnected(0L);                              \
+    if ((_what) & PTWR_CLEANUP_INACTIVE)                                  \
+        if (ptwr_info[cpu].writable_idx)                                  \
+            ptwr_flush_inactive();                                        \
+} while ( 0 )
 
-    if (what & PTWR_CLEANUP_ACTIVE)
-        if (ptwr_info[cpu].disconnected != ENTRIES_PER_L2_PAGETABLE)
-            ptwr_reconnect_disconnected(0L);
-    if (what & PTWR_CLEANUP_INACTIVE)
-        if (ptwr_info[cpu].writable_idx)
-            ptwr_flush_inactive();
-}
+#define cleanup_writable_pagetable(_d, _w)                                \
+    do {                                                                  \
+        if ( unlikely(VM_ASSIST((_d), VMASST_TYPE_writable_pagetables)) ) \
+        __cleanup_writable_pagetable(_w);                                 \
+    } while ( 0 )
 
 #endif /* __ASM_X86_MM_H__ */

@@ -65,8 +65,6 @@ struct domain *do_createdomain(domid_t dom_id, unsigned int cpu)
         strncpy(d->name, buf, MAX_DOMAIN_NAME);
         d->name[MAX_DOMAIN_NAME-1] = '\0';
 
-        d->addr_limit = USER_DS;
-        
 	arch_do_createdomain(d);
 
         sched_add_domain(d);
@@ -234,12 +232,16 @@ void domain_destruct(struct domain *d)
 {
     struct domain **pd;
     unsigned long flags;
+    atomic_t      old, new;
 
     if ( !test_bit(DF_DYING, &d->flags) )
         BUG();
 
     /* May be already destructed, or get_domain() can race us. */
-    if ( cmpxchg(&d->refcnt.counter, 0, DOMAIN_DESTRUCTED) != 0 )
+    _atomic_set(old, 0);
+    _atomic_set(new, DOMAIN_DESTRUCTED);
+    old = atomic_compareandswap(old, new, &d->refcnt);
+    if ( _atomic_read(old) != 0 )
         return;
 
     DPRINTK("Releasing task %u\n", d->domain);
