@@ -109,6 +109,10 @@ gopts.var('cpu', val='CPU',
           fn=set_int, default=None,
           use="CPU to run the domain on.")
 
+gopts.var('vcpus', val='VCPUS',
+          fn=set_int, default=1,
+          use="# of Virtual CPUS in domain.")
+
 gopts.var('cpu_weight', val='WEIGHT',
           fn=set_float, default=None,
           use="""Set the new domain's cpu weight.
@@ -146,6 +150,11 @@ gopts.var('pci', val='BUS,DEV,FUNC',
           use="""Add a PCI device to a domain, using given params (in hex).
          For example '-pci c0,02,1a'.
          The option may be repeated to add more than one pci device.""")
+
+gopts.var('usb', val='PATH',
+          fn=append_value, default=[],
+          use="""Add a physical USB port to a domain, as specified by the path
+          to that port.  This option may be repeated to add more than one port.""")
 
 gopts.var('ipaddr', val="IPADDR",
           fn=append_value, default=[],
@@ -210,6 +219,18 @@ gopts.var('nfs_root', val="PATH",
           fn=set_value, default=None,
           use="Set the path of the root NFS directory.")
 
+gopts.var('memmap', val='FILE',
+          fn=set_value, default='',
+          use="Path to memap SXP file.")
+
+gopts.var('device_model', val='FILE',
+          fn=set_value, default='',
+          use="Path to device model program.")
+
+gopts.var('device_config', val='FILE',
+          fn=set_value, default='',
+          use="Path to device model configuration.")
+
 def strip(pre, s):
     """Strip prefix 'pre' if present.
     """
@@ -233,7 +254,10 @@ def configure_image(config, vals):
         config_image.append(['root', cmdline_root])
     if vals.extra:
         config_image.append(['args', vals.extra])
+    if vals.vcpus:
+        config_image.append(['vcpus', vals.vcpus])
     config.append(['image', config_image ])
+
     
 def configure_disks(config_devs, vals):
     """Create the config for disks (virtual block devices).
@@ -253,6 +277,11 @@ def configure_pci(config_devs, vals):
     for (bus, dev, func) in vals.pci:
         config_pci = ['pci', ['bus', bus], ['dev', dev], ['func', func]]
         config_devs.append(['device', config_pci])
+
+def configure_usb(config_devs, vals):
+    for path in vals.usb:
+        config_usb = ['usb', ['path', path]]
+        config_devs.append(['device', config_usb])
 
 def randomMAC():
     """Generate a random MAC address.
@@ -315,6 +344,15 @@ def configure_vfr(config, vals):
          config_vfr.append(['vif', ['id', idx], ['ip', ip]])
      config.append(config_vfr)
 
+def configure_vmx(config_devs, vals):
+    """Create the config for VMX devices.
+    """
+    memmap = vals.memmap
+    device_model = vals.device_model
+    device_config = vals.device_config
+    config_devs.append(['memmap', memmap])
+    config_devs.append(['device_model', device_model])
+    config_devs.append(['device_config', device_config])
 
 def make_config(vals):
     """Create the domain configuration.
@@ -343,6 +381,8 @@ def make_config(vals):
     configure_disks(config_devs, vals)
     configure_pci(config_devs, vals)
     configure_vifs(config_devs, vals)
+    configure_usb(config_devs, vals)
+    configure_vmx(config_devs, vals)
     config += config_devs
     return config
 

@@ -4,8 +4,12 @@
  * A Linux-style configuration list.
  */
 
-#ifndef __XEN_I386_CONFIG_H__
-#define __XEN_I386_CONFIG_H__
+#ifndef __X86_CONFIG_H__
+#define __X86_CONFIG_H__
+
+#ifdef __i386__
+#define CONFIG_VMX 1
+#endif
 
 #define CONFIG_X86 1
 
@@ -215,10 +219,13 @@ extern void __out_of_line_bug(int line) __attribute__((noreturn));
 extern unsigned long xenheap_phys_end; /* user-configurable */
 #endif
 
-#define GDT_VIRT_START        (PERDOMAIN_VIRT_START)
-#define GDT_VIRT_END          (GDT_VIRT_START + (64*1024))
-#define LDT_VIRT_START        (GDT_VIRT_END)
-#define LDT_VIRT_END          (LDT_VIRT_START + (64*1024))
+#define GDT_VIRT_START(ed)    (PERDOMAIN_VIRT_START + ((ed)->eid << PDPT_VCPU_VA_SHIFT))
+#define GDT_VIRT_END(ed)      (GDT_VIRT_START(ed) + (64*1024))
+#define LDT_VIRT_START(ed)    (PERDOMAIN_VIRT_START + (64*1024) + ((ed)->eid << PDPT_VCPU_VA_SHIFT))
+#define LDT_VIRT_END(ed)      (LDT_VIRT_START(ed) + (64*1024))
+
+#define PDPT_VCPU_SHIFT       5
+#define PDPT_VCPU_VA_SHIFT    (PDPT_VCPU_SHIFT + PAGE_SHIFT)
 
 #if defined(__x86_64__)
 #define ELFSIZE 64
@@ -226,4 +233,4 @@ extern unsigned long xenheap_phys_end; /* user-configurable */
 #define ELFSIZE 32
 #endif
 
-#endif /* __XEN_I386_CONFIG_H__ */
+#endif /* __X86_CONFIG_H__ */
