@@ -19,7 +19,7 @@
  * This makes sure that old versions of dom0 tools will stop working in a
  * well-defined way (rather than crashing the machine, for instance).
  */
-#define DOM0_INTERFACE_VERSION   0xAAAA001A
+#define DOM0_INTERFACE_VERSION   0xAAAA1001
 
 /************************************************************************/
 
@@ -85,7 +85,7 @@ typedef struct {
 typedef struct {
     /* IN variables. */
     domid_t  domain;                  /*  0 */ /* NB. IN/OUT variable. */
-    u16     __pad;
+    u16      exec_domain;
     /* OUT variables. */
 #define DOMFLAGS_DYING     (1<<0) /* Domain is scheduled to die.             */
 #define DOMFLAGS_CRASHED   (1<<1) /* Crashed domain; frozen for postmortem.  */
@@ -109,16 +109,16 @@ typedef struct {
     u64      cpu_time;                /* 40 */
 } PACKED dom0_getdomaininfo_t; /* 48 bytes */
 
-#define DOM0_BUILDDOMAIN      13
+#define DOM0_SETDOMAININFO      13
 typedef struct {
     /* IN variables. */
-    domid_t                 domain;   /*  0 */
-    u16                     __pad0;   /*  2 */
-    u32                     __pad1;   /*  4 */
+    domid_t                   domain;       /*  0 */
+    u16                       exec_domain;  /*  2 */
+    u32                       __pad0;       /*  4 */
     /* IN/OUT parameters */
-    full_execution_context_t *ctxt;   /*  8 */
+    full_execution_context_t *ctxt;         /*  8 */
     MEMORY_PADDING;
-} PACKED dom0_builddomain_t; /* 16 bytes */
+} PACKED dom0_setdomaininfo_t;              /* 16 bytes */
 
 #define DOM0_IOPL             14
 typedef struct {
@@ -208,7 +208,7 @@ typedef struct {
 typedef struct {
     /* IN variables. */
     domid_t      domain;              /*  0 */
-    u16          __pad;
+    u16          exec_domain;
     s32          cpu;                 /*  4: -1 implies unpin */
 } PACKED dom0_pincpudomain_t; /* 8 bytes */
 
@@ -267,7 +267,7 @@ typedef struct {
 #define DOM0_SHADOW_CONTROL_OP_OFF         0
 #define DOM0_SHADOW_CONTROL_OP_ENABLE_TEST 1
 #define DOM0_SHADOW_CONTROL_OP_ENABLE_LOGDIRTY 2
-#define DOM0_SHADOW_CONTROL_OP_ENABLE_TRANSLATE 3
+
 #define DOM0_SHADOW_CONTROL_OP_FLUSH       10     /* table ops */
 #define DOM0_SHADOW_CONTROL_OP_CLEAN       11
 #define DOM0_SHADOW_CONTROL_OP_PEEK        12
@@ -426,7 +426,7 @@ typedef struct {
         dom0_getmemlist_t        getmemlist;
         dom0_schedctl_t          schedctl;
         dom0_adjustdom_t         adjustdom;
-        dom0_builddomain_t       builddomain;
+        dom0_setdomaininfo_t     setdomaininfo;
         dom0_getdomaininfo_t     getdomaininfo;
         dom0_getpageframeinfo_t  getpageframeinfo;
         dom0_iopl_t              iopl;
