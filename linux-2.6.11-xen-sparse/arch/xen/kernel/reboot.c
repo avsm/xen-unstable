@@ -80,7 +80,7 @@ static void __do_suspend(void)
     extern void time_suspend(void);
     extern void time_resume(void);
     extern unsigned long max_pfn;
-    extern unsigned long *pfn_to_mfn_frame_list;
+    extern unsigned int *pfn_to_mfn_frame_list;
 
     suspend_record = (suspend_record_t *)__get_free_page(GFP_KERNEL);
     if ( suspend_record == NULL )
@@ -109,10 +109,8 @@ static void __do_suspend(void)
 
     HYPERVISOR_vm_assist(VMASST_CMD_enable,
 			 VMASST_TYPE_4gb_segments);
-#ifdef CONFIG_XEN_WRITABLE_PAGETABLES
     HYPERVISOR_vm_assist(VMASST_CMD_enable,
 			 VMASST_TYPE_writable_pagetables);
-#endif
 
     shutting_down = -1; 
 
