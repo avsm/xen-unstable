@@ -241,7 +241,7 @@ static int listen_socket (char *listen_path)
 
     if (bind(s, (struct sockaddr *) &a, sizeof (a)) < 0) 
     {
-        perror ("bind");
+        fprintf (stderr, "bind('%s'): %s\n", listen_path, strerror(errno));
         close (s);
         return -1;
     }
@@ -743,7 +743,7 @@ int main (int argc, char *argv[])
             int size;
             memset (&remote_addr, 0, sizeof (remote_addr));
             size = sizeof remote_addr;
-            ret = accept(listen_fd, (struct sockaddr *)&remote_addr, &size);
+            ret = accept(listen_fd, (struct sockaddr *)&remote_addr, (socklen_t *)&size);
             if ( ret < 0 )
             {
                 perror("accept()");
