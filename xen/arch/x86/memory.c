@@ -1,3 +1,4 @@
+/* -*-  Mode:C; c-basic-offset:4; tab-width:4; indent-tabs-mode:nil -*- */
 /******************************************************************************
  * arch/x86/memory.c
  * 
@@ -105,7 +106,7 @@
 #ifdef VERBOSE
 #define MEM_LOG(_f, _a...)                           \
   printk("DOM%u: (file=memory.c, line=%d) " _f "\n", \
-         current->id , __LINE__ , ## _a )
+         current->domain->id , __LINE__ , ## _a )
 #else
 #define MEM_LOG(_f, _a...) ((void)0)
 #endif
@@ -136,7 +137,7 @@ static struct {
  * Returns the current foreign domain; defaults to the currently-executing
  * domain if a foreign override hasn't been specified.
  */
-#define FOREIGNDOM (percpu_info[smp_processor_id()].foreign ? : current)
+#define FOREIGNDOM (percpu_info[smp_processor_id()].foreign ? : current->domain)
 
 /* Private domain structs for DOMID_XEN and DOMID_IO. */
 static struct domain *dom_xen, *dom_io;
@@ -159,8 +160,8 @@ void __init init_frametable(void)
         p = alloc_boot_pages(min(frame_table_size - i, 4UL << 20), 4UL << 20);
         if ( p == 0 )
             panic("Not enough memory for frame table\n");
-        idle_pg_table[(FRAMETABLE_VIRT_START + i) >> L2_PAGETABLE_SHIFT] =
-            mk_l2_pgentry(p | __PAGE_HYPERVISOR | _PAGE_PSE);
+        map_pages(idle_pg_table, FRAMETABLE_VIRT_START + i, p, 
+                  4UL << 20, PAGE_HYPERVISOR);
     }
 
     memset(frame_table, 0, frame_table_size);
@@ -168,29 +169,9 @@ void __init init_frametable(void)
 
 void arch_init_memory(void)
 {
-    unsigned long i;
-
-    /*
-     * We are rather picky about the layout of 'struct pfn_info'. The
-     * count_info and domain fields must be adjacent, as we perform atomic
-     * 64-bit operations on them. Also, just for sanity, we assert the size
-     * of the structure here.
-     */
-    if ( (offsetof(struct pfn_info, u.inuse.domain) != 
-          (offsetof(struct pfn_info, count_info) + sizeof(u32))) ||
-         (sizeof(struct pfn_info) != 24) )
-    {
-        printk("Weird pfn_info layout (%ld,%ld,%d)\n",
-               offsetof(struct pfn_info, count_info),
-               offsetof(struct pfn_info, u.inuse.domain),
-               sizeof(struct pfn_info));
-        for ( ; ; ) ;
-    }
+    extern void subarch_init_memory(struct domain *);
 
     memset(percpu_info, 0, sizeof(percpu_info));
-
-    /* Initialise to a magic of 0x55555555 so easier to spot bugs later. */
-    memset(machine_to_phys_mapping, 0x55, 4<<20);
 
     /*
      * Initialise our DOMID_XEN domain.
@@ -210,33 +191,47 @@ void arch_init_memory(void)
     atomic_set(&dom_io->refcnt, 1);
     dom_io->id = DOMID_IO;
 
-    /* M2P table is mappable read-only by privileged domains. */
-    for ( i = 0; i < 1024; i++ )
-    {
-        frame_table[m2p_start_mfn+i].count_info        = PGC_allocated | 1;
-	/* gdt to make sure it's only mapped read-only by non-privileged
-	   domains. */
-        frame_table[m2p_start_mfn+i].u.inuse.type_info = PGT_gdt_page | 1;
-        frame_table[m2p_start_mfn+i].u.inuse.domain    = dom_xen;
-    }
+    subarch_init_memory(dom_xen);
 }
 
-static void __invalidate_shadow_ldt(struct domain *d)
+void write_ptbase(struct exec_domain *ed)
+{
+    struct domain *d = ed->domain;
+    unsigned long pa;
+
+#ifdef CONFIG_VMX
+    if ( unlikely(d->arch.shadow_mode) )
+        pa = ((d->arch.shadow_mode == SHM_full_32) ?
+              pagetable_val(ed->arch.monitor_table) :
+              pagetable_val(ed->arch.shadow_table));
+    else
+        pa = pagetable_val(ed->arch.pagetable);
+#else
+    if ( unlikely(d->arch.shadow_mode) )
+        pa = pagetable_val(ed->arch.shadow_table);    
+    else
+        pa = pagetable_val(ed->arch.pagetable);
+#endif
+
+    write_cr3(pa);
+}
+
+static void __invalidate_shadow_ldt(struct exec_domain *d)
 {
     int i;
     unsigned long pfn;
     struct pfn_info *page;
     
-    d->mm.shadow_ldt_mapcnt = 0;
+    d->arch.shadow_ldt_mapcnt = 0;
 
     for ( i = 16; i < 32; i++ )
     {
-        pfn = l1_pgentry_to_pagenr(d->mm.perdomain_pt[i]);
+        pfn = l1_pgentry_to_pagenr(d->arch.perdomain_ptes[i]);
         if ( pfn == 0 ) continue;
-        d->mm.perdomain_pt[i] = mk_l1_pgentry(0);
+        d->arch.perdomain_ptes[i] = mk_l1_pgentry(0);
         page = &frame_table[pfn];
         ASSERT_PAGE_IS_TYPE(page, PGT_ldt_page);
-        ASSERT_PAGE_IS_DOMAIN(page, d);
+        ASSERT_PAGE_IS_DOMAIN(page, d->domain);
         put_page_and_type(page);
     }
 
@@ -245,9 +240,9 @@ static void __invalidate_shadow_ldt(struct domain *d)
 }
 
 
-static inline void invalidate_shadow_ldt(struct domain *d)
+static inline void invalidate_shadow_ldt(struct exec_domain *d)
 {
-    if ( d->mm.shadow_ldt_mapcnt != 0 )
+    if ( d->arch.shadow_ldt_mapcnt != 0 )
         __invalidate_shadow_ldt(d);
 }
 
@@ -273,13 +268,14 @@ static int alloc_segdesc_page(struct pfn_info *page)
 /* Map shadow page at offset @off. */
 int map_ldt_shadow_page(unsigned int off)
 {
-    struct domain *d = current;
+    struct exec_domain *ed = current;
+    struct domain *d = ed->domain;
     unsigned long l1e;
 
     if ( unlikely(in_irq()) )
         BUG();
 
-    __get_user(l1e, (unsigned long *)&linear_pg_table[(d->mm.ldt_base >> 
+    __get_user(l1e, (unsigned long *)&linear_pg_table[(ed->arch.ldt_base >> 
                                                        PAGE_SHIFT) + off]);
 
     if ( unlikely(!(l1e & _PAGE_PRESENT)) ||
@@ -287,8 +283,8 @@ int map_ldt_shadow_page(unsigned int off)
                                      d, PGT_ldt_page)) )
         return 0;
 
-    d->mm.perdomain_pt[off + 16] = mk_l1_pgentry(l1e | _PAGE_RW);
-    d->mm.shadow_ldt_mapcnt++;
+    ed->arch.perdomain_ptes[off + 16] = mk_l1_pgentry(l1e | _PAGE_RW);
+    ed->arch.shadow_ldt_mapcnt++;
 
     return 1;
 }
@@ -414,7 +410,7 @@ get_page_from_l1e(
     {
         /* Revert to caller privileges if FD == DOMID_IO. */
         if ( d == dom_io )
-            d = current;
+            d = current->domain;
 
         if ( IS_PRIV(d) )
             return 1;
@@ -471,7 +467,7 @@ static void put_page_from_l1e(l1_pgentry_t l1e, struct domain *d)
     if ( !(l1v & _PAGE_PRESENT) || !pfn_is_ram(pfn) )
         return;
 
-    e = page->u.inuse.domain;
+    e = page_get_owner(page);
     if ( unlikely(e != d) )
     {
         /*
@@ -500,7 +496,7 @@ static void put_page_from_l1e(l1_pgentry_t l1e, struct domain *d)
         if ( unlikely(((page->u.inuse.type_info & PGT_type_mask) == 
                        PGT_ldt_page)) &&
              unlikely(((page->u.inuse.type_info & PGT_count_mask) != 0)) )
-            invalidate_shadow_ldt(e);
+            invalidate_shadow_ldt(e->exec_domain[0]);
         put_page(page);
     }
 }
@@ -520,7 +516,7 @@ static void put_page_from_l2e(l2_pgentry_t l2e, unsigned long pfn)
 
 static int alloc_l2_table(struct pfn_info *page)
 {
-    struct domain *d = page->u.inuse.domain;
+    struct domain *d = page_get_owner(page);
     unsigned long  page_nr = page_to_pfn(page);
     l2_pgentry_t  *pl2e;
     int            i;
@@ -539,7 +535,7 @@ static int alloc_l2_table(struct pfn_info *page)
     pl2e[LINEAR_PT_VIRT_START >> L2_PAGETABLE_SHIFT] =
         mk_l2_pgentry((page_nr << PAGE_SHIFT) | __PAGE_HYPERVISOR);
     pl2e[PERDOMAIN_VIRT_START >> L2_PAGETABLE_SHIFT] =
-        mk_l2_pgentry(__pa(page->u.inuse.domain->mm.perdomain_pt) | 
+        mk_l2_pgentry(__pa(page_get_owner(page)->arch.mm_perdomain_pt) | 
                       __PAGE_HYPERVISOR);
 #endif
 
@@ -557,7 +553,7 @@ static int alloc_l2_table(struct pfn_info *page)
 
 static int alloc_l1_table(struct pfn_info *page)
 {
-    struct domain *d = page->u.inuse.domain;
+    struct domain *d = page_get_owner(page);
     unsigned long  page_nr = page_to_pfn(page);
     l1_pgentry_t  *pl1e;
     int            i;
@@ -597,7 +593,7 @@ static void free_l2_table(struct pfn_info *page)
 
 static void free_l1_table(struct pfn_info *page)
 {
-    struct domain *d = page->u.inuse.domain;
+    struct domain *d = page_get_owner(page);
     unsigned long page_nr = page - frame_table;
     l1_pgentry_t *pl1e;
     int i;
@@ -650,7 +646,7 @@ static int mod_l2_entry(l2_pgentry_t *pl2e,
         if ( ((l2_pgentry_val(ol2e) ^ l2_pgentry_val(nl2e)) & ~0xffe) == 0 )
             return update_l2e(pl2e, ol2e, nl2e);
 
-        if ( unlikely(!get_page_from_l2e(nl2e, pfn, current, 
+        if ( unlikely(!get_page_from_l2e(nl2e, pfn, current->domain,
                                         ((unsigned long)pl2e & 
                                          ~PAGE_MASK) >> 2)) )
             return 0;
@@ -697,7 +693,7 @@ static int mod_l1_entry(l1_pgentry_t *pl1e, l1_pgentry_t nl1e)
 {
     l1_pgentry_t ol1e;
     unsigned long _ol1e;
-    struct domain *d = current;
+    struct domain *d = current->domain;
 
     if ( unlikely(__get_user(_ol1e, (unsigned long *)pl1e) != 0) )
     {
@@ -758,7 +754,7 @@ int alloc_page_type(struct pfn_info *page, unsigned int type)
 
 void free_page_type(struct pfn_info *page, unsigned int type)
 {
-    struct domain *d = page->u.inuse.domain;
+    struct domain *d = page_get_owner(page);
 
     switch ( type )
     {
@@ -774,11 +770,11 @@ void free_page_type(struct pfn_info *page, unsigned int type)
         BUG();
     }
 
-    if ( unlikely(d->mm.shadow_mode) && 
-         (get_shadow_status(&d->mm, page_to_pfn(page)) & PSH_shadowed) )
+    if ( unlikely(d->arch.shadow_mode) && 
+         (get_shadow_status(d, page_to_pfn(page)) & PSH_shadowed) )
     {
         unshadow_table(page_to_pfn(page), type);
-        put_shadow_status(&d->mm);
+        put_shadow_status(d);
     }
 }
 
@@ -801,7 +797,7 @@ void put_page_type(struct pfn_info *page)
          * See domain.c:relinquish_list().
          */
         ASSERT((x & PGT_validated) || 
-               test_bit(DF_DYING, &page->u.inuse.domain->flags));
+               test_bit(DF_DYING, &page_get_owner(page)->d_flags));
 
         if ( unlikely((nx & PGT_count_mask) == 0) )
         {
@@ -859,12 +855,12 @@ int get_page_type(struct pfn_info *page, u32 type)
                  * may be unnecessary (e.g., page was GDT/LDT) but those
                  * circumstances should be very rare.
                  */
-                struct domain *d = page->u.inuse.domain;
-                if ( unlikely(NEED_FLUSH(tlbflush_time[d->processor],
+                struct domain *d = page_get_owner(page);
+                if ( unlikely(NEED_FLUSH(tlbflush_time[d->exec_domain[0]->processor],
                                          page->tlbflush_timestamp)) )
                 {
                     perfc_incr(need_flush_tlb_flush);
-                    flush_tlb_cpu(d->processor);
+                    flush_tlb_cpu(d->exec_domain[0]->processor);
                 }
 
                 /* We lose existing type, back pointer, and validity. */
@@ -936,14 +932,44 @@ int get_page_type(struct pfn_info *page, u32 type)
 }
 
 
+int new_guest_cr3(unsigned long pfn)
+{
+    struct exec_domain *ed = current;
+    struct domain *d = ed->domain;
+    int okay, cpu = smp_processor_id();
+    unsigned long old_base_pfn;
+    
+    okay = get_page_and_type_from_pagenr(pfn, PGT_l2_page_table, d);
+    if ( likely(okay) )
+    {
+        invalidate_shadow_ldt(ed);
+
+        percpu_info[cpu].deferred_ops &= ~DOP_FLUSH_TLB;
+        old_base_pfn = pagetable_val(ed->arch.pagetable) >> PAGE_SHIFT;
+        ed->arch.pagetable = mk_pagetable(pfn << PAGE_SHIFT);
+
+        shadow_mk_pagetable(ed);
+
+        write_ptbase(ed);
+
+        put_page_and_type(&frame_table[old_base_pfn]);
+    }
+    else
+    {
+        MEM_LOG("Error while installing new baseptr %08lx", pfn);
+    }
+
+    return okay;
+}
+
 static int do_extended_command(unsigned long ptr, unsigned long val)
 {
     int okay = 1, cpu = smp_processor_id();
     unsigned int cmd = val & MMUEXT_CMD_MASK;
     unsigned long pfn = ptr >> PAGE_SHIFT;
-    unsigned long old_base_pfn;
     struct pfn_info *page = &frame_table[pfn];
-    struct domain *d = current, *nd, *e;
+    struct exec_domain *ed = current;
+    struct domain *d = ed->domain, *nd, *e;
     u32 x, y;
     domid_t domid;
     grant_ref_t gntref;
@@ -984,7 +1010,7 @@ static int do_extended_command(unsigned long ptr, unsigned long val)
         if ( unlikely(!(okay = get_page_from_pagenr(pfn, FOREIGNDOM))) )
         {
             MEM_LOG("Page %08lx bad domain (dom=%p)",
-                    ptr, page->u.inuse.domain);
+                    ptr, page_get_owner(page));
         }
         else if ( likely(test_and_clear_bit(_PGT_pinned, 
                                             &page->u.inuse.type_info)) )
@@ -1001,25 +1027,7 @@ static int do_extended_command(unsigned long ptr, unsigned long val)
         break;
 
     case MMUEXT_NEW_BASEPTR:
-        okay = get_page_and_type_from_pagenr(pfn, PGT_l2_page_table, d);
-        if ( likely(okay) )
-        {
-            invalidate_shadow_ldt(d);
-
-            percpu_info[cpu].deferred_ops &= ~DOP_FLUSH_TLB;
-            old_base_pfn = pagetable_val(d->mm.pagetable) >> PAGE_SHIFT;
-            d->mm.pagetable = mk_pagetable(pfn << PAGE_SHIFT);
-
-            shadow_mk_pagetable(&d->mm);
-
-            write_ptbase(&d->mm);
-
-            put_page_and_type(&frame_table[old_base_pfn]);
-        }
-        else
-        {
-            MEM_LOG("Error while installing new baseptr %08lx", ptr);
-        }
+        okay = new_guest_cr3(pfn);
         break;
         
     case MMUEXT_TLB_FLUSH:
@@ -1053,13 +1061,13 @@ static int do_extended_command(unsigned long ptr, unsigned long val)
             okay = 0;
             MEM_LOG("Bad args to SET_LDT: ptr=%08lx, ents=%08lx", ptr, ents);
         }
-        else if ( (d->mm.ldt_ents != ents) || 
-                  (d->mm.ldt_base != ptr) )
+        else if ( (ed->arch.ldt_ents != ents) || 
+                  (ed->arch.ldt_base != ptr) )
         {
-            invalidate_shadow_ldt(d);
-            d->mm.ldt_base = ptr;
-            d->mm.ldt_ents = ents;
-            load_LDT(d);
+            invalidate_shadow_ldt(ed);
+            ed->arch.ldt_base = ptr;
+            ed->arch.ldt_ents = ents;
+            load_LDT(ed);
             percpu_info[cpu].deferred_ops &= ~DOP_RELOAD_LDT;
             if ( ents != 0 )
                 percpu_info[cpu].deferred_ops |= DOP_RELOAD_LDT;
@@ -1132,7 +1140,7 @@ static int do_extended_command(unsigned long ptr, unsigned long val)
          * benign reference to the page (PGC_allocated). If that reference
          * disappears then the deallocation routine will safely spin.
          */
-        nd = page->u.inuse.domain;
+        nd = page_get_owner(page);
         y  = page->count_info;
         do {
             x = y;
@@ -1171,13 +1179,13 @@ static int do_extended_command(unsigned long ptr, unsigned long val)
          * Also, a domain mustn't have PGC_allocated pages when it is dying.
          */
         ASSERT(e->tot_pages <= e->max_pages);
-        if ( unlikely(test_bit(DF_DYING, &e->flags)) ||
+        if ( unlikely(test_bit(DF_DYING, &e->d_flags)) ||
              unlikely(e->tot_pages == e->max_pages) ||
              unlikely(!gnttab_prepare_for_transfer(e, d, gntref)) )
         {
             MEM_LOG("Transferee has no reservation headroom (%d,%d), or "
                     "provided a bad grant ref, or is dying (%08lx).\n",
-                    e->tot_pages, e->max_pages, e->flags);
+                    e->tot_pages, e->max_pages, e->d_flags);
             spin_unlock(&e->page_alloc_lock);
             put_domain(e);
             okay = 0;
@@ -1188,7 +1196,7 @@ static int do_extended_command(unsigned long ptr, unsigned long val)
         if ( unlikely(e->tot_pages++ == 0) )
             get_knownalive_domain(e);
         list_add_tail(&page->list, &e->page_list);
-        page->u.inuse.domain = e;
+        page_set_owner(page, e);
 
         spin_unlock(&e->page_alloc_lock);
 
@@ -1231,7 +1239,7 @@ static int do_extended_command(unsigned long ptr, unsigned long val)
         }
 
         /* A domain shouldn't have PGC_allocated pages when it is dying. */
-        if ( unlikely(test_bit(DF_DYING, &e->flags)) ||
+        if ( unlikely(test_bit(DF_DYING, &e->d_flags)) ||
              unlikely(IS_XEN_HEAP_FRAME(page)) )
         {
             MEM_LOG("Reassignment page is Xen heap, or dest dom is dying.");
@@ -1244,7 +1252,7 @@ static int do_extended_command(unsigned long ptr, unsigned long val)
          * benign reference to the page (PGC_allocated). If that reference
          * disappears then the deallocation routine will safely spin.
          */
-        nd = page->u.inuse.domain;
+        nd = page_get_owner(page);
         y  = page->count_info;
         do {
             x = y;
@@ -1321,9 +1329,12 @@ int do_mmu_update(
     unsigned int cmd, done = 0;
     unsigned long prev_spfn = 0;
     l1_pgentry_t *prev_spl1e = 0;
-    struct domain *d = current;
+    struct exec_domain *ed = current;
+    struct domain *d = ed->domain;
     u32 type_info;
     domid_t domid;
+
+    LOCK_BIGLOCK(d);
 
     cleanup_writable_pagetable(d);
 
@@ -1346,7 +1357,7 @@ int do_mmu_update(
         count &= ~MMU_UPDATE_PREEMPT_FDOM_MASK;
         if ( unlikely(pdone != NULL) )
             (void)get_user(done, pdone);
-        if ( (domid != current->id) &&
+        if ( (domid != current->domain->id) &&
              !do_extended_command(0, MMUEXT_SET_FOREIGNDOM | (domid << 16)) )
         {
             rc = -EINVAL;
@@ -1367,8 +1378,8 @@ int do_mmu_update(
     {
         if ( hypercall_preempt_check() )
         {
-            rc = hypercall_create_continuation(
-                __HYPERVISOR_mmu_update, 3, ureqs, 
+            rc = hypercall3_create_continuation(
+                __HYPERVISOR_mmu_update, ureqs, 
                 (count - i) |
                 (FOREIGNDOM->id << MMU_UPDATE_PREEMPT_FDOM_SHIFT) | 
                 MMU_UPDATE_PREEMPTED, pdone);
@@ -1393,7 +1404,7 @@ int do_mmu_update(
              * MMU_NORMAL_PT_UPDATE: Normal update to any level of page table.
              */
         case MMU_NORMAL_PT_UPDATE:
-            if ( unlikely(!get_page_from_pagenr(pfn, current)) )
+            if ( unlikely(!get_page_from_pagenr(pfn, current->domain)) )
             {
                 MEM_LOG("Could not get page for normal update");
                 break;
@@ -1421,13 +1432,13 @@ int do_mmu_update(
                     okay = mod_l1_entry((l1_pgentry_t *)va, 
                                         mk_l1_pgentry(req.val)); 
 
-                    if ( unlikely(d->mm.shadow_mode) && okay &&
-                         (get_shadow_status(&d->mm, page-frame_table) &
+                    if ( unlikely(d->arch.shadow_mode) && okay &&
+                         (get_shadow_status(d, page-frame_table) &
                           PSH_shadowed) )
                     {
                         shadow_l1_normal_pt_update(
                             req.ptr, req.val, &prev_spfn, &prev_spl1e);
-                        put_shadow_status(&d->mm);
+                        put_shadow_status(d);
                     }
 
                     put_page_type(page);
@@ -1440,12 +1451,12 @@ int do_mmu_update(
                                         mk_l2_pgentry(req.val),
                                         pfn); 
 
-                    if ( unlikely(d->mm.shadow_mode) && okay &&
-                         (get_shadow_status(&d->mm, page-frame_table) & 
+                    if ( unlikely(d->arch.shadow_mode) && okay &&
+                         (get_shadow_status(d, page-frame_table) & 
                           PSH_shadowed) )
                     {
                         shadow_l2_normal_pt_update(req.ptr, req.val);
-                        put_shadow_status(&d->mm);
+                        put_shadow_status(d);
                     }
 
                     put_page_type(page);
@@ -1478,9 +1489,9 @@ int do_mmu_update(
              * If in log-dirty mode, mark the corresponding pseudo-physical
              * page as dirty.
              */
-            if ( unlikely(d->mm.shadow_mode == SHM_logdirty) && 
-                 mark_dirty(&d->mm, pfn) )
-                d->mm.shadow_dirty_block_count++;
+            if ( unlikely(d->arch.shadow_mode == SHM_logdirty) && 
+                 mark_dirty(d, pfn) )
+                d->arch.shadow_dirty_block_count++;
 
             put_page(&frame_table[pfn]);
             break;
@@ -1534,6 +1545,7 @@ int do_mmu_update(
     if ( unlikely(pdone != NULL) )
         __put_user(done + i, pdone);
 
+    UNLOCK_BIGLOCK(d);
     return rc;
 }
 
@@ -1542,15 +1554,18 @@ int do_update_va_mapping(unsigned long page_nr,
                          unsigned long val, 
                          unsigned long flags)
 {
-    struct domain *d = current;
+    struct exec_domain *ed = current;
+    struct domain *d = ed->domain;
     int err = 0;
-    unsigned int cpu = d->processor;
+    unsigned int cpu = ed->processor;
     unsigned long deferred_ops;
 
     perfc_incrc(calls_to_update_va);
 
     if ( unlikely(page_nr >= (HYPERVISOR_VIRT_START >> PAGE_SHIFT)) )
         return -EINVAL;
+
+    LOCK_BIGLOCK(d);
 
     cleanup_writable_pagetable(d);
 
@@ -1563,11 +1578,11 @@ int do_update_va_mapping(unsigned long page_nr,
                                 mk_l1_pgentry(val))) )
         err = -EINVAL;
 
-    if ( unlikely(d->mm.shadow_mode) )
+    if ( unlikely(d->arch.shadow_mode) )
     {
         unsigned long sval;
 
-        l1pte_propagate_from_guest(&d->mm, &val, &sval);
+        l1pte_propagate_from_guest(d, &val, &sval);
 
         if ( unlikely(__put_user(sval, ((unsigned long *)(
             &shadow_linear_pg_table[page_nr])))) )
@@ -1584,10 +1599,10 @@ int do_update_va_mapping(unsigned long page_nr,
          * the PTE in the PT-holding page. We need the machine frame number
          * for this.
          */
-        if ( d->mm.shadow_mode == SHM_logdirty )
-            mark_dirty(&current->mm, va_to_l1mfn(page_nr << PAGE_SHIFT));  
+        if ( d->arch.shadow_mode == SHM_logdirty )
+            mark_dirty(d, va_to_l1mfn(page_nr << PAGE_SHIFT));  
   
-        check_pagetable(&d->mm, d->mm.pagetable, "va"); /* debug */
+        check_pagetable(d, ed->arch.pagetable, "va"); /* debug */
     }
 
     deferred_ops = percpu_info[cpu].deferred_ops;
@@ -1602,6 +1617,8 @@ int do_update_va_mapping(unsigned long page_nr,
     if ( unlikely(deferred_ops & DOP_RELOAD_LDT) )
         (void)map_ldt_shadow_page(0);
     
+    UNLOCK_BIGLOCK(d);
+
     return err;
 }
 
@@ -1614,7 +1631,7 @@ int do_update_va_mapping_otherdomain(unsigned long page_nr,
     struct domain *d;
     int rc;
 
-    if ( unlikely(!IS_PRIV(current)) )
+    if ( unlikely(!IS_PRIV(current->domain)) )
         return -EPERM;
 
     percpu_info[cpu].foreign = d = find_domain_by_id(domid);
@@ -1656,7 +1673,8 @@ void ptwr_flush(const int which)
     l1_pgentry_t  *sl1e = NULL, *pl1e, ol1e, nl1e;
     l2_pgentry_t  *pl2e;
     int            i, cpu = smp_processor_id();
-    struct domain *d = current;
+    struct exec_domain *ed = current;
+    struct domain *d = ed->domain;
 
     l1va = ptwr_info[cpu].ptinfo[which].l1va;
     ptep = (unsigned long *)&linear_pg_table[l1va>>PAGE_SHIFT];
@@ -1678,15 +1696,15 @@ void ptwr_flush(const int which)
                 PTWR_PRINT_WHICH, ptep, pte);
     pte &= ~_PAGE_RW;
 
-    if ( unlikely(d->mm.shadow_mode) )
+    if ( unlikely(d->arch.shadow_mode) )
     {
         /* Write-protect the p.t. page in the shadow page table. */
-        l1pte_propagate_from_guest(&d->mm, &pte, &spte);
+        l1pte_propagate_from_guest(d, &pte, &spte);
         __put_user(
             spte, (unsigned long *)&shadow_linear_pg_table[l1va>>PAGE_SHIFT]);
 
         /* Is the p.t. page itself shadowed? Map it into Xen space if so. */
-        sstat = get_shadow_status(&d->mm, pte >> PAGE_SHIFT);
+        sstat = get_shadow_status(d, pte >> PAGE_SHIFT);
         if ( sstat & PSH_shadowed )
             sl1e = map_domain_mem((sstat & PSH_pfn_mask) << PAGE_SHIFT);
     }
@@ -1704,7 +1722,11 @@ void ptwr_flush(const int which)
 
     /* Ensure that there are no stale writable mappings in any TLB. */
     /* NB. INVLPG is a serialising instruction: flushes pending updates. */
+#if 1
     __flush_tlb_one(l1va); /* XXX Multi-CPU guests? */
+#else
+    flush_tlb_all();
+#endif
     PTWR_PRINTK("[%c] disconnected_l1va at %p now %08lx\n",
                 PTWR_PRINT_WHICH, ptep, pte);
 
@@ -1731,7 +1753,7 @@ void ptwr_flush(const int which)
             {
                 if ( unlikely(sl1e != NULL) )
                     l1pte_propagate_from_guest(
-                        &d->mm, &l1_pgentry_val(nl1e), 
+                        d, &l1_pgentry_val(nl1e), 
                         &l1_pgentry_val(sl1e[i]));
                 put_page_type(&frame_table[l1_pgentry_to_pagenr(nl1e)]);
             }
@@ -1749,12 +1771,13 @@ void ptwr_flush(const int which)
                    (ENTRIES_PER_L1_PAGETABLE - i) * sizeof(l1_pgentry_t));
             unmap_domain_mem(pl1e);
             ptwr_info[cpu].ptinfo[which].l1va = 0;
+            UNLOCK_BIGLOCK(d);
             domain_crash();
         }
         
         if ( unlikely(sl1e != NULL) )
             l1pte_propagate_from_guest(
-                &d->mm, &l1_pgentry_val(nl1e), &l1_pgentry_val(sl1e[i]));
+                d, &l1_pgentry_val(nl1e), &l1_pgentry_val(sl1e[i]));
 
         if ( unlikely(l1_pgentry_val(ol1e) & _PAGE_PRESENT) )
             put_page_from_l1e(ol1e, d);
@@ -1765,7 +1788,7 @@ void ptwr_flush(const int which)
      * STEP 3. Reattach the L1 p.t. page into the current address space.
      */
 
-    if ( (which == PTWR_PT_ACTIVE) && likely(!d->mm.shadow_mode) )
+    if ( (which == PTWR_PT_ACTIVE) && likely(!d->arch.shadow_mode) )
     {
         pl2e = &linear_l2_table[ptwr_info[cpu].ptinfo[which].l2_idx];
         *pl2e = mk_l2_pgentry(l2_pgentry_val(*pl2e) | _PAGE_PRESENT); 
@@ -1780,7 +1803,7 @@ void ptwr_flush(const int which)
     if ( unlikely(sl1e != NULL) )
     {
         unmap_domain_mem(sl1e);
-        put_shadow_status(&d->mm);
+        put_shadow_status(d);
     }
 }
 
@@ -1800,7 +1823,9 @@ int ptwr_do_page_fault(unsigned long addr)
     if ( !(l2_pgentry_val(linear_l2_table[addr>>L2_PAGETABLE_SHIFT]) &
            _PAGE_PRESENT) ||
          __get_user(pte, (unsigned long *)&linear_pg_table[addr>>PAGE_SHIFT]) )
+    {
         return 0;
+    }
 
     pfn  = pte >> PAGE_SHIFT;
     page = &frame_table[pfn];
@@ -1808,12 +1833,16 @@ int ptwr_do_page_fault(unsigned long addr)
     /* We are looking only for read-only mappings of p.t. pages. */
     if ( ((pte & (_PAGE_RW | _PAGE_PRESENT)) != _PAGE_PRESENT) ||
          ((page->u.inuse.type_info & PGT_type_mask) != PGT_l1_page_table) )
+    {
         return 0;
+    }
     
     /* Get the L2 index at which this L1 p.t. is always mapped. */
     l2_idx = page->u.inuse.type_info & PGT_va_mask;
     if ( unlikely(l2_idx >= PGT_va_unknown) )
+    {
         domain_crash(); /* Urk! This L1 is mapped in multiple L2 slots! */
+    }
     l2_idx >>= PGT_va_shift;
 
     if ( l2_idx == (addr >> L2_PAGETABLE_SHIFT) )
@@ -1862,10 +1891,15 @@ int ptwr_do_page_fault(unsigned long addr)
     ptwr_info[cpu].ptinfo[which].l2_idx = l2_idx;
     
     /* For safety, disconnect the L1 p.t. page from current space. */
-    if ( (which == PTWR_PT_ACTIVE) && likely(!current->mm.shadow_mode) )
+    if ( (which == PTWR_PT_ACTIVE) && 
+         likely(!current->domain->arch.shadow_mode) )
     {
         *pl2e = mk_l2_pgentry(l2e & ~_PAGE_PRESENT);
+#if 1
         flush_tlb(); /* XXX Multi-CPU guests? */
+#else
+        flush_tlb_all();
+#endif
     }
     
     /* Temporarily map the L1 page, and make a copy of it. */
@@ -2044,12 +2078,12 @@ void audit_domain(struct domain *d)
     struct list_head *list_ent;
     struct pfn_info *page;
 
-    if ( d != current )
+    if ( d != current->domain )
         domain_pause(d);
     synchronise_pagetables(~0UL);
 
     printk("pt base=%lx sh_info=%x\n",
-           pagetable_val(d->mm.pagetable)>>PAGE_SHIFT,
+           pagetable_val(d->exec_domain[0]->arch.pagetable)>>PAGE_SHIFT,
            virt_to_page(d->shared_info)-frame_table);
            
     spin_lock(&d->page_alloc_lock);
@@ -2062,7 +2096,7 @@ void audit_domain(struct domain *d)
         pfn = list_entry(list_ent, struct pfn_info, list) - frame_table;       
         page = &frame_table[pfn];
 
-        if ( page->u.inuse.domain != d )
+        if ( page_get_owner(page) != d )
             BUG();
 
         if ( (page->u.inuse.type_info & PGT_count_mask) >
@@ -2099,7 +2133,7 @@ void audit_domain(struct domain *d)
 
     /* PHASE 1 */
 
-    adjust(&frame_table[pagetable_val(d->mm.pagetable)>>PAGE_SHIFT], -1, 1);
+    adjust(&frame_table[pagetable_val(d->exec_domain[0]->arch.pagetable)>>PAGE_SHIFT], -1, 1);
 
     list_ent = d->page_list.next;
     for ( i = 0; (list_ent != &d->page_list); i++ )
@@ -2108,7 +2142,7 @@ void audit_domain(struct domain *d)
         pfn = list_entry(list_ent, struct pfn_info, list) - frame_table;       
         page = &frame_table[pfn];
 
-        if ( page->u.inuse.domain != d )
+        if ( page_get_owner(page) != d )
             BUG();
 
         switch ( page->u.inuse.type_info & PGT_type_mask )
@@ -2134,10 +2168,10 @@ void audit_domain(struct domain *d)
                     unsigned long l1pfn = pt[i]>>PAGE_SHIFT;
                     struct pfn_info *l1page = &frame_table[l1pfn];
 
-                    if ( l1page->u.inuse.domain != d )
+                    if ( page_get_owner(l1page) != d )
                     {
                         printk("L2: Skip bizarre page belonging to other "
-                               "dom %p\n", l1page->u.inuse.domain);    
+                               "dom %p\n", page_get_owner(l1page));
                         continue;
                     }
                     
@@ -2212,12 +2246,12 @@ void audit_domain(struct domain *d)
 
                     }
 
-                    if ( l1page->u.inuse.domain != d )
+                    if ( page_get_owner(l1page) != d )
                     {
-                        printk("Audit %d: [%lx,%x] Skip foreign page dom=%lx "
+                        printk("Audit %d: [%lx,%x] Skip foreign page dom=%p "
                                "pfn=%lx c=%08x t=%08x m2p=%lx\n",
                                d->id, pfn, i,
-                               (unsigned long)l1page->u.inuse.domain,
+                               page_get_owner(l1page),
                                l1pfn,
                                l1page->count_info,
                                l1page->u.inuse.type_info,
@@ -2302,7 +2336,7 @@ void audit_domain(struct domain *d)
                     unsigned long l1pfn = pt[i]>>PAGE_SHIFT;
                     struct pfn_info *l1page = &frame_table[l1pfn];
 
-                    if ( l1page->u.inuse.domain == d)
+                    if ( page_get_owner(l1page) == d )
                         adjust(l1page, 1, 1);
                 }
             }
@@ -2323,7 +2357,7 @@ void audit_domain(struct domain *d)
                     unsigned long l1pfn = pt[i]>>PAGE_SHIFT;
                     struct pfn_info *l1page = &frame_table[l1pfn];
 
-                    if ( (l1page->u.inuse.domain != d) ||
+                    if ( (page_get_owner(l1page) != d) ||
                          (l1pfn < 0x100) || (l1pfn > max_page) )
                         continue;
 
@@ -2343,11 +2377,12 @@ void audit_domain(struct domain *d)
 
     spin_unlock(&d->page_alloc_lock);
 
-    adjust(&frame_table[pagetable_val(d->mm.pagetable)>>PAGE_SHIFT], 1, 1);
+    adjust(&frame_table[pagetable_val(
+        d->exec_domain[0]->arch.pagetable)>>PAGE_SHIFT], 1, 1);
 
     printk("Audit %d: Done. ctot=%d ttot=%d\n", d->id, ctot, ttot );
 
-    if ( d != current )
+    if ( d != current->domain )
         domain_unpause(d);
 }
 

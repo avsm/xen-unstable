@@ -1,4 +1,4 @@
-/* -*-  Mode:C++; c-file-style:BSD; c-basic-offset:4; tab-width:4 -*- */
+/* -*-  Mode:C; c-basic-offset:4; tab-width:4; indent-tabs-mode:nil -*- */
 
 #include <xen/config.h>
 #include <xen/types.h>
@@ -28,9 +28,9 @@ hypercall lock anyhow (at least initially).
 ********/
 
 static inline void free_shadow_page(
-    struct mm_struct *m, struct pfn_info *page)
+    struct domain *d, struct pfn_info *page)
 {
-    m->shadow_page_count--;
+    d->arch.shadow_page_count--;
 
     switch ( page->u.inuse.type_info & PGT_type_mask )
     {
@@ -51,7 +51,7 @@ static inline void free_shadow_page(
     free_domheap_page(page);
 }
 
-static void free_shadow_state(struct mm_struct *m)
+static void free_shadow_state(struct domain *d)
 {
     int                   i, free = 0;
     struct shadow_status *x, *n;
@@ -61,19 +61,19 @@ static void free_shadow_state(struct mm_struct *m)
      * e.g., You are expected to have paused the domain and synchronized CR3.
      */
 
-    shadow_audit(m, 1);
+    shadow_audit(d, 1);
 
     /* Free each hash chain in turn. */
     for ( i = 0; i < shadow_ht_buckets; i++ )
     {
         /* Skip empty buckets. */
-        x = &m->shadow_ht[i];
+        x = &d->arch.shadow_ht[i];
         if ( x->pfn == 0 )
             continue;
 
         /* Free the head page. */
         free_shadow_page(
-            m, &frame_table[x->spfn_and_flags & PSH_pfn_mask]);
+            d, &frame_table[x->spfn_and_flags & PSH_pfn_mask]);
 
         /* Reinitialise the head node. */
         x->pfn            = 0;
@@ -88,7 +88,7 @@ static void free_shadow_state(struct mm_struct *m)
         { 
             /* Free the shadow page. */
             free_shadow_page(
-                m, &frame_table[x->spfn_and_flags & PSH_pfn_mask]);
+                d, &frame_table[x->spfn_and_flags & PSH_pfn_mask]);
 
             /* Re-initialise the chain node. */
             x->pfn            = 0;
@@ -96,20 +96,20 @@ static void free_shadow_state(struct mm_struct *m)
 
             /* Add to the free list. */
             n                 = x->next;
-            x->next           = m->shadow_ht_free;
-            m->shadow_ht_free = x;
+            x->next           = d->arch.shadow_ht_free;
+            d->arch.shadow_ht_free = x;
 
             free++;
         }
 
-        shadow_audit(m, 0);
+        shadow_audit(d, 0);
     }
 
     SH_LOG("Free shadow table. Freed=%d.", free);
 }
 
 static inline int clear_shadow_page(
-    struct mm_struct *m, struct shadow_status *x)
+    struct domain *d, struct shadow_status *x)
 {
     unsigned long   *p;
     int              restart = 0;
@@ -120,14 +120,17 @@ static inline int clear_shadow_page(
         /* We clear L2 pages by zeroing the guest entries. */
     case PGT_l2_page_table:
         p = map_domain_mem((spage - frame_table) << PAGE_SHIFT);
-        memset(p, 0, DOMAIN_ENTRIES_PER_L2_PAGETABLE * sizeof(*p));
+        if (d->arch.shadow_mode == SHM_full_32)
+            memset(p, 0, ENTRIES_PER_L2_PAGETABLE * sizeof(*p));
+        else 
+            memset(p, 0, DOMAIN_ENTRIES_PER_L2_PAGETABLE * sizeof(*p));
         unmap_domain_mem(p);
         break;
 
         /* We clear L1 pages by freeing them: no benefit from zeroing them. */
     case PGT_l1_page_table:
-        delete_shadow_status(m, x->pfn);
-        free_shadow_page(m, spage);
+        delete_shadow_status(d, x->pfn);
+        free_shadow_page(d, spage);
         restart = 1; /* We need to go to start of list again. */
         break;
     }
@@ -135,29 +138,29 @@ static inline int clear_shadow_page(
     return restart;
 }
 
-static void clear_shadow_state(struct mm_struct *m)
+static void clear_shadow_state(struct domain *d)
 {
     int                   i;
     struct shadow_status *x;
  
-    shadow_audit(m, 1);
+    shadow_audit(d, 1);
 
     for ( i = 0; i < shadow_ht_buckets; i++ )
     {
     retry:
         /* Skip empty buckets. */
-        x = &m->shadow_ht[i];
+        x = &d->arch.shadow_ht[i];
         if ( x->pfn == 0 )
             continue;
 
-        if ( clear_shadow_page(m, x) )
+        if ( clear_shadow_page(d, x) )
             goto retry;
 
         for ( x = x->next; x != NULL; x = x->next )
-            if ( clear_shadow_page(m, x) )
+            if ( clear_shadow_page(d, x) )
                 goto retry;
 
-        shadow_audit(m, 0);
+        shadow_audit(d, 0);
     }
 
     SH_VLOG("Scan shadow table. l1=%d l2=%d",
@@ -169,119 +172,118 @@ void shadow_mode_init(void)
 {
 }
 
-int shadow_mode_enable(struct domain *p, unsigned int mode)
+int shadow_mode_enable(struct domain *d, unsigned int mode)
 {
-    struct mm_struct *m = &p->mm;
-
-    m->shadow_ht = xmalloc(
-        shadow_ht_buckets * sizeof(struct shadow_status));
-    if ( m->shadow_ht == NULL )
+    d->arch.shadow_ht = xmalloc_array(struct shadow_status, shadow_ht_buckets);
+    if ( d->arch.shadow_ht == NULL )
         goto nomem;
-    memset(m->shadow_ht, 0, shadow_ht_buckets * sizeof(struct shadow_status));
+    memset(d->arch.shadow_ht, 0,
+           shadow_ht_buckets * sizeof(struct shadow_status));
 
     if ( mode == SHM_logdirty )
     {
-        m->shadow_dirty_bitmap_size = (p->max_pages + 63) & ~63;
-        m->shadow_dirty_bitmap = 
-            xmalloc(m->shadow_dirty_bitmap_size/8);
-        if ( m->shadow_dirty_bitmap == NULL )
+        d->arch.shadow_dirty_bitmap_size = (d->max_pages + 63) & ~63;
+        d->arch.shadow_dirty_bitmap = 
+            xmalloc_array(unsigned long, d->arch.shadow_dirty_bitmap_size /
+                                         (8 * sizeof(unsigned long)));
+        if ( d->arch.shadow_dirty_bitmap == NULL )
         {
-            m->shadow_dirty_bitmap_size = 0;
+            d->arch.shadow_dirty_bitmap_size = 0;
             goto nomem;
         }
-        memset(m->shadow_dirty_bitmap, 0, m->shadow_dirty_bitmap_size/8);
+        memset(d->arch.shadow_dirty_bitmap, 0, 
+               d->arch.shadow_dirty_bitmap_size/8);
     }
 
-    m->shadow_mode = mode;
+    d->arch.shadow_mode = mode;
 
-    __shadow_mk_pagetable(m);
+    __shadow_mk_pagetable(d->exec_domain[0]); /* XXX SMP */
     return 0;
 
  nomem:
-    if ( m->shadow_ht != NULL )
-        xfree( m->shadow_ht );
-    m->shadow_ht = NULL;
+    if ( d->arch.shadow_ht != NULL )
+        xfree(d->arch.shadow_ht);
+    d->arch.shadow_ht = NULL;
     return -ENOMEM;
 }
 
 void __shadow_mode_disable(struct domain *d)
 {
-    struct mm_struct *m = &d->mm;
     struct shadow_status *x, *n;
 
-    free_shadow_state(m);
-    m->shadow_mode = 0;
+    free_shadow_state(d);
+    d->arch.shadow_mode = 0;
 
     SH_VLOG("freed tables count=%d l1=%d l2=%d",
-            m->shadow_page_count, perfc_value(shadow_l1_pages), 
+            d->arch.shadow_page_count, perfc_value(shadow_l1_pages), 
             perfc_value(shadow_l2_pages));
 
-    n = m->shadow_ht_extras;
+    n = d->arch.shadow_ht_extras;
     while ( (x = n) != NULL )
     {
-        m->shadow_extras_count--;
+        d->arch.shadow_extras_count--;
         n = *((struct shadow_status **)(&x[shadow_ht_extra_size]));
         xfree(x);
     }
 
-    m->shadow_ht_extras = NULL;
-    ASSERT(m->shadow_extras_count == 0);
-    SH_LOG("freed extras, now %d", m->shadow_extras_count);
+    d->arch.shadow_ht_extras = NULL;
+    ASSERT(d->arch.shadow_extras_count == 0);
+    SH_LOG("freed extras, now %d", d->arch.shadow_extras_count);
 
-    if ( m->shadow_dirty_bitmap != NULL )
+    if ( d->arch.shadow_dirty_bitmap != NULL )
     {
-        xfree(m->shadow_dirty_bitmap);
-        m->shadow_dirty_bitmap = 0;
-        m->shadow_dirty_bitmap_size = 0;
+        xfree(d->arch.shadow_dirty_bitmap);
+        d->arch.shadow_dirty_bitmap = 0;
+        d->arch.shadow_dirty_bitmap_size = 0;
     }
 
-    xfree(m->shadow_ht);
-    m->shadow_ht = NULL;
+    xfree(d->arch.shadow_ht);
+    d->arch.shadow_ht = NULL;
 }
 
 static int shadow_mode_table_op(
     struct domain *d, dom0_shadow_control_t *sc)
 {
     unsigned int      op = sc->op;
-    struct mm_struct *m = &d->mm;
     int               i, rc = 0;
 
-    ASSERT(spin_is_locked(&m->shadow_lock));
+    ASSERT(spin_is_locked(&d->arch.shadow_lock));
 
     SH_VLOG("shadow mode table op %08lx %08lx count %d",
-            pagetable_val(m->pagetable), pagetable_val(m->shadow_table),
-            m->shadow_page_count);
+            pagetable_val(d->exec_domain[0]->arch.pagetable),    /* XXX SMP */
+            pagetable_val(d->exec_domain[0]->arch.shadow_table), /* XXX SMP */
+            d->arch.shadow_page_count);
 
-    shadow_audit(m, 1);
+    shadow_audit(d, 1);
 
     switch ( op )
     {
     case DOM0_SHADOW_CONTROL_OP_FLUSH:
-        free_shadow_state(m);
+        free_shadow_state(d);
 
-        m->shadow_fault_count       = 0;
-        m->shadow_dirty_count       = 0;
-        m->shadow_dirty_net_count   = 0;
-        m->shadow_dirty_block_count = 0;
+        d->arch.shadow_fault_count       = 0;
+        d->arch.shadow_dirty_count       = 0;
+        d->arch.shadow_dirty_net_count   = 0;
+        d->arch.shadow_dirty_block_count = 0;
 
         break;
    
     case DOM0_SHADOW_CONTROL_OP_CLEAN:
-        clear_shadow_state(m);
+        clear_shadow_state(d);
 
-        sc->stats.fault_count       = m->shadow_fault_count;
-        sc->stats.dirty_count       = m->shadow_dirty_count;
-        sc->stats.dirty_net_count   = m->shadow_dirty_net_count;
-        sc->stats.dirty_block_count = m->shadow_dirty_block_count;
+        sc->stats.fault_count       = d->arch.shadow_fault_count;
+        sc->stats.dirty_count       = d->arch.shadow_dirty_count;
+        sc->stats.dirty_net_count   = d->arch.shadow_dirty_net_count;
+        sc->stats.dirty_block_count = d->arch.shadow_dirty_block_count;
 
-        m->shadow_fault_count       = 0;
-        m->shadow_dirty_count       = 0;
-        m->shadow_dirty_net_count   = 0;
-        m->shadow_dirty_block_count = 0;
+        d->arch.shadow_fault_count       = 0;
+        d->arch.shadow_dirty_count       = 0;
+        d->arch.shadow_dirty_net_count   = 0;
+        d->arch.shadow_dirty_block_count = 0;
  
         if ( (d->max_pages > sc->pages) || 
              (sc->dirty_bitmap == NULL) || 
-             (m->shadow_dirty_bitmap == NULL) )
+             (d->arch.shadow_dirty_bitmap == NULL) )
         {
             rc = -EINVAL;
             break;
@@ -297,34 +299,35 @@ static int shadow_mode_table_op(
      
             if (copy_to_user(
                     sc->dirty_bitmap + (i/(8*sizeof(unsigned long))),
-                    m->shadow_dirty_bitmap +(i/(8*sizeof(unsigned long))),
+                    d->arch.shadow_dirty_bitmap +(i/(8*sizeof(unsigned long))),
                     bytes))
             {
                 // copy_to_user can fail when copying to guest app memory.
                 // app should zero buffer after mallocing, and pin it
                 rc = -EINVAL;
                 memset(
-                    m->shadow_dirty_bitmap + (i/(8*sizeof(unsigned long))),
+                    d->arch.shadow_dirty_bitmap + 
+                    (i/(8*sizeof(unsigned long))),
                     0, (d->max_pages/8) - (i/(8*sizeof(unsigned long))));
                 break;
             }
 
             memset(
-                m->shadow_dirty_bitmap + (i/(8*sizeof(unsigned long))),
+                d->arch.shadow_dirty_bitmap + (i/(8*sizeof(unsigned long))),
                 0, bytes);
         }
 
         break;
 
     case DOM0_SHADOW_CONTROL_OP_PEEK:
-        sc->stats.fault_count       = m->shadow_fault_count;
-        sc->stats.dirty_count       = m->shadow_dirty_count;
-        sc->stats.dirty_net_count   = m->shadow_dirty_net_count;
-        sc->stats.dirty_block_count = m->shadow_dirty_block_count;
+        sc->stats.fault_count       = d->arch.shadow_fault_count;
+        sc->stats.dirty_count       = d->arch.shadow_dirty_count;
+        sc->stats.dirty_net_count   = d->arch.shadow_dirty_net_count;
+        sc->stats.dirty_block_count = d->arch.shadow_dirty_block_count;
  
         if ( (d->max_pages > sc->pages) || 
              (sc->dirty_bitmap == NULL) || 
-             (m->shadow_dirty_bitmap == NULL) )
+             (d->arch.shadow_dirty_bitmap == NULL) )
         {
             rc = -EINVAL;
             break;
@@ -332,7 +335,7 @@ static int shadow_mode_table_op(
  
         sc->pages = d->max_pages;
         if (copy_to_user(
-            sc->dirty_bitmap, m->shadow_dirty_bitmap, (d->max_pages+7)/8))
+            sc->dirty_bitmap, d->arch.shadow_dirty_bitmap, (d->max_pages+7)/8))
         {
             rc = -EINVAL;
             break;
@@ -345,9 +348,9 @@ static int shadow_mode_table_op(
         break;
     }
 
-    SH_VLOG("shadow mode table op : page count %d", m->shadow_page_count);
-    shadow_audit(m, 1);
-    __shadow_mk_pagetable(m);
+    SH_VLOG("shadow mode table op : page count %d", d->arch.shadow_page_count);
+    shadow_audit(d, 1);
+    __shadow_mk_pagetable(d->exec_domain[0]); /* XXX SMP */
     return rc;
 }
 
@@ -356,7 +359,7 @@ int shadow_mode_control(struct domain *d, dom0_shadow_control_t *sc)
     unsigned int op = sc->op;
     int          rc = 0;
 
-    if ( unlikely(d == current) )
+    if ( unlikely(d == current->domain) )
     {
         DPRINTK("Don't try to do a shadow op on yourself!\n");
         return -EINVAL;
@@ -365,7 +368,7 @@ int shadow_mode_control(struct domain *d, dom0_shadow_control_t *sc)
     domain_pause(d);
     synchronise_pagetables(~0UL);
 
-    shadow_lock(&d->mm);
+    shadow_lock(d);
 
     switch ( op )
     {
@@ -388,23 +391,23 @@ int shadow_mode_control(struct domain *d, dom0_shadow_control_t *sc)
         break;
     }
 
-    shadow_unlock(&d->mm);
+    shadow_unlock(d);
 
     domain_unpause(d);
 
     return rc;
 }
 
-static inline struct pfn_info *alloc_shadow_page(struct mm_struct *m)
+static inline struct pfn_info *alloc_shadow_page(struct domain *d)
 {
     struct pfn_info *page = alloc_domheap_page(NULL);
 
-    m->shadow_page_count++;
+    d->arch.shadow_page_count++;
 
     if ( unlikely(page == NULL) )
     {
         printk("Couldn't alloc shadow page! count=%d\n",
-               m->shadow_page_count);
+               d->arch.shadow_page_count);
         SH_VLOG("Shadow tables l1=%d l2=%d",
                 perfc_value(shadow_l1_pages), 
                 perfc_value(shadow_l2_pages));
@@ -417,7 +420,7 @@ static inline struct pfn_info *alloc_shadow_page(struct mm_struct *m)
 void unshadow_table(unsigned long gpfn, unsigned int type)
 {
     unsigned long  spfn;
-    struct domain *d = frame_table[gpfn].u.inuse.domain;
+    struct domain *d = page_get_owner(&frame_table[gpfn]);
 
     SH_VLOG("unshadow_table type=%08x gpfn=%08lx", type, gpfn);
 
@@ -428,56 +431,76 @@ void unshadow_table(unsigned long gpfn, unsigned int type)
      * guests there won't be a race here as this CPU was the one that 
      * cmpxchg'ed the page to invalid.
      */
-    spfn = __shadow_status(&d->mm, gpfn) & PSH_pfn_mask;
-    delete_shadow_status(&d->mm, gpfn);
-    free_shadow_page(&d->mm, &frame_table[spfn]);
+    spfn = __shadow_status(d, gpfn) & PSH_pfn_mask;
+    delete_shadow_status(d, gpfn);
+    free_shadow_page(d, &frame_table[spfn]);
 }
 
+#ifdef CONFIG_VMX
+void vmx_shadow_clear_state(struct domain *d)
+{
+    SH_VVLOG("vmx_clear_shadow_state: \n");
+    clear_shadow_state(d);
+}
+#endif
+
+
 unsigned long shadow_l2_table( 
-    struct mm_struct *m, unsigned long gpfn)
+    struct domain *d, unsigned long gpfn)
 {
     struct pfn_info *spfn_info;
     unsigned long    spfn;
-    l2_pgentry_t    *spl2e;
+    l2_pgentry_t    *spl2e = 0;
+    unsigned long guest_gpfn;
+
+    __get_machine_to_phys(d, guest_gpfn, gpfn);
 
     SH_VVLOG("shadow_l2_table( %08lx )", gpfn);
 
     perfc_incrc(shadow_l2_table_count);
 
-    if ( (spfn_info = alloc_shadow_page(m)) == NULL )
+    if ( (spfn_info = alloc_shadow_page(d)) == NULL )
         BUG(); /* XXX Deal gracefully with failure. */
 
     spfn_info->u.inuse.type_info = PGT_l2_page_table;
     perfc_incr(shadow_l2_pages);
 
     spfn = spfn_info - frame_table;
-
-    /* Mark pfn as being shadowed; update field to point at shadow. */
-    set_shadow_status(m, gpfn, spfn | PSH_shadowed);
+  /* Mark pfn as being shadowed; update field to point at shadow. */
+    set_shadow_status(d, guest_gpfn, spfn | PSH_shadowed);
  
-    spl2e = (l2_pgentry_t *)map_domain_mem(spfn << PAGE_SHIFT);
-
-    /*
-     * We could proactively fill in PDEs for pages that are already shadowed.
-     * However, we tried it and it didn't help performance. This is simpler.
-     */
-    memset(spl2e, 0, DOMAIN_ENTRIES_PER_L2_PAGETABLE * sizeof(l2_pgentry_t));
-
 #ifdef __i386__
     /* Install hypervisor and 2x linear p.t. mapings. */
-    memcpy(&spl2e[DOMAIN_ENTRIES_PER_L2_PAGETABLE], 
-           &idle_pg_table[DOMAIN_ENTRIES_PER_L2_PAGETABLE],
-           HYPERVISOR_ENTRIES_PER_L2_PAGETABLE * sizeof(l2_pgentry_t));
-    spl2e[LINEAR_PT_VIRT_START >> L2_PAGETABLE_SHIFT] =
-        mk_l2_pgentry((gpfn << PAGE_SHIFT) | __PAGE_HYPERVISOR);
-    spl2e[SH_LINEAR_PT_VIRT_START >> L2_PAGETABLE_SHIFT] =
-        mk_l2_pgentry((spfn << PAGE_SHIFT) | __PAGE_HYPERVISOR);
-    spl2e[PERDOMAIN_VIRT_START >> L2_PAGETABLE_SHIFT] =
-        mk_l2_pgentry(__pa(frame_table[gpfn].u.inuse.domain->mm.perdomain_pt) |
-                      __PAGE_HYPERVISOR);
+    if ( d->arch.shadow_mode == SHM_full_32 )
+    {
+        vmx_update_shadow_state(d->exec_domain[0], gpfn, spfn);
+    }
+    else
+    {
+        spl2e = (l2_pgentry_t *)map_domain_mem(spfn << PAGE_SHIFT);
+        /*
+         * We could proactively fill in PDEs for pages that are already
+         * shadowed. However, we tried it and it didn't help performance.
+         * This is simpler.
+         */
+        memset(spl2e, 0, DOMAIN_ENTRIES_PER_L2_PAGETABLE*sizeof(l2_pgentry_t));
+
+        /* Install hypervisor and 2x linear p.t. mapings. */
+        memcpy(&spl2e[DOMAIN_ENTRIES_PER_L2_PAGETABLE], 
+               &idle_pg_table[DOMAIN_ENTRIES_PER_L2_PAGETABLE],
+               HYPERVISOR_ENTRIES_PER_L2_PAGETABLE * sizeof(l2_pgentry_t));
+        spl2e[LINEAR_PT_VIRT_START >> L2_PAGETABLE_SHIFT] =
+            mk_l2_pgentry((gpfn << PAGE_SHIFT) | __PAGE_HYPERVISOR);
+        spl2e[SH_LINEAR_PT_VIRT_START >> L2_PAGETABLE_SHIFT] =
+            mk_l2_pgentry((spfn << PAGE_SHIFT) | __PAGE_HYPERVISOR);
+        spl2e[PERDOMAIN_VIRT_START >> L2_PAGETABLE_SHIFT] =
+            mk_l2_pgentry(__pa(page_get_owner(&frame_table[gpfn])->arch.mm_perdomain_pt) |
+                          __PAGE_HYPERVISOR);
+    }
 #endif
 
-    unmap_domain_mem(spl2e);
+    if ( d->arch.shadow_mode != SHM_full_32 ) 
+        unmap_domain_mem(spl2e);
 
     SH_VLOG("shadow_l2_table( %08lx -> %08lx)", gpfn, spfn);
     return spfn;
@@ -485,22 +508,23 @@ unsigned long shadow_l2_table(
 
 static void shadow_map_l1_into_current_l2(unsigned long va)
 { 
-    struct mm_struct *m = &current->mm;
-    unsigned long    *gpl1e, *spl1e, gpde, spde, gl1pfn, sl1pfn, sl1ss;
+    struct exec_domain *ed = current;
+    struct domain *d = ed->domain;
+    unsigned long    *gpl1e, *spl1e, gpl2e, spl2e, gl1pfn, sl1pfn=0, sl1ss;
     struct pfn_info  *sl1pfn_info;
     int               i;
 
-    gpde = l2_pgentry_val(linear_l2_table[va >> L2_PAGETABLE_SHIFT]);
+    __guest_get_pl2e(ed, va, &gpl2e);
 
-    gl1pfn = gpde >> PAGE_SHIFT;
+    gl1pfn = gpl2e >> PAGE_SHIFT;
 
-    sl1ss = __shadow_status(m, gl1pfn);
+    sl1ss = __shadow_status(d, gl1pfn);
     if ( !(sl1ss & PSH_shadowed) )
     {
         /* This L1 is NOT already shadowed so we need to shadow it. */
         SH_VVLOG("4a: l1 not shadowed ( %08lx )", sl1pfn);
 
-        sl1pfn_info = alloc_shadow_page(m);
+        sl1pfn_info = alloc_shadow_page(d);
         sl1pfn_info->u.inuse.type_info = PGT_l1_page_table;
    
         sl1pfn = sl1pfn_info - frame_table;
@@ -508,13 +532,12 @@ static void shadow_map_l1_into_current_l2(unsigned long va)
         perfc_incrc(shadow_l1_table_count);
         perfc_incr(shadow_l1_pages);
 
-        set_shadow_status(m, gl1pfn, PSH_shadowed | sl1pfn);
+        set_shadow_status(d, gl1pfn, PSH_shadowed | sl1pfn);
 
-        l2pde_general(m, &gpde, &spde, sl1pfn);
+        l2pde_general(d, &gpl2e, &spl2e, sl1pfn);
 
-        linear_l2_table[va>>L2_PAGETABLE_SHIFT] = mk_l2_pgentry(gpde);
-        shadow_linear_l2_table[va>>L2_PAGETABLE_SHIFT] =
-            mk_l2_pgentry(spde);
+        __guest_set_pl2e(ed, va, gpl2e);
+        __shadow_set_pl2e(ed, va, spl2e);
 
         gpl1e = (unsigned long *) &(linear_pg_table[
             (va>>L1_PAGETABLE_SHIFT) & ~(ENTRIES_PER_L1_PAGETABLE-1)]);
@@ -523,7 +546,7 @@ static void shadow_map_l1_into_current_l2(unsigned long va)
             (va>>L1_PAGETABLE_SHIFT) & ~(ENTRIES_PER_L1_PAGETABLE-1)]);
 
         for ( i = 0; i < ENTRIES_PER_L1_PAGETABLE; i++ )
-            l1pte_propagate_from_guest(m, &gpl1e[i], &spl1e[i]);
+            l1pte_propagate_from_guest(d, &gpl1e[i], &spl1e[i]);
     }
     else
     {
@@ -531,21 +554,47 @@ static void shadow_map_l1_into_current_l2(unsigned long va)
         SH_VVLOG("4b: was shadowed, l2 missing ( %08lx )", sl1pfn);
 
         sl1pfn = sl1ss & PSH_pfn_mask;
-        l2pde_general(m, &gpde, &spde, sl1pfn);
-
-        linear_l2_table[va >> L2_PAGETABLE_SHIFT] = mk_l2_pgentry(gpde);
-        shadow_linear_l2_table[va >> L2_PAGETABLE_SHIFT] = mk_l2_pgentry(spde);
+        l2pde_general(d, &gpl2e, &spl2e, sl1pfn);
+        __guest_set_pl2e(ed, va, gpl2e);
+        __shadow_set_pl2e(ed, va, spl2e);
     }              
 }
+
+#ifdef CONFIG_VMX
+void vmx_shadow_invlpg(struct domain *d, unsigned long va)
+{
+    unsigned long gpte, spte, host_pfn;
+
+    if (__put_user(0L, (unsigned long *)
+                   &shadow_linear_pg_table[va >> PAGE_SHIFT])) {
+        vmx_shadow_clear_state(d);
+        return;
+    }
+
+    if (__get_user(gpte, (unsigned long *)
+                   &linear_pg_table[va >> PAGE_SHIFT])) {
+        return;
+    }
+
+    host_pfn = phys_to_machine_mapping(gpte >> PAGE_SHIFT);
+    spte = (host_pfn << PAGE_SHIFT) | (gpte & ~PAGE_MASK);
+
+    if (__put_user(spte, (unsigned long *)
+                   &shadow_linear_pg_table[va >> PAGE_SHIFT])) {
+        return;
+    }
+}
+#endif
 
 int shadow_fault(unsigned long va, long error_code)
 {
     unsigned long gpte, spte;
-    struct mm_struct *m = &current->mm;
+    struct exec_domain *ed = current;
+    struct domain *d = ed->domain;
 
     SH_VVLOG("shadow_fault( va=%08lx, code=%ld )", va, error_code );
 
-    check_pagetable(m, current->mm.pagetable, "pre-sf");
+    check_pagetable(d, ed->arch.pagetable, "pre-sf");
 
     /*
      * STEP 1. A fast-reject set of checks with no locking.
@@ -574,20 +623,20 @@ int shadow_fault(unsigned long va, long error_code)
      * STEP 2. Take the shadow lock and re-check the guest PTE.
      */
 
-    shadow_lock(m);
+    shadow_lock(d);
  
     if ( unlikely(__get_user(gpte, (unsigned long *)
                              &linear_pg_table[va >> PAGE_SHIFT])) )
     {
         SH_VVLOG("shadow_fault - EXIT: read gpte faulted" );
-        shadow_unlock(m);
+        shadow_unlock(d);
         return 0;
     }
 
     if ( unlikely(!(gpte & _PAGE_PRESENT)) )
     {
         SH_VVLOG("shadow_fault - EXIT: gpte not present (%lx)",gpte );
-        shadow_unlock(m);
+        shadow_unlock(d);
         return 0;
     }
 
@@ -598,15 +647,15 @@ int shadow_fault(unsigned long va, long error_code)
         {
             /* Write fault on a read-only mapping. */
             SH_VVLOG("shadow_fault - EXIT: wr fault on RO page (%lx)", gpte);
-            shadow_unlock(m);
+            shadow_unlock(d);
             return 0;
         }
 
-        l1pte_write_fault(m, &gpte, &spte);
+        l1pte_write_fault(d, &gpte, &spte);
     }
     else
     {
-        l1pte_read_fault(m, &gpte, &spte);
+        l1pte_read_fault(d, &gpte, &spte);
     }
 
     /*
@@ -631,11 +680,11 @@ int shadow_fault(unsigned long va, long error_code)
     }
 
     perfc_incrc(shadow_fixup_count);
-    m->shadow_fault_count++;
+    d->arch.shadow_fault_count++;
 
-    shadow_unlock(m);
+    shadow_unlock(d);
 
-    check_pagetable(m, current->mm.pagetable, "post-sf");
+    check_pagetable(d, ed->arch.pagetable, "post-sf");
     return EXCRET_fault_fixed;
 }
 
@@ -653,7 +702,7 @@ void shadow_l1_normal_pt_update(
              "prev_spfn=%08lx, prev_spl1e=%p\n",
              pa, gpte, prev_spfn, prev_spl1e);
 
-    spfn = __shadow_status(&current->mm, pa >> PAGE_SHIFT) & PSH_pfn_mask;
+    spfn = __shadow_status(current->domain, pa >> PAGE_SHIFT) & PSH_pfn_mask;
 
     if ( spfn == prev_spfn )
     {
@@ -668,7 +717,7 @@ void shadow_l1_normal_pt_update(
         *prev_spl1e_ptr = spl1e;
     }
 
-    l1pte_propagate_from_guest(&current->mm, &gpte, &spte);
+    l1pte_propagate_from_guest(current->domain, &gpte, &spte);
     spl1e[(pa & ~PAGE_MASK) / sizeof(l1_pgentry_t)] = mk_l1_pgentry(spte);
 }
 
@@ -681,13 +730,13 @@ void shadow_l2_normal_pt_update(unsigned long pa, unsigned long gpte)
     /* N.B. To get here, we know the l2 page *must* be shadowed. */
     SH_VVLOG("shadow_l2_normal_pt_update pa=%08lx, gpte=%08lx",pa,gpte);
 
-    spfn = __shadow_status(&current->mm, pa >> PAGE_SHIFT) & PSH_pfn_mask;
+    spfn = __shadow_status(current->domain, pa >> PAGE_SHIFT) & PSH_pfn_mask;
 
     s_sh = (gpte & _PAGE_PRESENT) ?
-        __shadow_status(&current->mm, gpte >> PAGE_SHIFT) : 0;
+        __shadow_status(current->domain, gpte >> PAGE_SHIFT) : 0;
 
     /* XXXX Should mark guest pte as DIRTY and ACCESSED too! */
-    l2pde_general(&current->mm, &gpte, &spte, s_sh);
+    l2pde_general(current->domain, &gpte, &spte, s_sh);
     spl2e = (l2_pgentry_t *)map_domain_mem(spfn << PAGE_SHIFT);
     spl2e[(pa & ~PAGE_MASK) / sizeof(l2_pgentry_t)] = mk_l2_pgentry(spte);
     unmap_domain_mem(spl2e);
@@ -714,10 +763,11 @@ char * sh_check_name;
     } while ( 0 )
 
 static int check_pte(
-    struct mm_struct *m, unsigned long gpte, unsigned long spte, 
+    struct domain *d, unsigned long gpte, unsigned long spte, 
     int level, int i)
 {
     unsigned long mask, gpfn, spfn;
+    unsigned long guest_gpfn;
 
     if ( (spte == 0) || (spte == 0xdeadface) || (spte == 0x00000E00) )
         return 1;  /* always safe */
@@ -761,8 +811,20 @@ static int check_pte(
         if ( level < 2 )
             FAIL("Shadow in L1 entry?");
 
-        if ( __shadow_status(m, gpfn) != (PSH_shadowed | spfn) )
-            FAIL("spfn problem g.sf=%08lx", __shadow_status(m, gpfn));
+        if (d->arch.shadow_mode == SHM_full_32) {
+
+            guest_gpfn = phys_to_machine_mapping(gpfn);
+
+            if ( __shadow_status(d, guest_gpfn) != (PSH_shadowed | spfn) )
+                FAIL("spfn problem g.sf=%08lx", 
+                     __shadow_status(d, guest_gpfn) );
+            
+        } else {
+            if ( __shadow_status(d, gpfn) != (PSH_shadowed | spfn) )
+                FAIL("spfn problem g.sf=%08lx", 
+                     __shadow_status(d, gpfn) );
+        }
+
     }
 
     return 1;
@@ -770,7 +832,7 @@ static int check_pte(
 
 
 static int check_l1_table(
-    struct mm_struct *m, unsigned long va, 
+    struct domain *d, unsigned long va, 
     unsigned long g2, unsigned long s2)
 {
     int i;
@@ -780,7 +842,7 @@ static int check_l1_table(
     spl1e = map_domain_mem(s2 << PAGE_SHIFT);
 
     for ( i = 0; i < ENTRIES_PER_L1_PAGETABLE; i++ )
-        check_pte(m, gpl1e[i], spl1e[i], 1, i);
+        check_pte(d, gpl1e[i], spl1e[i], 1, i);
  
     unmap_domain_mem(spl1e);
     unmap_domain_mem(gpl1e);
@@ -794,12 +856,13 @@ static int check_l1_table(
         BUG();                                                 \
     } while ( 0 )
 
-int check_pagetable(struct mm_struct *m, pagetable_t pt, char *s)
+int check_pagetable(struct domain *d, pagetable_t pt, char *s)
 {
     unsigned long gptbase = pagetable_val(pt);
     unsigned long gpfn, spfn;
-    int           i;
+    unsigned long i;
     l2_pgentry_t *gpl2e, *spl2e;
+    unsigned long host_gpfn = 0;
 
     sh_check_name = s;
 
@@ -809,20 +872,29 @@ int check_pagetable(struct mm_struct *m, pagetable_t pt, char *s)
 
     gpfn = gptbase >> PAGE_SHIFT;
 
-    if ( !(__shadow_status(m, gpfn) & PSH_shadowed) )
+    __get_phys_to_machine(d, host_gpfn, gpfn);
+  
+    if ( ! (__shadow_status(d, gpfn) & PSH_shadowed) )
     {
         printk("%s-PT %08lx not shadowed\n", s, gptbase);
-        if ( __shadow_status(m, gpfn) != 0 )
-            BUG();
-        return 0;
-    }
+
+        if( __shadow_status(d, gpfn) != 0 ) BUG();
+            return 0;
+    }   
  
-    spfn = __shadow_status(m, gpfn) & PSH_pfn_mask;
+    spfn = __shadow_status(d, gpfn) & PSH_pfn_mask;
 
-    if ( __shadow_status(m, gpfn) != (PSH_shadowed | spfn) )
-        FAILPT("ptbase shadow inconsistent1");
+    if ( ! __shadow_status(d, gpfn) == (PSH_shadowed | spfn) )
+            FAILPT("ptbase shadow inconsistent1");
 
-    gpl2e = (l2_pgentry_t *) map_domain_mem( gpfn << PAGE_SHIFT );
+    if (d->arch.shadow_mode == SHM_full_32) 
+    {
+        host_gpfn = phys_to_machine_mapping(gpfn);
+        gpl2e = (l2_pgentry_t *) map_domain_mem( host_gpfn << PAGE_SHIFT );
+
+    } else
+        gpl2e = (l2_pgentry_t *) map_domain_mem( gpfn << PAGE_SHIFT );
+
     spl2e = (l2_pgentry_t *) map_domain_mem( spfn << PAGE_SHIFT );
 
     if ( memcmp(&spl2e[DOMAIN_ENTRIES_PER_L2_PAGETABLE],
@@ -830,7 +902,6 @@ int check_pagetable(struct mm_struct *m, pagetable_t pt, char *s)
                 ((SH_LINEAR_PT_VIRT_START >> L2_PAGETABLE_SHIFT) -
                  DOMAIN_ENTRIES_PER_L2_PAGETABLE) * sizeof(l2_pgentry_t)) )
     {
-        printk("gpfn=%08lx spfn=%08lx\n", gpfn, spfn);
         for ( i = DOMAIN_ENTRIES_PER_L2_PAGETABLE; 
               i < (SH_LINEAR_PT_VIRT_START >> L2_PAGETABLE_SHIFT);
               i++ )
@@ -851,22 +922,23 @@ int check_pagetable(struct mm_struct *m, pagetable_t pt, char *s)
                                    L2_PAGETABLE_SHIFT]),
                (spfn << PAGE_SHIFT) | __PAGE_HYPERVISOR);
 
-    if ( (l2_pgentry_val(spl2e[PERDOMAIN_VIRT_START >> L2_PAGETABLE_SHIFT]) !=
-          ((__pa(frame_table[gpfn].u.inuse.domain->mm.perdomain_pt) | 
+    if (d->arch.shadow_mode != SHM_full_32) {
+        if ( (l2_pgentry_val(spl2e[PERDOMAIN_VIRT_START >> L2_PAGETABLE_SHIFT]) !=
+              ((__pa(page_get_owner(&frame_table[gpfn])->arch.mm_perdomain_pt) | 
             __PAGE_HYPERVISOR))) )
-        FAILPT("hypervisor per-domain map inconsistent");
-
+            FAILPT("hypervisor per-domain map inconsistent");
+    }
 
     /* Check the whole L2. */
     for ( i = 0; i < DOMAIN_ENTRIES_PER_L2_PAGETABLE; i++ )
-        check_pte(m, l2_pgentry_val(gpl2e[i]), l2_pgentry_val(spl2e[i]), 2, i);
+        check_pte(d, l2_pgentry_val(gpl2e[i]), l2_pgentry_val(spl2e[i]), 2, i);
 
     /* Go back and recurse. */
     for ( i = 0; i < DOMAIN_ENTRIES_PER_L2_PAGETABLE; i++ )
     {
         if ( l2_pgentry_val(spl2e[i]) != 0 )
             check_l1_table(
-                m, i << L2_PAGETABLE_SHIFT,
+                d, i << L2_PAGETABLE_SHIFT,
                 l2_pgentry_val(gpl2e[i]) >> PAGE_SHIFT, 
                 l2_pgentry_val(spl2e[i]) >> PAGE_SHIFT);
     }
