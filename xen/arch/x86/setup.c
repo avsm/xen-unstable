@@ -1,3 +1,4 @@
+/* -*-  Mode:C; c-basic-offset:4; tab-width:4; indent-tabs-mode:nil -*- */
 
 #include <xen/config.h>
 #include <xen/init.h>
@@ -17,7 +18,6 @@
 #include <asm/apic.h>
 #include <asm/desc.h>
 #include <asm/domain_page.h>
-#include <asm/pdb.h>
 #include <asm/shadow.h>
 #include <asm/e820.h>
 
@@ -55,6 +55,8 @@ boolean_param("ignorebiostables", opt_ignorebiostables);
 static int opt_watchdog = 0;
 boolean_param("watchdog", opt_watchdog);
 
+int early_boot = 1;
+
 unsigned long xenheap_phys_end;
 
 extern void arch_init_memory(void);
@@ -77,7 +79,7 @@ EXPORT_SYMBOL(mmu_cr4_features);
 
 unsigned long wait_init_idle;
 
-struct domain *idle_task[NR_CPUS] = { &idle0_task };
+struct exec_domain *idle_task[NR_CPUS] = { &idle0_exec_domain };
 
 #ifdef	CONFIG_ACPI_INTERPRETER
 int acpi_disabled = 0;
@@ -89,23 +91,21 @@ EXPORT_SYMBOL(acpi_disabled);
 int phys_proc_id[NR_CPUS];
 int logical_proc_id[NR_CPUS];
 
-#if defined(__i386__)
-
-/* Standard macro to see if a specific flag is changeable */
-static inline int flag_is_changeable_p(u32 flag)
+/* Standard macro to see if a specific flag is changeable. */
+static inline int flag_is_changeable_p(unsigned long flag)
 {
-    u32 f1, f2;
+    unsigned long f1, f2;
 
-    asm("pushfl\n\t"
-        "pushfl\n\t"
-        "popl %0\n\t"
-        "movl %0,%1\n\t"
-        "xorl %2,%0\n\t"
-        "pushl %0\n\t"
-        "popfl\n\t"
-        "pushfl\n\t"
-        "popl %0\n\t"
-        "popfl\n\t"
+    asm("pushf\n\t"
+        "pushf\n\t"
+        "pop %0\n\t"
+        "mov %0,%1\n\t"
+        "xor %2,%0\n\t"
+        "push %0\n\t"
+        "popf\n\t"
+        "pushf\n\t"
+        "pop %0\n\t"
+        "popf\n\t"
         : "=&r" (f1), "=&r" (f2)
         : "ir" (flag));
 
@@ -117,12 +117,6 @@ static int __init have_cpuid_p(void)
 {
     return flag_is_changeable_p(X86_EFLAGS_ID);
 }
-
-#elif defined(__x86_64__)
-
-#define have_cpuid_p() (1)
-
-#endif
 
 void __init get_cpu_vendor(struct cpuinfo_x86 *c)
 {
@@ -185,6 +179,11 @@ static void __init init_intel(struct cpuinfo_x86 *c)
         }
     }
 #endif
+
+#ifdef CONFIG_VMX
+    start_vmx();
+#endif
+
 }
 
 static void __init init_amd(struct cpuinfo_x86 *c)
@@ -299,46 +298,50 @@ void __init identify_cpu(struct cpuinfo_x86 *c)
 unsigned long cpu_initialized;
 void __init cpu_init(void)
 {
-#if defined(__i386__) /* XXX */
+    extern void percpu_traps_init(void);
     int nr = smp_processor_id();
-    struct tss_struct * t = &init_tss[nr];
+    struct tss_struct *t = &init_tss[nr];
 
     if ( test_and_set_bit(nr, &cpu_initialized) )
         panic("CPU#%d already initialized!!!\n", nr);
     printk("Initializing CPU#%d\n", nr);
 
-    t->bitmap = IOBMP_INVALID_OFFSET;
-    memset(t->io_bitmap, ~0, sizeof(t->io_bitmap));
-
     /* Set up GDT and IDT. */
     SET_GDT_ENTRIES(current, DEFAULT_GDT_ENTRIES);
     SET_GDT_ADDRESS(current, DEFAULT_GDT_ADDRESS);
-    __asm__ __volatile__("lgdt %0": "=m" (*current->mm.gdt));
-    __asm__ __volatile__("lidt %0": "=m" (idt_descr));
+    __asm__ __volatile__ ( "lgdt %0" : "=m" (*current->arch.gdt) );
+    __asm__ __volatile__ ( "lidt %0" : "=m" (idt_descr) );
 
     /* No nested task. */
-    __asm__("pushfl ; andl $0xffffbfff,(%esp) ; popfl");
+    __asm__ __volatile__ ( "pushf ; andw $0xbfff,(%"__OP"sp) ; popf" );
 
     /* Ensure FPU gets initialised for each domain. */
     stts();
 
     /* Set up and load the per-CPU TSS and LDT. */
+    t->bitmap = IOBMP_INVALID_OFFSET;
+    memset(t->io_bitmap, ~0, sizeof(t->io_bitmap));
+#if defined(__i386__)
     t->ss0  = __HYPERVISOR_DS;
     t->esp0 = get_stack_top();
+#elif defined(__x86_64__)
+    t->rsp0 = get_stack_top();
+#endif
     set_tss_desc(nr,t);
     load_TR(nr);
-    __asm__ __volatile__("lldt %%ax"::"a" (0));
+    __asm__ __volatile__ ( "lldt %%ax" : : "a" (0) );
 
     /* Clear all 6 debug registers. */
-#define CD(register) __asm__("movl %0,%%db" #register ::"r"(0) );
+#define CD(register) __asm__ ( "mov %0,%%db" #register : : "r" (0UL) );
     CD(0); CD(1); CD(2); CD(3); /* no db4 and db5 */; CD(6); CD(7);
 #undef CD
 
+    percpu_traps_init();
+
     /* Install correct page table. */
-    write_ptbase(&current->mm);
+    write_ptbase(current);
 
     init_idle_task();
-#endif
 }
 
 static void __init do_initcalls(void)
@@ -357,7 +360,7 @@ static void __init start_of_day(void)
 #ifdef MEMORY_GUARD
     /* Unmap the first page of CPU0's stack. */
     extern unsigned long cpu0_stack[];
-    memguard_guard_range(cpu0_stack, PAGE_SIZE);
+    memguard_guard_stack(cpu0_stack);
 #endif
 
     open_softirq(NEW_TLBFLUSH_CLOCK_PERIOD_SOFTIRQ, new_tlbflush_clock_period);
@@ -424,10 +427,6 @@ static void __init start_of_day(void)
 
     serial_init_stage2();
 
-#ifdef XEN_DEBUGGER
-    initialize_pdb();      /* pervasive debugger */
-#endif
-
     if ( !cpu_has_apic )
     {
         do_timer_lists_from_pit = 1;
@@ -459,6 +458,9 @@ static void __init start_of_day(void)
 #endif
 
     watchdog_on = 1;
+#ifdef __x86_64__ /* x86_32 uses low mappings when building DOM0. */
+    zap_low_mappings();
+#endif
 }
 
 void __init __start_xen(multiboot_info_t *mbi)
@@ -477,7 +479,7 @@ void __init __start_xen(multiboot_info_t *mbi)
         cmdline_parse(__va(mbi->cmdline));
 
     /* Must do this early -- e.g., spinlocks rely on get_current(). */
-    set_current(&idle0_task);
+    set_current(&idle0_exec_domain);
 
     /* We initialise the serial devices very early so we can get debugging. */
     serial_init_stage1();
@@ -503,7 +505,7 @@ void __init __start_xen(multiboot_info_t *mbi)
             e820_raw[e820_raw_nr].size = 
                 ((u64)map->length_high << 32) | (u64)map->length_low;
             e820_raw[e820_raw_nr].type = 
-                (map->type > E820_NVS) ? E820_RESERVED : map->type;
+                (map->type > E820_SHARED_PAGE) ? E820_RESERVED : map->type;
             e820_raw_nr++;
             bytes += map->size + 4;
         }
@@ -589,11 +591,7 @@ void __init __start_xen(multiboot_info_t *mbi)
 	   (xenheap_phys_end-__pa(heap_start)) >> 20,
 	   (xenheap_phys_end-__pa(heap_start)) >> 10);
 
-    /* Initialise the slab allocator. */
-    xmem_cache_init();
-    xmem_cache_sizes_init(max_page);
-
-    domain_startofday();
+    early_boot = 0;
 
     start_of_day();
 
@@ -606,7 +604,7 @@ void __init __start_xen(multiboot_info_t *mbi)
     if ( dom0 == NULL )
         panic("Error creating domain 0\n");
 
-    set_bit(DF_PRIVILEGED, &dom0->flags);
+    set_bit(DF_PRIVILEGED, &dom0->d_flags);
 
     /* Grab the DOM0 command line. Skip past the image name. */
     cmdline = (unsigned char *)(mod[0].string ? __va(mod[0].string) : NULL);
@@ -622,10 +620,10 @@ void __init __start_xen(multiboot_info_t *mbi)
      * above our heap. The second module, if present, is an initrd ramdisk.
      */
     if ( construct_dom0(dom0, dom0_memory_start, dom0_memory_end,
-                        (char *)initial_images_start, 
+                        initial_images_start, 
                         mod[0].mod_end-mod[0].mod_start,
                         (mbi->mods_count == 1) ? 0 :
-                        (char *)initial_images_start + 
+                        initial_images_start + 
                         (mod[1].mod_start-mod[0].mod_start),
                         (mbi->mods_count == 1) ? 0 :
                         mod[mbi->mods_count-1].mod_end - mod[1].mod_start,
@@ -642,7 +640,7 @@ void __init __start_xen(multiboot_info_t *mbi)
     /* Give up the VGA console if DOM0 is configured to grab it. */
     console_endboot(cmdline && strstr(cmdline, "tty0"));
 
-    domain_unpause_by_systemcontroller(current);
+    domain_unpause_by_systemcontroller(current->domain);
     domain_unpause_by_systemcontroller(dom0);
     startup_cpu_idle_loop();
 }
