@@ -215,10 +215,19 @@ void synchronise_pagetables(unsigned long cpu_mask);
  * contiguous (or near contiguous) physical memory.
  */
 #undef  machine_to_phys_mapping
+
+/*
+ * The phys_to_machine_mapping is the reversed mapping of MPT for full
+ * virtualization.
+ */
+#undef  phys_to_machine_mapping
+
 #ifdef __x86_64__
 extern unsigned long *machine_to_phys_mapping;
+extern unsigned long *phys_to_machine_mapping;
 #else
 #define machine_to_phys_mapping ((unsigned long *)RDWR_MPT_VIRT_START)
+#define phys_to_machine_mapping ((unsigned long *)PERDOMAIN_VIRT_START)
 #endif
 
 #define DEFAULT_GDT_ENTRIES     (LAST_RESERVED_GDT_ENTRY+1)
@@ -228,12 +237,10 @@ extern unsigned long *machine_to_phys_mapping;
 void *memguard_init(void *heap_start);
 void memguard_guard_range(void *p, unsigned long l);
 void memguard_unguard_range(void *p, unsigned long l);
-int memguard_is_guarded(void *p);
 #else
 #define memguard_init(_s)              (_s)
 #define memguard_guard_range(_p,_l)    ((void)0)
 #define memguard_unguard_range(_p,_l)  ((void)0)
-#define memguard_is_guarded(_p)        (0)
 #endif
 
 
@@ -270,6 +277,8 @@ extern ptwr_info_t ptwr_info[];
 
 void ptwr_flush(const int);
 int ptwr_do_page_fault(unsigned long);
+
+int new_guest_cr3(unsigned long pfn);
 
 #define __cleanup_writable_pagetable(_what)                                 \
 do {                                                                        \
