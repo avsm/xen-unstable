@@ -74,6 +74,7 @@ typedef struct {
     /* Mapping tracking table. */
     grant_mapping_t      *maptrack;
     unsigned int          maptrack_head;
+    unsigned int          map_count;
     /* Lock protecting updates to active and shared grant tables. */
     spinlock_t            lock;
 } grant_table_t;
@@ -105,9 +106,8 @@ void
 gnttab_notify_transfer(
     struct domain *rd, grant_ref_t ref, unsigned long frame);
 
-/* Pre-domain destruction release of all mappings of other domains */
+/* Pre-domain destruction release of granted device mappings of other domains.*/
 void
-gnttab_release_all_mappings(grant_table_t *gt);
-
+gnttab_release_dev_mappings(grant_table_t *gt);
 
 #endif /* __XEN_GRANT_H__ */

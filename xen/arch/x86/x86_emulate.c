@@ -363,7 +363,7 @@ do{ __asm__ __volatile__ (                                              \
 /* Fetch next part of the instruction being emulated. */
 #define insn_fetch(_type, _size, _eip) \
 ({ unsigned long _x; \
-   if ( ops->read_std((unsigned long)(_eip), &_x, (_size)) ) \
+   if ( (rc = ops->read_std((unsigned long)(_eip), &_x, (_size))) != 0 ) \
        goto done; \
    (_eip) += (_size); \
    (_type)_x; \
@@ -421,39 +421,45 @@ x86_emulate_memop(
     u8 b, d, sib, twobyte = 0, rex_prefix = 0;
     u8 modrm, modrm_mod = 0, modrm_reg = 0, modrm_rm = 0;
     unsigned int op_bytes = (mode == 8) ? 4 : mode, ad_bytes = mode;
-    unsigned int lock_prefix = 0, rep_prefix = 0;
+    unsigned int lock_prefix = 0, rep_prefix = 0, i;
+    int rc = 0;
     struct operand src, dst;
 
     /* Shadow copy of register state. Committed on successful emulation. */
     struct xen_regs _regs = *regs;
 
     /* Legacy prefixes. */
- next_prefix:
-    switch ( b = insn_fetch(u8, 1, _regs.eip) )
+    for ( i = 0; i < 8; i++ )
     {
-    case 0x66: /* operand-size override */
-        op_bytes ^= 6;                    /* switch between 2/4 bytes */
-        goto next_prefix;
-    case 0x67: /* address-size override */
-        ad_bytes ^= (mode == 8) ? 12 : 6; /* switch between 2/4 or 4/8 bytes */
-        goto next_prefix;
-    case 0x2e: /* CS override */
-    case 0x3e: /* DS override */
-    case 0x26: /* ES override */
-    case 0x64: /* FS override */
-    case 0x65: /* GS override */
-    case 0x36: /* SS override */
-        DPRINTF("Warning: ignoring a segment override. Probably okay. :-)\n");
-        goto next_prefix;
-    case 0xf0: /* LOCK */
-        lock_prefix = 1;
-        goto next_prefix;
-    case 0xf3: /* REP/REPE/REPZ */
-        rep_prefix = 1;
-        goto next_prefix;
-    case 0xf2: /* REPNE/REPNZ */
-        goto next_prefix;
+        switch ( b = insn_fetch(u8, 1, _regs.eip) )
+        {
+        case 0x66: /* operand-size override */
+            op_bytes ^= 6;                    /* switch between 2/4 bytes */
+            break;
+        case 0x67: /* address-size override */
+            ad_bytes ^= (mode == 8) ? 12 : 6; /* switch between 2/4/8 bytes */
+            break;
+        case 0x2e: /* CS override */
+        case 0x3e: /* DS override */
+        case 0x26: /* ES override */
+        case 0x64: /* FS override */
+        case 0x65: /* GS override */
+        case 0x36: /* SS override */
+            DPRINTF("Warning: ignoring a segment override.\n");
+            break;
+        case 0xf0: /* LOCK */
+            lock_prefix = 1;
+            break;
+        case 0xf3: /* REP/REPE/REPZ */
+            rep_prefix = 1;
+            break;
+        case 0xf2: /* REPNE/REPNZ */
+            break;
+        default:
+            goto done_prefixes;
+        }
     }
+ done_prefixes:
 
     if ( ad_bytes == 2 )
     {
@@ -551,7 +557,8 @@ x86_emulate_memop(
         dst.ptr   = (unsigned long *)cr2;
         dst.bytes = (d & ByteOp) ? 1 : op_bytes;
         if ( !(d & Mov) && /* optimisation - avoid slow emulated read */
-             ops->read_emulated((unsigned long)dst.ptr, &dst.val, dst.bytes) )
+             ((rc = ops->read_emulated((unsigned long)dst.ptr,
+                                       &dst.val, dst.bytes)) != 0) )
              goto done;
         break;
     }
@@ -585,7 +592,8 @@ x86_emulate_memop(
         src.type  = OP_MEM;
         src.ptr   = (unsigned long *)cr2;
         src.bytes = (d & ByteOp) ? 1 : op_bytes;
-        if ( ops->read_emulated((unsigned long)src.ptr, &src.val, src.bytes) )
+        if ( (rc = ops->read_emulated((unsigned long)src.ptr, 
+                                      &src.val, src.bytes)) != 0 )
             goto done;
         src.orig_val = src.val;
         break;
@@ -659,6 +667,7 @@ x86_emulate_memop(
         src.val ^= dst.val;
         dst.val ^= src.val;
         src.val ^= dst.val;
+        lock_prefix = 1;
         break;
     case 0xa0 ... 0xa1: /* mov */
         dst.ptr = (unsigned long *)&_regs.eax;
@@ -677,7 +686,7 @@ x86_emulate_memop(
         /* 64-bit mode: POP defaults to 64-bit operands. */
         if ( (mode == 8) && (dst.bytes == 4) )
             dst.bytes = 8;
-        if ( ops->read_std(_regs.esp, &dst.val, dst.bytes) )
+        if ( (rc = ops->read_std(_regs.esp, &dst.val, dst.bytes)) != 0 )
             goto done;
         _regs.esp += dst.bytes;
         break;
@@ -754,11 +763,12 @@ x86_emulate_memop(
             if ( (mode == 8) && (dst.bytes == 4) )
             {
                 dst.bytes = 8;
-                if ( ops->read_std((unsigned long)dst.ptr, &dst.val, 8) )
+                if ( (rc = ops->read_std((unsigned long)dst.ptr,
+                                         &dst.val, 8)) != 0 )
                     goto done;
             }
             _regs.esp -= dst.bytes;
-            if ( ops->write_std(_regs.esp, dst.val, dst.bytes) )
+            if ( (rc = ops->write_std(_regs.esp, dst.val, dst.bytes)) != 0 )
                 goto done;
             dst.val = dst.orig_val; /* skanky: disable writeback */
             break;
@@ -785,22 +795,13 @@ x86_emulate_memop(
             break;
         case OP_MEM:
             if ( lock_prefix )
-            {
-                unsigned long seen;
-                if ( ops->cmpxchg_emulated((unsigned long)dst.ptr,
-                                           dst.orig_val, dst.val,
-                                           &seen, dst.bytes) )
-                    goto done;
-                if ( seen != dst.orig_val )
-                    goto done; /* Try again... */
-            }
+                rc = ops->cmpxchg_emulated(
+                    (unsigned long)dst.ptr, dst.orig_val, dst.val, dst.bytes);
             else
-            {
-                if ( ops->write_emulated((unsigned long)dst.ptr,
-                                         dst.val, dst.bytes) )
-                    goto done;
-            }
-            break;
+                rc = ops->write_emulated(
+                    (unsigned long)dst.ptr, dst.val, dst.bytes);
+            if ( rc != 0 )
+                goto done;
         default:
             break;
         }
@@ -810,7 +811,7 @@ x86_emulate_memop(
     *regs = _regs;
 
  done:
-    return 0;
+    return (rc == X86EMUL_UNHANDLEABLE) ? -1 : 0;
 
  special_insn:
     if ( twobyte )
@@ -834,15 +835,15 @@ x86_emulate_memop(
         {
             /* Write fault: destination is special memory. */
             dst.ptr = (unsigned long *)cr2;
-            if ( ops->read_std(_regs.esi - _regs.edi + cr2, 
-                               &dst.val, dst.bytes) )
+            if ( (rc = ops->read_std(_regs.esi - _regs.edi + cr2, 
+                                     &dst.val, dst.bytes)) != 0 )
                 goto done;
         }
         else
         {
             /* Read fault: source is special memory. */
             dst.ptr = (unsigned long *)(_regs.edi - _regs.esi + cr2);
-            if ( ops->read_emulated(cr2, &dst.val, dst.bytes) )
+            if ( (rc = ops->read_emulated(cr2, &dst.val, dst.bytes)) != 0 )
                 goto done;
         }
         _regs.esi += (_regs.eflags & EFLG_DF) ? -dst.bytes : dst.bytes;
@@ -862,7 +863,7 @@ x86_emulate_memop(
         dst.type  = OP_REG;
         dst.bytes = (d & ByteOp) ? 1 : op_bytes;
         dst.ptr   = (unsigned long *)&_regs.eax;
-        if ( ops->read_emulated(cr2, &dst.val, dst.bytes) )
+        if ( (rc = ops->read_emulated(cr2, &dst.val, dst.bytes)) != 0 )
             goto done;
         _regs.esi += (_regs.eflags & EFLG_DF) ? -dst.bytes : dst.bytes;
         break;
@@ -966,3 +967,39 @@ x86_emulate_memop(
     DPRINTF("Cannot emulate %02x\n", b);
     return -1;
 }
+
+#ifndef __TEST_HARNESS__
+
+#include <asm/mm.h>
+#include <asm/uaccess.h>
+
+int
+x86_emulate_read_std(
+    unsigned long addr,
+    unsigned long *val,
+    unsigned int bytes)
+{
+    *val = 0;
+    if ( copy_from_user((void *)val, (void *)addr, bytes) )
+    {
+        propagate_page_fault(addr, 4); /* user mode, read fault */
+        return X86EMUL_PROPAGATE_FAULT;
+    }
+    return X86EMUL_CONTINUE;
+}
+
+int
+x86_emulate_write_std(
+    unsigned long addr,
+    unsigned long val,
+    unsigned int bytes)
+{
+    if ( copy_to_user((void *)addr, (void *)&val, bytes) )
+    {
+        propagate_page_fault(addr, 6); /* user mode, write fault */
+        return X86EMUL_PROPAGATE_FAULT;
+    }
+    return X86EMUL_CONTINUE;
+}
+
+#endif
