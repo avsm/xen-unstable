@@ -67,7 +67,7 @@
 
         ALIGN
 restore_all_guest:
-        testb $TF_failsafe_return,DOMAIN_thread_flags(%ebx)
+        testb $TF_failsafe_return,EDOMAIN_thread_flags(%ebx)
         jnz  failsafe_callback
         testl $X86_EFLAGS_VM,XREGS_eflags(%esp)
         jnz  restore_all_vm86
@@ -110,9 +110,9 @@ FIX1:   SET_XEN_SEGMENTS(a)
 DBLFLT1:GET_CURRENT(%ebx)
         jmp   test_all_events
 DBLFIX1:GET_CURRENT(%ebx)
-        testb $TF_failsafe_return,DOMAIN_thread_flags(%ebx)
+        testb $TF_failsafe_return,EDOMAIN_thread_flags(%ebx)
         jnz   domain_crash             # cannot reenter failsafe code
-        orb   $TF_failsafe_return,DOMAIN_thread_flags(%ebx)
+        orb   $TF_failsafe_return,EDOMAIN_thread_flags(%ebx)
         jmp   test_all_events          # will return via failsafe code
 .previous
 .section __pre_ex_table,"a"
@@ -129,11 +129,11 @@ DBLFIX1:GET_CURRENT(%ebx)
 /* No special register assumptions */
 failsafe_callback:
         GET_CURRENT(%ebx)
-        andb $~TF_failsafe_return,DOMAIN_thread_flags(%ebx)
-        leal DOMAIN_trap_bounce(%ebx),%edx
-        movl DOMAIN_failsafe_addr(%ebx),%eax
+        andb $~TF_failsafe_return,EDOMAIN_thread_flags(%ebx)
+        leal EDOMAIN_trap_bounce(%ebx),%edx
+        movl EDOMAIN_failsafe_addr(%ebx),%eax
         movl %eax,TRAPBOUNCE_eip(%edx)
-        movl DOMAIN_failsafe_sel(%ebx),%eax
+        movl EDOMAIN_failsafe_sel(%ebx),%eax
         movw %ax,TRAPBOUNCE_cs(%edx)
         movw $TBF_FAILSAFE,TRAPBOUNCE_flags(%edx)
         call create_bounce_frame
@@ -149,7 +149,7 @@ FLT6:   iret
 .section .fixup,"ax"
 FIX6:   pushl %ebx
         GET_CURRENT(%ebx)
-        orb   $TF_failsafe_return,DOMAIN_thread_flags(%ebx)
+        orb   $TF_failsafe_return,EDOMAIN_thread_flags(%ebx)
         pop   %ebx
         jmp   FIX5
 .section __pre_ex_table,"a"
@@ -185,26 +185,26 @@ test_all_events:
         notl %ecx
         cli                             # tests must not race interrupts
 /*test_softirqs:*/  
-        movl DOMAIN_processor(%ebx),%eax
+        movl EDOMAIN_processor(%ebx),%eax
         shl  $6,%eax                    # sizeof(irq_cpustat) == 64
         test %ecx,SYMBOL_NAME(irq_stat)(%eax,1)
         jnz  process_softirqs
 /*test_guest_events:*/
-        movl DOMAIN_shared_info(%ebx),%eax
-        testb $0xFF,SHINFO_upcall_mask(%eax)
+        movl EDOMAIN_vcpu_info(%ebx),%eax
+        testb $0xFF,VCPUINFO_upcall_mask(%eax)
         jnz  restore_all_guest
-        testb $0xFF,SHINFO_upcall_pending(%eax)
+        testb $0xFF,VCPUINFO_upcall_pending(%eax)
         jz   restore_all_guest
 /*process_guest_events:*/
-        leal DOMAIN_trap_bounce(%ebx),%edx
-        movl DOMAIN_event_addr(%ebx),%eax
+        leal EDOMAIN_trap_bounce(%ebx),%edx
+        movl EDOMAIN_event_addr(%ebx),%eax
         movl %eax,TRAPBOUNCE_eip(%edx)
-        movl DOMAIN_event_sel(%ebx),%eax
+        movl EDOMAIN_event_sel(%ebx),%eax
         movw %ax,TRAPBOUNCE_cs(%edx)
         movw $TBF_INTERRUPT,TRAPBOUNCE_flags(%edx)
         call create_bounce_frame
-        movl DOMAIN_shared_info(%ebx),%eax
-        movb $1,SHINFO_upcall_mask(%eax) # Upcalls are masked during delivery
+        movl EDOMAIN_vcpu_info(%ebx),%eax
+        movb $1,VCPUINFO_upcall_mask(%eax) # Upcalls are masked during delivery
         jmp  restore_all_guest
 
         ALIGN
@@ -223,7 +223,7 @@ create_bounce_frame:
         testl $(2|X86_EFLAGS_VM),%ecx
         jz   ring1 /* jump if returning to an existing ring-1 activation */
         /* obtain ss/esp from TSS -- no current ring-1 activations */
-        movl DOMAIN_processor(%ebx),%eax
+        movl EDOMAIN_processor(%ebx),%eax
         /* next 4 lines multiply %eax by 8320, which is sizeof(tss_struct) */
         movl %eax, %ecx
         shll $7, %ecx
@@ -334,7 +334,7 @@ DBLFLT2:jmp   process_guest_exception_and_events
 
         ALIGN
 process_guest_exception_and_events:
-        leal DOMAIN_trap_bounce(%ebx),%edx
+        leal EDOMAIN_trap_bounce(%ebx),%edx
         testb $TBF_EXCEPTION,TRAPBOUNCE_flags(%edx)
         jz   test_all_events
         cli  # create_bounce_frame needs CLI for pre-exceptions to work
@@ -668,6 +668,7 @@ ENTRY(hypercall_table)
         .long SYMBOL_NAME(do_vm_assist)
         .long SYMBOL_NAME(do_update_va_mapping_otherdomain)
         .long SYMBOL_NAME(do_switch_vm86)
+        .long SYMBOL_NAME(do_boot_vcpu)
         .rept NR_hypercalls-((.-hypercall_table)/4)
         .long SYMBOL_NAME(do_ni_hypercall)
         .endr

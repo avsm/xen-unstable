@@ -135,6 +135,7 @@
 #ifndef __ASSEMBLY__
 
 struct domain;
+struct exec_domain;
 
 /*
  * Default implementation of macro that returns current
@@ -456,7 +457,7 @@ extern struct desc_struct *idt_tables[];
             &((_p)->fast_trap_desc), 8))
 #endif
 
-long set_fast_trap(struct domain *p, int idx);
+long set_fast_trap(struct exec_domain *p, int idx);
 
 #endif
 
@@ -469,7 +470,7 @@ struct mm_struct {
      * Every domain has a L1 pagetable of its own. Per-domain mappings
      * are put in this table (eg. the current GDT is mapped here).
      */
-    l1_pgentry_t *perdomain_pt;
+    l1_pgentry_t *perdomain_ptes;
     pagetable_t  pagetable;
 
     /* shadow mode status and controls */
@@ -515,8 +516,8 @@ static inline void write_ptbase(struct mm_struct *mm)
 
 #define IDLE0_MM                                                    \
 {                                                                   \
-    perdomain_pt: 0,                                                \
-    pagetable:   mk_pagetable(__pa(idle_pg_table))                  \
+    perdomain_ptes: 0,                                              \
+    pagetable:      mk_pagetable(__pa(idle_pg_table))               \
 }
 
 /* Convenient accessor for mm.gdt. */
@@ -525,12 +526,12 @@ static inline void write_ptbase(struct mm_struct *mm)
 #define GET_GDT_ENTRIES(_p)     (((*(u16 *)((_p)->mm.gdt + 0))+1)>>3)
 #define GET_GDT_ADDRESS(_p)     (*(unsigned long *)((_p)->mm.gdt + 2))
 
-void destroy_gdt(struct domain *d);
-long set_gdt(struct domain *d, 
+void destroy_gdt(struct exec_domain *d);
+long set_gdt(struct exec_domain *d, 
              unsigned long *frames, 
              unsigned int entries);
 
-long set_debugreg(struct domain *p, int reg, unsigned long value);
+long set_debugreg(struct exec_domain *p, int reg, unsigned long value);
 
 struct microcode {
     unsigned int hdrver;
