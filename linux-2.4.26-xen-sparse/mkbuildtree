@@ -221,6 +221,7 @@ ln -sf ../../i386/kernel/sys_i386.c
 ln -sf ../../../${LINUX_26}/arch/xen/kernel/ctrl_if.c
 ln -sf ../../../${LINUX_26}/arch/xen/kernel/evtchn.c
 ln -sf ../../../${LINUX_26}/arch/xen/i386/kernel/ioport.c
+ln -sf ../../../${LINUX_26}/arch/xen/i386/kernel/pci-dma.c
 
 cd ${AD}/arch/xen/lib
 ln -sf ../../i386/lib/checksum.S 
@@ -256,3 +257,7 @@ ln -sf ../../../../../${LINUX_26}/drivers/xen/netback/common.h
 ln -sf ../../../../../${LINUX_26}/drivers/xen/netback/control.c
 ln -sf ../../../../../${LINUX_26}/drivers/xen/netback/interface.c
 ln -sf ../../../../../${LINUX_26}/drivers/xen/netback/netback.c main.c
+
+cd ${AD}/arch/xen/drivers/blkif/backend
+ln -sf ../../../../../${LINUX_26}/drivers/xen/blkback/control.c
+ln -sf ../../../../../${LINUX_26}/drivers/xen/blkback/interface.c
