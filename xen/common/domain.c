@@ -18,6 +18,7 @@
 #include <asm/shadow.h>
 #include <public/dom0_ops.h>
 #include <asm/domain_page.h>
+#include <asm/debugger.h>
 
 /* Both these structures are protected by the domlist_lock. */
 rwlock_t domlist_lock = RW_LOCK_UNLOCKED;
@@ -161,6 +162,8 @@ void domain_crash(void)
     BUG();
 }
 
+extern void trap_to_xendbg(void);
+
 void domain_shutdown(u8 reason)
 {
     struct domain *d = current->domain;
@@ -169,6 +172,8 @@ void domain_shutdown(u8 reason)
     {
         extern void machine_restart(char *);
         extern void machine_halt(void);
+
+        debugger_trap_immediate();
 
         if ( reason == 0 ) 
         {
