@@ -118,6 +118,7 @@
 3e6e7c1efbQe93xCvOpOVCnXTMmQ5w linux-2.4.26-xen-sparse/mkbuildtree
 406aeeafkrnCuIVWLFv3kfn4uAD5Eg linux-2.4.26-xen-sparse/mm/highmem.c
 3e5a4e68GxCIaFH4sy01v1wjapetaA linux-2.4.26-xen-sparse/mm/memory.c
+411ce99d_uOUTK61pkqbdIAi1CIaSA linux-2.4.26-xen-sparse/mm/mmap.c
 3f108af5VxPkLv13tXpXgoRKALQtXQ linux-2.4.26-xen-sparse/mm/mprotect.c
 3e5a4e681xMPdF9xCMwpyfuYMySU5g linux-2.4.26-xen-sparse/mm/mremap.c
 409ba2e7akOFqQUg6Qyg2s28xcXiMg linux-2.4.26-xen-sparse/mm/page_alloc.c
@@ -584,10 +585,7 @@
 3ddb79bfyX7-pD6XdxY_mdNrJR20iw xen/drivers/pci/pci.c
 3ddb79bf2AS7YBGwooE_Kbv7XgUqNQ xen/drivers/pci/pci.ids
 3ddb79bf7sTn85WtP_8Nc2YEmmVExQ xen/drivers/pci/quirks.c
-3ddb79bfkVLMq5CWjZLACPDivqxq_w xen/drivers/pci/setup-bus.c
-3ddb79bfl1H1arbB0pzAEC2uPmY_3g xen/drivers/pci/setup-irq.c
 3ddb79bfJaf0bkE1Y67bnll8-kjEPg xen/drivers/pci/setup-res.c
-3ddb79bfIcCWJsBDNcQQE3ok2Azn-Q xen/drivers/pci/syscall.c
 3eb3c87fc79FXLA6R9TvdBJNTvQDwA xen/figlet/LICENSE
 3eb3c87fPL2T_zBb0bHlbZY-ACEKRw xen/figlet/Makefile
 3eb3c87fmKYTC5GCh_rydFakZp9ayw xen/figlet/README
