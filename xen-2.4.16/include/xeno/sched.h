@@ -48,7 +48,6 @@ extern struct mm_struct init_mm;
 #define _HYP_EVENT_NEED_RESCHED 0
 #define _HYP_EVENT_NET_RX       1
 #define _HYP_EVENT_DIE          2
-#define _HYP_EVENT_BLK_RX       3
 
 #define PF_DONEFPUINIT  0x1  /* Has the FPU been initialised for this task? */
 #define PF_USEDFPU      0x2  /* Has this task used the FPU since last save? */
@@ -77,8 +76,7 @@ struct task_struct {
 
     /* Block I/O */
     blk_ring_t *blk_ring_base;
-    struct list_head io_done_queue;
-    spinlock_t io_done_queue_lock;
+    spinlock_t blk_ring_lock;
 
     int has_cpu, policy, counter;
 
@@ -155,7 +153,7 @@ union task_union {
 extern union task_union idle0_task_union;
 extern struct task_struct first_task_struct;
 
-extern struct task_struct *do_newdomain(void);
+extern struct task_struct *do_newdomain(unsigned int dom_id, unsigned int cpu);
 extern int setup_guestos(struct task_struct *p, dom0_newdomain_t *params);
 extern int final_setup_guestos(struct task_struct *p, dom_meminfo_t *);
 
