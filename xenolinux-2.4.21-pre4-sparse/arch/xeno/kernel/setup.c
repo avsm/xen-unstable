@@ -301,10 +301,13 @@ void __init setup_arch(char **cmdline_p)
 
     paging_init();
 
-    if ( start_info.flags & SIF_PRIVILEGED ) 
+    current->thread.hypercall_pl = 1;
+    if ( start_info.flags & SIF_PRIVILEGED ) {
+        current->thread.io_pl = 1;
         /* We are privileged guest os - should have IO privileges. */
         if( HYPERVISOR_set_priv_levels(1, 1) )
             panic("Unable to obtain IOPL, despite being SIF_PRIVILEGED");
+    }
 
     if(start_info.flags & SIF_CONSOLE)
     {

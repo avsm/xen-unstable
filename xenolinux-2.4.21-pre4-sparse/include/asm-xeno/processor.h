@@ -356,7 +356,7 @@ struct thread_struct {
 	unsigned long	esp;
 	unsigned long	fs;
 	unsigned long	gs;
-	unsigned int	hypercall_pl;
+	unsigned int	io_pl, hypercall_pl;
 /* Hardware debugging registers */
 	unsigned long	debugreg[8];  /* %%db0-7 debug registers */
 /* fault info */
@@ -369,7 +369,8 @@ struct thread_struct {
 	unsigned long		v86flags, v86mask, saved_esp0;
 };
 
-#define INIT_THREAD  { 0, 0, 0, 0, 0, 1, {0}, 0, 0, 0, {0}, 0, 0, 0, 0, 0 }
+#define INIT_THREAD  { sizeof(init_stack) + (long) &init_stack, \
+                       0, 0, 0, 0, 0, 0, {0}, 0, 0, 0, {0}, 0, 0, 0, 0, 0 }
 
 #define INIT_TSS  {						\
 	0,0, /* back_link, __blh */				\
