@@ -46,8 +46,7 @@
 #include <asm/i387.h>
 #include <asm/irq.h>
 #include <asm/desc.h>
-#include <asm-xen/multicall.h>
-#include <asm-xen/xen-public/dom0_ops.h>
+#include <asm-xen/xen-public/physdev.h>
 #ifdef CONFIG_MATH_EMULATION
 #include <asm/math_emu.h>
 #endif
@@ -94,10 +93,11 @@ EXPORT_SYMBOL(enable_hlt);
 extern int set_timeout_timer(void);
 void xen_idle(void)
 {
-	int cpu = smp_processor_id();
+	int cpu;
 
 	local_irq_disable();
 
+	cpu = smp_processor_id();
 	if (rcu_pending(cpu))
 		rcu_check_callbacks(cpu, 0);
 
@@ -227,20 +227,11 @@ void exit_thread(void)
 
 	/* The process may have allocated an io port bitmap... nuke it. */
 	if (unlikely(NULL != t->io_bitmap_ptr)) {
-		int cpu = get_cpu();
-		struct tss_struct *tss = &per_cpu(init_tss, cpu);
-
+		physdev_op_t op = { 0 };
+		op.cmd = PHYSDEVOP_SET_IOBITMAP;
+		HYPERVISOR_physdev_op(&op);
 		kfree(t->io_bitmap_ptr);
 		t->io_bitmap_ptr = NULL;
-		/*
-		 * Careful, clear this in the TSS too:
-		 */
-		memset(tss->io_bitmap, 0xff, tss->io_bitmap_max);
-		t->io_bitmap_max = 0;
-		tss->io_bitmap_owner = NULL;
-		tss->io_bitmap_max = 0;
-		tss->io_bitmap_base = INVALID_IO_BITMAP_OFFSET;
-		put_cpu();
 	}
 }
 
@@ -289,7 +280,6 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long esp,
 	struct pt_regs * childregs;
 	struct task_struct *tsk;
 	int err;
-	unsigned long eflags;
 
 	childregs = ((struct pt_regs *) (THREAD_SIZE + (unsigned long) p->thread_info)) - 1;
 	*childregs = *regs;
@@ -339,9 +329,7 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long esp,
 		desc->b = LDT_entry_b(&info);
 	}
 
-
-	__asm__ __volatile__ ( "pushfl; popl %0" : "=r" (eflags) : );
-	p->thread.io_pl = (eflags >> 12) & 3;
+        p->thread.io_pl = current->thread.io_pl;
 
 	err = 0;
  out:
@@ -414,37 +402,6 @@ int dump_task_regs(struct task_struct *tsk, elf_gregset_t *regs)
 	return 1;
 }
 
-static inline void
-handle_io_bitmap(struct thread_struct *next, struct tss_struct *tss)
-{
-	if (!next->io_bitmap_ptr) {
-		/*
-		 * Disable the bitmap via an invalid offset. We still cache
-		 * the previous bitmap owner and the IO bitmap contents:
-		 */
-		tss->io_bitmap_base = INVALID_IO_BITMAP_OFFSET;
-		return;
-	}
-	if (likely(next == tss->io_bitmap_owner)) {
-		/*
-		 * Previous owner of the bitmap (hence the bitmap content)
-		 * matches the next task, we dont have to do anything but
-		 * to set a valid offset in the TSS:
-		 */
-		tss->io_bitmap_base = IO_BITMAP_OFFSET;
-		return;
-	}
-	/*
-	 * Lazy TSS's I/O bitmap copy. We set an invalid offset here
-	 * and we let the task to get a GPF in case an I/O instruction
-	 * is performed.  The handler of the GPF will verify that the
-	 * faulting task has a valid I/O bitmap and, it true, does the
-	 * real copy and restart the instruction.  This will save us
-	 * redundant copies when the currently switched task does not
-	 * perform any I/O during its timeslice.
-	 */
-	tss->io_bitmap_base = INVALID_IO_BITMAP_OFFSET_LAZY;
-}
 /*
  * This special macro can be used to load a debugging register
  */
@@ -485,10 +442,8 @@ struct task_struct fastcall * __switch_to(struct task_struct *prev_p, struct tas
 				 *next = &next_p->thread;
 	int cpu = smp_processor_id();
 	struct tss_struct *tss = &per_cpu(init_tss, cpu);
-	dom0_op_t op;
-
-        /* NB. No need to disable interrupts as already done in sched.c */
-        /* __cli(); */
+	physdev_op_t iopl_op, iobmp_op;
+	multicall_entry_t _mcl[8], *mcl = _mcl;
 
 	/*
 	 * Save away %fs and %gs. No need to save %es and %ds, as
@@ -505,8 +460,6 @@ struct task_struct fastcall * __switch_to(struct task_struct *prev_p, struct tas
 		"xorl %%eax,%%eax; movl %%eax,%%fs; movl %%eax,%%gs" : : :
 		"eax" );
 
-	MULTICALL_flush_page_update_queue();
-
 	/* never put a printk in __switch_to... printk() calls wake_up*() indirectly */
 
 	/*
@@ -516,7 +469,9 @@ struct task_struct fastcall * __switch_to(struct task_struct *prev_p, struct tas
 	 */
 	if (prev_p->thread_info->status & TS_USEDFPU) {
 		__save_init_fpu(prev_p); /* _not_ save_init_fpu() */
-		queue_multicall0(__HYPERVISOR_fpu_taskswitch);
+		mcl->op      = __HYPERVISOR_fpu_taskswitch;
+		mcl->args[0] = 1;
+		mcl++;
 	}
 
 	/*
@@ -524,35 +479,50 @@ struct task_struct fastcall * __switch_to(struct task_struct *prev_p, struct tas
 	 * This is load_esp0(tss, next) with a multicall.
 	 */
 	tss->esp0 = next->esp0;
-	queue_multicall2(__HYPERVISOR_stack_switch, tss->ss0, tss->esp0);
+	mcl->op      = __HYPERVISOR_stack_switch;
+	mcl->args[0] = tss->ss0;
+	mcl->args[1] = tss->esp0;
+	mcl++;
 
 	/*
 	 * Load the per-thread Thread-Local Storage descriptor.
 	 * This is load_TLS(next, cpu) with multicalls.
 	 */
-#define C(i) do {							    \
-	if (unlikely(next->tls_array[i].a != prev->tls_array[i].a ||	    \
-		     next->tls_array[i].b != prev->tls_array[i].b))	    \
-		queue_multicall3(__HYPERVISOR_update_descriptor,	    \
-				 virt_to_machine(&get_cpu_gdt_table(cpu)    \
-						 [GDT_ENTRY_TLS_MIN + i]),  \
-				 ((u32 *)&next->tls_array[i])[0],	    \
-				 ((u32 *)&next->tls_array[i])[1]);	    \
+#define C(i) do {                                                       \
+	if (unlikely(next->tls_array[i].a != prev->tls_array[i].a ||    \
+		     next->tls_array[i].b != prev->tls_array[i].b)) {   \
+		mcl->op      = __HYPERVISOR_update_descriptor;          \
+		mcl->args[0] = virt_to_machine(&get_cpu_gdt_table(cpu)  \
+					 [GDT_ENTRY_TLS_MIN + i]);      \
+		mcl->args[1] = ((u32 *)&next->tls_array[i])[0];         \
+		mcl->args[2] = ((u32 *)&next->tls_array[i])[1];         \
+		mcl++;                                                  \
+	}                                                               \
 } while (0)
 	C(0); C(1); C(2);
 #undef C
 
-	if (xen_start_info.flags & SIF_PRIVILEGED) {
-		op.cmd           = DOM0_IOPL;
-		op.u.iopl.domain = DOMID_SELF;
-		op.u.iopl.iopl   = next->io_pl;
-		op.interface_version = DOM0_INTERFACE_VERSION;
-		queue_multicall1(__HYPERVISOR_dom0_op, (unsigned long)&op);
+	if (unlikely(prev->io_pl != next->io_pl)) {
+		iopl_op.cmd             = PHYSDEVOP_SET_IOPL;
+		iopl_op.u.set_iopl.iopl = next->io_pl;
+		mcl->op      = __HYPERVISOR_physdev_op;
+		mcl->args[0] = (unsigned long)&iopl_op;
+		mcl++;
 	}
 
-	/* EXECUTE ALL TASK SWITCH XEN SYSCALLS AT THIS POINT. */
-	execute_multicall_list();
-        /* __sti(); */
+	if (unlikely(prev->io_bitmap_ptr || next->io_bitmap_ptr)) {
+		iobmp_op.cmd                     =
+			PHYSDEVOP_SET_IOBITMAP;
+		iobmp_op.u.set_iobitmap.bitmap   =
+			(unsigned long)next->io_bitmap_ptr;
+		iobmp_op.u.set_iobitmap.nr_ports =
+			next->io_bitmap_ptr ? IO_BITMAP_BITS : 0;
+		mcl->op      = __HYPERVISOR_physdev_op;
+		mcl->args[0] = (unsigned long)&iobmp_op;
+		mcl++;
+	}
+
+	(void)HYPERVISOR_multicall(_mcl, mcl - _mcl);
 
 	/*
 	 * Restore %fs and %gs if needed.
@@ -574,9 +544,6 @@ struct task_struct fastcall * __switch_to(struct task_struct *prev_p, struct tas
 		loaddebug(next, 6);
 		loaddebug(next, 7);
 	}
-
-	if (unlikely(prev->io_bitmap_ptr || next->io_bitmap_ptr))
-		handle_io_bitmap(next, tss);
 
 	return prev_p;
 }

@@ -120,3 +120,13 @@ int get_tb_info(dom0_gettbufs_t *st)
         return -ENODATA;
     }
 }
+
+/*
+ * Local variables:
+ * mode: C
+ * c-set-style: "BSD"
+ * c-basic-offset: 4
+ * tab-width: 4
+ * indent-tabs-mode: nil
+ * End:
+ */
