@@ -2,6 +2,8 @@ COMPILE_ARCH := $(shell uname -m | sed -e s/i.86/i386/)
 TARGET_ARCH  ?= $(COMPILE_ARCH)
 
 nodev ?= n
+debug ?= n
+trace ?= n
 
 TARGET  := $(BASEDIR)/xen
 HDRS    := $(wildcard $(BASEDIR)/include/xen/*.h)
@@ -47,6 +49,10 @@ endif
 
 ifeq ($(nodev),y)
 CFLAGS += -DNO_DEVICES_IN_XEN
+endif
+
+ifeq ($(trace),y)
+CFLAGS += -DTRACE_BUFFER
 endif
 
 %.o: %.c $(HDRS) Makefile
