@@ -48,6 +48,10 @@ union xen_start_info_union
 extern union xen_start_info_union xen_start_info_union;
 #define xen_start_info (xen_start_info_union.xen_start_info)
 
+/* arch/xen/kernel/evtchn.c */
+/* Force a proper event-channel callback from Xen. */
+void force_evtchn_callback(void);
+
 /* arch/xen/kernel/process.c */
 void xen_cpu_idle (void);
 
@@ -69,8 +73,6 @@ void lgdt_finish(void);
  * NB. ptr values should be PHYSICAL, not MACHINE. 'vals' should be already
  * be MACHINE addresses.
  */
-
-extern unsigned int mmu_update_queue_idx;
 
 void queue_l1_entry_update(pte_t *ptr, unsigned long val);
 void queue_l2_entry_update(pmd_t *ptr, unsigned long val);
@@ -96,12 +98,11 @@ void xen_set_ldt(unsigned long ptr, unsigned long bytes);
 void xen_machphys_update(unsigned long mfn, unsigned long pfn);
 
 void _flush_page_update_queue(void);
-static inline int flush_page_update_queue(void)
-{
-    unsigned int idx = mmu_update_queue_idx;
-    if ( idx != 0 ) _flush_page_update_queue();
-    return idx;
-}
+#define flush_page_update_queue() do {				\
+    DECLARE_PER_CPU(unsigned int, mmu_update_queue_idx);	\
+    if (per_cpu(mmu_update_queue_idx, smp_processor_id()))	\
+	_flush_page_update_queue();				\
+} while (0)
 #define xen_flush_page_update_queue() (_flush_page_update_queue())
 #define XEN_flush_page_update_queue() (_flush_page_update_queue())
 void MULTICALL_flush_page_update_queue(void);
@@ -558,6 +559,22 @@ HYPERVISOR_vm_assist(
         : "=a" (ret), "=b" (ign1), "=c" (ign2)
 	: "0" (__HYPERVISOR_vm_assist), "1" (cmd), "2" (type)
 	: "memory" );
+
+    return ret;
+}
+
+static inline int
+HYPERVISOR_boot_vcpu(
+    unsigned long vcpu, full_execution_context_t *ctxt)
+{
+    int ret;
+    unsigned long ign1, ign2;
+
+    __asm__ __volatile__ (
+        TRAP_INSTR
+        : "=a" (ret), "=b" (ign1), "=c" (ign2)
+	: "0" (__HYPERVISOR_boot_vcpu), "1" (vcpu), "2" (ctxt)
+	: "memory");
 
     return ret;
 }

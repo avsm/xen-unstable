@@ -80,6 +80,18 @@ VM_MASK		= 0x00020000
 #define evtchn_upcall_pending		/* 0 */
 #define evtchn_upcall_mask		1
 
+#define sizeof_vcpu_shift		3
+
+#ifdef CONFIG_SMP
+#define XEN_GET_VCPU_INFO(reg)	movl TI_cpu(%ebp),reg			; \
+				shl  $sizeof_vcpu_shift,reg		; \
+    				addl HYPERVISOR_shared_info,reg
+#define GET_THREAD_INFO_IF_SMP(reg) GET_THREAD_INFO(reg)
+#else
+#define XEN_GET_VCPU_INFO(reg)	movl HYPERVISOR_shared_info,reg
+#define GET_THREAD_INFO_IF_SMP(reg)
+#endif
+
 #define XEN_BLOCK_EVENTS(reg)	movb $1,evtchn_upcall_mask(reg)
 #define XEN_UNBLOCK_EVENTS(reg)	movb $0,evtchn_upcall_mask(reg)
 #define XEN_TEST_PENDING(reg)	testb $0xFF,evtchn_upcall_pending(reg)
@@ -104,11 +116,12 @@ VM_MASK		= 0x00020000
 	pushl %ebx; \
 	movl $(__USER_DS), %edx; \
 	movl %edx, %ds; \
-	movl %edx, %es
+	movl %edx, %es; \
+	GET_THREAD_INFO_IF_SMP(%ebp); 
 
 #define SAVE_ALL \
 	SAVE_ALL_NO_EVENTMASK; \
-	movl HYPERVISOR_shared_info, %esi; \
+	XEN_GET_VCPU_INFO(%esi); \
 	movb evtchn_upcall_mask(%esi), %dl; \
 	movb %dl, EVENT_MASK(%esp)
 
@@ -468,7 +481,8 @@ error_code:
 	movl $(__USER_DS), %edx
 	movl %edx, %ds
 	movl %edx, %es
-	movl HYPERVISOR_shared_info, %esi
+	GET_THREAD_INFO_IF_SMP(%ebp) 
+	XEN_GET_VCPU_INFO(%esi)
 	movb evtchn_upcall_mask(%esi), %dl
 	movb %dl, EVENT_MASK+8(%esp)
 	call *%edi
@@ -494,7 +508,7 @@ ENTRY(hypervisor_callback)
 	jb   11f
 	cmpl $ecrit,%eax
 	jb   critical_region_fixup
-11:	movl HYPERVISOR_shared_info, %esi
+11:	XEN_GET_VCPU_INFO(%esi)
 	movb $0, EVENT_MASK(%esp)
 	push %esp
 	call evtchn_do_upcall
@@ -537,7 +551,7 @@ critical_region_fixup:
 	jmp  11b
 
 critical_fixup_table:
-	.byte 0x00,0x00,0x00		# testb $0xff,(%esi)
+	.byte 0x00,0x00,0x00		# testb $0x1,(%esi) = XEN_TEST_PENDING
 	.byte 0x00,0x00			# jnz  14f
 	.byte 0x00			# pop  %ebx
 	.byte 0x04			# pop  %ecx
@@ -748,7 +762,6 @@ ENTRY(page_fault)
 	decl %eax			/* eax = -1 */
 	pushl %ecx
 	pushl %ebx
-	GET_THREAD_INFO(%ebp)
 	cld
 	movl %es,%ecx
 	movl ORIG_EAX(%esp), %esi	/* get the error code */
@@ -762,7 +775,8 @@ ENTRY(page_fault)
 	movl $(__KERNEL_DS),%edx
 	movl %edx,%ds
 	movl %edx,%es
-	movl HYPERVISOR_shared_info, %esi
+	GET_THREAD_INFO_IF_SMP(%ebp) 
+	XEN_GET_VCPU_INFO(%esi)
 	movb evtchn_upcall_mask(%esi), %dl
 	movb %dl, EVENT_MASK+12(%esp)
 	call do_page_fault
