@@ -36,7 +36,22 @@ do { \
 #endif
 #define set_pte_atomic(pteptr, pteval) set_pte(pteptr, pteval)
 #else
+#if defined(CONFIG_XEN_DEBUG_NO_MMU_BATCHING)
+#define set_pte(pteptr, pteval)\
+    set_pte_batched(pteptr, pteval)
+
+#elif defined(CONFIG_XEN_BATCH_MODE1)
+#define set_pte(pteptr, pteval)({\
+    set_pte_batched(pteptr, pteval);\
+    _flush_page_update_queue();})
+
+#elif defined(CONFIG_XEN_BATCH_MODE2)
+#define set_pte(pteptr, pteval)\
+    set_pte_batched(pteptr, pteval)
+
+#else
 #define set_pte(pteptr, pteval) (*(pteptr) = pteval)
+#endif
 #define set_pte_atomic(pteptr, pteval) set_pte(pteptr,pteval)
 #endif
 /*

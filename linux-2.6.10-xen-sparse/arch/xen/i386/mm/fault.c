@@ -216,6 +216,11 @@ fastcall void do_invalid_op(struct pt_regs *, unsigned long);
  *	bit 1 == 0 means read, 1 means write
  *	bit 2 == 0 means kernel, 1 means user-mode
  */
+
+extern unsigned long c_do_page_fault;
+extern unsigned long c_minor_page_fault;
+extern unsigned long c_major_page_fault;
+
 fastcall void do_page_fault(struct pt_regs *regs, unsigned long error_code,
 			      unsigned long address)
 {
@@ -226,11 +231,19 @@ fastcall void do_page_fault(struct pt_regs *regs, unsigned long error_code,
 	int write;
 	siginfo_t info;
 
+    c_do_page_fault++;
+
 	/* Set the "privileged fault" bit to something sane. */
 	error_code &= 3;
 	error_code |= (regs->xcs & 2) << 1;
 	if (regs->eflags & X86_EFLAGS_VM)
 		error_code |= 4;
+
+#ifdef CONFIG_XEN_BATCH_MODE2
+    /* ensure all updates have completed */
+    flush_page_update_queue();
+#endif
+
 		
  	if (notify_die(DIE_PAGE_FAULT, "page fault", regs, error_code, 14,
  					SIGSEGV) == NOTIFY_STOP)
@@ -353,9 +366,11 @@ good_area:
 	switch (handle_mm_fault(mm, vma, address, write)) {
 		case VM_FAULT_MINOR:
 			tsk->min_flt++;
+            c_minor_page_fault++;
 			break;
 		case VM_FAULT_MAJOR:
 			tsk->maj_flt++;
+            c_major_page_fault++;
 			break;
 		case VM_FAULT_SIGBUS:
 			goto do_sigbus;

@@ -4,7 +4,9 @@
  * to extract and format the required data.
  */
 
+#include <xen/config.h>
 #include <xen/sched.h>
+#include <xen/config.h>
 
 #define DEFINE(_sym, _val) \
     __asm__ __volatile__ ( "\n->" #_sym " %0 " #_val : : "i" (_val) )
@@ -58,6 +60,12 @@ void __dummy__(void)
     OFFSET(TRAPBOUNCE_eip, struct trap_bounce, eip);
     BLANK();
 
+#if PERF_COUNTERS
+    OFFSET(PERFC_hypercalls, struct perfcounter, hypercalls);
+    OFFSET(PERFC_exceptions, struct perfcounter, exceptions);
+    BLANK();
+#endif
+
     OFFSET(MULTICALL_op, multicall_entry_t, op);
     OFFSET(MULTICALL_arg0, multicall_entry_t, args[0]);
     OFFSET(MULTICALL_arg1, multicall_entry_t, args[1]);
@@ -68,4 +76,9 @@ void __dummy__(void)
     BLANK();
 
     DEFINE(FIXMAP_apic_base, fix_to_virt(FIX_APIC_BASE));
+
+#if PERF_COUNTERS
+    OFFSET(PERFC_hypercalls, struct perfcounter, hypercalls);
+    OFFSET(PERFC_exceptions, struct perfcounter, exceptions);
+#endif
 }

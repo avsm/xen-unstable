@@ -588,6 +588,8 @@ static int __init debugtrace_init(void)
 
     debugtrace_bytes = bytes;
 
+    memset(debugtrace_buf, '\0', debugtrace_bytes);
+
     return 0;
 }
 __initcall(debugtrace_init);
