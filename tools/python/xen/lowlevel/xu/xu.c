@@ -49,14 +49,6 @@
 /* Size of a machine page frame. */
 #define PAGE_SIZE 4096
 
-#if defined(__i386__)
-#define rmb() __asm__ __volatile__ ( "lock; addl $0,0(%%esp)" : : : "memory" )
-#define wmb() __asm__ __volatile__ ( "" : : : "memory" )
-#else
-#error "Define barriers"
-#endif
-
-
 /* Set the close-on-exec flag on a file descriptor.  Doesn't currently bother
  * to check for errors. */
 /*
@@ -706,6 +698,13 @@ static PyObject *xu_message_get_payload(PyObject *self, PyObject *args)
         C2P(netif_be_destroy_t, netif_handle, Int, Long);
         C2P(netif_be_destroy_t, status,       Int, Long);
         return dict;
+    case TYPE(CMSG_NETIF_BE, CMSG_NETIF_BE_CREDITLIMIT):
+        C2P(netif_be_creditlimit_t, domid,        Int, Long);
+        C2P(netif_be_creditlimit_t, netif_handle, Int, Long);
+        C2P(netif_be_creditlimit_t, credit_bytes, Int, Long);
+        C2P(netif_be_creditlimit_t, period_usec,  Int, Long);
+        C2P(netif_be_creditlimit_t, status,       Int, Long);
+        return dict;
     case TYPE(CMSG_NETIF_BE, CMSG_NETIF_BE_CONNECT):
         C2P(netif_be_connect_t, domid,          Int, Long);
         C2P(netif_be_connect_t, netif_handle,   Int, Long);
@@ -923,6 +922,12 @@ static PyObject *xu_message_new(PyObject *self, PyObject *args)
     case TYPE(CMSG_NETIF_BE, CMSG_NETIF_BE_DESTROY):
         P2C(netif_be_destroy_t, domid,        u32);
         P2C(netif_be_destroy_t, netif_handle, u32);
+        break;
+    case TYPE(CMSG_NETIF_BE, CMSG_NETIF_BE_CREDITLIMIT):
+        P2C(netif_be_creditlimit_t, domid,        u32);
+        P2C(netif_be_creditlimit_t, netif_handle, u32);
+        P2C(netif_be_creditlimit_t, credit_bytes, u32);
+        P2C(netif_be_creditlimit_t, period_usec,  u32);
         break;
     case TYPE(CMSG_NETIF_BE, CMSG_NETIF_BE_CONNECT):
         P2C(netif_be_connect_t, domid,          u32);
