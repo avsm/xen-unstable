@@ -45,6 +45,7 @@ struct bvt_dom_info
 
 struct bvt_cpu_info
 {
+    spinlock_t          run_lock;   /* protects runqueue */
     struct list_head    runqueue;   /* runqueue for given processor */ 
     unsigned long       svt;        /* XXX check this is unsigned long! */
 };
@@ -52,8 +53,8 @@ struct bvt_cpu_info
 
 #define BVT_INFO(p)   ((struct bvt_dom_info *)(p)->sched_priv)
 #define CPU_INFO(cpu) ((struct bvt_cpu_info *)(schedule_data[cpu]).sched_priv)
-#define RUNLIST(p)    &(BVT_INFO(p)->run_list)
-#define RUNQUEUE(cpu) &(CPU_INFO(cpu)->runqueue)
+#define RUNLIST(p)    ((struct list_head *)&(BVT_INFO(p)->run_list))
+#define RUNQUEUE(cpu) ((struct list_head *)&(CPU_INFO(cpu)->runqueue))
 #define CPU_SVT(cpu)  (CPU_INFO(cpu)->svt)
 
 #define MCU            (s32)MICROSECS(100)    /* Minimum unit */
@@ -63,6 +64,32 @@ static s32 ctx_allow = (s32)MILLISECS(5);     /* context switch allowance */
 
 /* SLAB cache for struct bvt_dom_info objects */
 static xmem_cache_t *dom_info_cache;
+
+/*
+ * Wrappers for run-queue management. Must be called with the run_lock
+ * held.
+ */
+static inline void __add_to_runqueue_head(struct domain *d)
+{
+    list_add(RUNLIST(d), RUNQUEUE(d->processor));
+}
+
+static inline void __add_to_runqueue_tail(struct domain *d)
+{
+    list_add_tail(RUNLIST(d), RUNQUEUE(d->processor));
+}
+
+static inline void __del_from_runqueue(struct domain *d)
+{
+    struct list_head *runlist = RUNLIST(d);
+    list_del(runlist);
+    runlist->next = NULL;
+}
+
+static inline int __task_on_runqueue(struct domain *d)
+{
+    return (RUNLIST(d))->next != NULL;
+}
 
 /*
  * Calculate the effective virtual time for a domain. Take into account 
@@ -148,13 +175,84 @@ int bvt_init_idle_task(struct domain *p)
 
     bvt_add_task(p);
 
-    spin_lock_irqsave(&schedule_data[p->processor].schedule_lock, flags);
+    spin_lock_irqsave(&CPU_INFO(p->processor)->run_lock, flags);
+    
     set_bit(DF_RUNNING, &p->flags);
-    if ( !__task_on_runqueue(RUNLIST(p)) )
-        __add_to_runqueue_head(RUNLIST(p), RUNQUEUE(p->processor));
-    spin_unlock_irqrestore(&schedule_data[p->processor].schedule_lock, flags);
+    if ( !__task_on_runqueue(p) )
+        __add_to_runqueue_head(p);
+        
+    spin_unlock_irqrestore(&CPU_INFO(p->processor)->run_lock, flags);
 
     return 0;
+}
+
+void bvt_wake(struct domain *d)
+{
+    unsigned long       flags;
+    struct bvt_dom_info *inf = BVT_INFO(d);
+    struct domain       *curr;
+    s_time_t            now, min_time;
+    int                 cpu = d->processor;
+
+    /* The runqueue accesses must be protected */
+    spin_lock_irqsave(&CPU_INFO(cpu)->run_lock, flags);
+    
+    /* If on the runqueue already then someone has done the wakeup work. */
+    if ( unlikely(__task_on_runqueue(d)) )
+    {
+        spin_unlock_irqrestore(&CPU_INFO(cpu)->run_lock, flags);
+        return;
+    }
+
+    __add_to_runqueue_head(d);
+
+    now = NOW();
+
+    /* Set the BVT parameters. */
+    if ( inf->avt < CPU_SVT(cpu) )
+        inf->avt = CPU_SVT(cpu);
+
+    /* Deal with warping here. */
+    inf->warpback  = 1;
+    inf->warped    = now;
+    __calc_evt(inf);
+    spin_unlock_irqrestore(&CPU_INFO(cpu)->run_lock, flags);
+    
+    /* Access to schedule_data protected by schedule_lock */
+    spin_lock_irqsave(&schedule_data[cpu].schedule_lock, flags);
+    
+    curr = schedule_data[cpu].curr;
+
+    /* Currently-running domain should run at least for ctx_allow. */
+    min_time = curr->lastschd + curr->min_slice;
+
+    spin_unlock_irqrestore(&schedule_data[cpu].schedule_lock, flags);   
+   
+    if ( is_idle_task(curr) || (min_time <= now) )
+        cpu_raise_softirq(cpu, SCHEDULE_SOFTIRQ);
+    else if ( schedule_data[cpu].s_timer.expires > (min_time + TIME_SLOP) )
+        mod_ac_timer(&schedule_data[cpu].s_timer, min_time);
+
+}
+
+
+static void bvt_sleep(struct domain *d)
+{
+    unsigned long flags;
+    
+    if ( test_bit(DF_RUNNING, &d->flags) )
+        cpu_raise_softirq(d->processor, SCHEDULE_SOFTIRQ);
+    else 
+    {
+        /* The runqueue accesses must be protected */
+        spin_lock_irqsave(&CPU_INFO(d->processor)->run_lock, flags);
+        
+        
+        if ( __task_on_runqueue(d) )
+            __del_from_runqueue(d);
+
+        spin_unlock_irqrestore(&CPU_INFO(d->processor)->run_lock, flags);    
+    }
 }
 
 /**
@@ -218,7 +316,7 @@ int bvt_adjdom(struct domain *p,
         if ( mcu_adv == 0 )
             return -EINVAL;
         
-        spin_lock_irqsave(&schedule_data[p->processor].schedule_lock, flags);   
+        spin_lock_irqsave(&CPU_INFO(p->processor)->run_lock, flags);   
         inf->mcu_advance = mcu_adv;
         inf->warp = warp;
         inf->warpl = warpl;
@@ -229,18 +327,18 @@ int bvt_adjdom(struct domain *p,
                 p->domain, inf->mcu_advance, inf->warp,
                 inf->warpl, inf->warpu );
 
-        spin_unlock_irqrestore(&schedule_data[p->processor].schedule_lock, flags);
+        spin_unlock_irqrestore(&CPU_INFO(p->processor)->run_lock, flags);
     }
     else if ( cmd->direction == SCHED_INFO_GET )
     {
         struct bvt_dom_info *inf = BVT_INFO(p);
 
-        spin_lock_irqsave(&schedule_data[p->processor].schedule_lock, flags);   
+        spin_lock_irqsave(&CPU_INFO(p->processor)->run_lock, flags);   
         params->mcu_adv = inf->mcu_advance;
         params->warp    = inf->warp;
         params->warpl   = inf->warpl;
         params->warpu   = inf->warpu;
-        spin_unlock_irqrestore(&schedule_data[p->processor].schedule_lock, flags);
+        spin_unlock_irqrestore(&CPU_INFO(p->processor)->run_lock, flags);
     }
     
     return 0;
@@ -256,6 +354,7 @@ int bvt_adjdom(struct domain *p,
  */
 static task_slice_t bvt_do_schedule(s_time_t now)
 {
+    unsigned long flags;
     struct domain *prev = current, *next = NULL, *next_prime, *p; 
     struct list_head   *tmp;
     int                 cpu = prev->processor;
@@ -269,8 +368,12 @@ static task_slice_t bvt_do_schedule(s_time_t now)
                         *next_prime_inf = NULL;
     task_slice_t        ret;
 
+
     ASSERT(prev->sched_priv != NULL);
     ASSERT(prev_inf != NULL);
+    spin_lock_irqsave(&CPU_INFO(cpu)->run_lock, flags);
+
+    ASSERT(__task_on_runqueue(prev));
 
     if ( likely(!is_idle_task(prev)) ) 
     {
@@ -281,10 +384,10 @@ static task_slice_t bvt_do_schedule(s_time_t now)
         
         __calc_evt(prev_inf);
         
-        __del_from_runqueue(RUNLIST(prev));
+        __del_from_runqueue(prev);
         
         if ( domain_runnable(prev) )
-            __add_to_runqueue_tail(RUNLIST(prev), RUNQUEUE(cpu));
+            __add_to_runqueue_tail(prev);
     }
 
  
@@ -329,7 +432,9 @@ static task_slice_t bvt_do_schedule(s_time_t now)
         if ( p_inf->avt < min_avt )
             min_avt = p_inf->avt;
     }
-
+    
+    spin_unlock_irqrestore(&CPU_INFO(cpu)->run_lock, flags);
+ 
     /* Extract the domain pointers from the dom infos */
     next        = next_inf->domain;
     next_prime  = next_prime_inf->domain;
@@ -341,8 +446,10 @@ static task_slice_t bvt_do_schedule(s_time_t now)
     /* check for virtual time overrun on this cpu */
     if ( CPU_SVT(cpu) >= 0xf0000000 )
     {
-        u_long t_flags; 
+        u_long t_flags;
+        
         write_lock_irqsave(&tasklist_lock, t_flags); 
+        
         for_each_domain ( p )
         {
             if ( p->processor == cpu )
@@ -352,7 +459,9 @@ static task_slice_t bvt_do_schedule(s_time_t now)
                 p_inf->avt -= 0xe0000000;
             }
         } 
+        
         write_unlock_irqrestore(&tasklist_lock, t_flags); 
+        
         CPU_SVT(cpu) -= 0xe0000000;
     }
 
@@ -411,7 +520,7 @@ static void bvt_dump_cpu_state(int i)
     struct bvt_dom_info *d_inf;
     struct domain *d;
     
-    spin_lock_irqsave(&schedule_data[i].schedule_lock, flags);
+    spin_lock_irqsave(&CPU_INFO(i)->run_lock, flags);
     printk("svt=0x%08lX ", CPU_SVT(i));
 
     queue = RUNQUEUE(i);
@@ -430,7 +539,7 @@ static void bvt_dump_cpu_state(int i)
             (unsigned long)list, (unsigned long)list->next,
             (unsigned long)list->prev);
     }
-    spin_unlock_irqrestore(&schedule_data[i].schedule_lock, flags);        
+    spin_unlock_irqrestore(&CPU_INFO(i)->run_lock, flags);        
 }
 
 /* We use cache to create the bvt_dom_infos 
@@ -452,14 +561,16 @@ int bvt_init_scheduler()
     for ( i = 0; i < NR_CPUS; i++ )
     {
         schedule_data[i].sched_priv = xmalloc(sizeof(struct bvt_cpu_info));
-        INIT_LIST_HEAD(RUNQUEUE(i));
-        
+       
         if ( schedule_data[i].sched_priv == NULL )
         {
             printk("Failed to allocate BVT scheduler per-CPU memory!\n");
             return -1;
         }
 
+        INIT_LIST_HEAD(RUNQUEUE(i));
+        spin_lock_init(&CPU_INFO(i)->run_lock);
+        
         CPU_SVT(i) = 0; /* XXX do I really need to do this? */
     }
 
@@ -476,48 +587,7 @@ int bvt_init_scheduler()
     return 0;
 }
 
-static void bvt_sleep(struct domain *d)
-{
-    if ( test_bit(DF_RUNNING, &d->flags) )
-        cpu_raise_softirq(d->processor, SCHEDULE_SOFTIRQ);
-    else if ( __task_on_runqueue(RUNLIST(d)) )
-        __del_from_runqueue(RUNLIST(d));
-}
 
-void bvt_wake(struct domain *d)
-{
-    struct bvt_dom_info *inf = BVT_INFO(d);
-    struct domain       *curr;
-    s_time_t             now, min_time;
-    int                  cpu = d->processor;
-
-    /* If on the runqueue already then someone has done the wakeup work. */
-    if ( unlikely(__task_on_runqueue(RUNLIST(d))) )
-        return;
-
-    __add_to_runqueue_head(RUNLIST(d), RUNQUEUE(d->processor));
-
-    now = NOW();
-
-    /* Set the BVT parameters. */
-    if ( inf->avt < CPU_SVT(cpu) )
-        inf->avt = CPU_SVT(cpu);
-
-    /* Deal with warping here. */
-    inf->warpback  = 1;
-    inf->warped    = now;
-    __calc_evt(inf);
-
-    curr = schedule_data[cpu].curr;
-
-    /* Currently-running domain should run at least for ctx_allow. */
-    min_time = curr->lastschd + curr->min_slice;
-    
-    if ( is_idle_task(curr) || (min_time <= now) )
-        cpu_raise_softirq(cpu, SCHEDULE_SOFTIRQ);
-    else if ( schedule_data[cpu].s_timer.expires > (min_time + TIME_SLOP) )
-        mod_ac_timer(&schedule_data[cpu].s_timer, min_time);
-}
 
 struct scheduler sched_bvt_def = {
     .name     = "Borrowed Virtual Time",
