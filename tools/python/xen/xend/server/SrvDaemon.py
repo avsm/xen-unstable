@@ -42,6 +42,7 @@ import console
 import domain
 from params import *
 
+DAEMONIZE = 1
 DEBUG = 1
 
 class NotifierProtocol(protocol.Protocol):
@@ -464,16 +465,9 @@ class Daemon:
         else:
             # Child
             os.execl("/usr/sbin/xfrd", "xfrd")
-            
-    def start(self, trace=0):
-        """Attempts to start the daemons.
-        The return value is defined by the LSB:
-        0  Success
-        4  Insufficient privileges
-        """
-        xend_pid = self.cleanup_xend()
-        xfrd_pid = self.cleanup_xfrd()
 
+    def daemonize(self):
+        if not DAEMONIZE: return
         # Detach from TTY.
         os.setsid()
 
@@ -492,7 +486,19 @@ class Daemon:
             os.open('/dev/null', os.O_RDWR)
             os.dup(0)
         os.dup(1)
+        
+    def start(self, trace=0):
+        """Attempts to start the daemons.
+        The return value is defined by the LSB:
+        0  Success
+        4  Insufficient privileges
+        """
+        xend_pid = self.cleanup_xend()
+        xfrd_pid = self.cleanup_xfrd()
 
+
+        self.daemonize()
+        
         if self.set_user():
             return 4
         os.chdir("/")
@@ -651,20 +657,6 @@ class Daemon:
     def blkif_get(self, dom):
         return self.blkifCF.getControllerByDom(dom)
 
-    def blkif_dev(self, dom, vdev):
-        return self.blkifCF.getDomainDevice(dom, vdev)
-
-    def blkif_dev_create(self, dom, config, vdev, mode, segment, recreate=0):
-        """Create a block device.
-        
-        Returns Deferred
-        """
-        ctrl = self.blkifCF.getControllerByDom(dom)
-        if not ctrl:
-            raise XendError('No blkif controller: %d' % dom)
-        d = ctrl.attachDevice(config, vdev, mode, segment, recreate=recreate)
-        return d
-
     def netif_create(self, dom, recreate=0):
         """Create or get a network interface controller.
         
@@ -676,19 +668,6 @@ class Daemon:
 
     def netif_get(self, dom):
         return self.netifCF.getControllerByDom(dom)
-
-    def netif_dev_create(self, dom, vif, config, recreate=0):
-        """Create a network device.
-
-        """
-        ctrl = self.netifCF.getControllerByDom(dom)
-        if not ctrl:
-            raise XendError('No netif controller: %d' % dom)
-        d = ctrl.attachDevice(vif, config, recreate=recreate)
-        return d
-
-    def netif_dev(self, dom, vif):
-        return self.netifCF.getDomainDevice(dom, vif)
 
     def console_create(self, dom, console_port=None):
         """Create a console for a domain.

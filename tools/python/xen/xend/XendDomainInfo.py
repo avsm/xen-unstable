@@ -155,6 +155,7 @@ def make_disk(vm, config, uname, dev, mode, recreate=0):
     @param recreate: recreate flag (after xend restart)
     @return: deferred
     """
+    idx = vm.next_device_index('vbd')
     segments = lookup_disk_uname(uname)
     if not segments:
         raise VmError("vbd: Segments not found: uname=%s" % uname)
@@ -166,7 +167,7 @@ def make_disk(vm, config, uname, dev, mode, recreate=0):
     if not vdev:
         raise VmError("vbd: Device not found: uname=%s dev=%s" % (uname, dev))
     ctrl = xend.blkif_create(vm.dom, recreate=recreate)
-    return ctrl.attachDevice(config, vdev, mode, segment, recreate=recreate)
+    return ctrl.attachDevice(idx, config, vdev, mode, segment, recreate=recreate)
         
 def vif_up(iplist):
     """send an unsolicited ARP reply for all non link-local IP addresses.
@@ -498,19 +499,11 @@ class XendDomainInfo:
             if self.memory is None:
                 raise VmError('missing memory size')
 
+            self.init_domain()
             self.configure_console()
+            self.construct_image()
             self.configure_restart()
             self.configure_backends()
-            image = sxp.child_value(config, 'image')
-            if image is None:
-                raise VmError('missing image')
-            image_name = sxp.name(image)
-            if image_name is None:
-                raise VmError('missing image name')
-            image_handler = get_image_handler(image_name)
-            if image_handler is None:
-                raise VmError('unknown image type: ' + image_name)
-            image_handler(self, image)
             deferred = self.configure()
             def cberr(err):
                 self.destroy()
@@ -521,6 +514,23 @@ class XendDomainInfo:
             self.destroy()
             raise
         return deferred
+
+    def construct_image(self):
+        """Construct the boot image for the domain.
+
+        @return vm
+        """
+        image = sxp.child_value(self.config, 'image')
+        if image is None:
+            raise VmError('missing image')
+        image_name = sxp.name(image)
+        if image_name is None:
+            raise VmError('missing image name')
+        image_handler = get_image_handler(image_name)
+        if image_handler is None:
+            raise VmError('unknown image type: ' + image_name)
+        image_handler(self, image)
+        return self
 
     def config_devices(self, name):
         """Get a list of the 'device' nodes of a given type from the config.
@@ -639,12 +649,7 @@ class XendDomainInfo:
         devices have been released.
         """
         if self.dom is None: return 0
-        if self.console:
-            if self.restart_pending():
-                self.console.deregisterChannel()
-            else:
-                log.debug('Closing console, domain %s', self.id)
-                self.console.close()
+        self.destroy_console()
         chan = xend.getDomChannel(self.dom)
         if chan:
             log.debug("Closing channel to domain %d", self.dom)
@@ -653,6 +658,14 @@ class XendDomainInfo:
             return xc.domain_destroy(dom=self.dom)
         except Exception, err:
             log.exception("Domain destroy failed: %s", self.name)
+
+    def destroy_console(self):
+        if self.console:
+            if self.restart_pending():
+                self.console.deregisterChannel()
+            else:
+                log.debug('Closing console, domain %s', self.id)
+                self.console.close()
 
     def cleanup(self):
         """Cleanup vm resources: release devices.
@@ -740,7 +753,7 @@ class XendDomainInfo:
         log.debug('init_domain> Created domain=%d name=%s memory=%d', dom, name, memory)
         self.setdom(dom)
 
-    def build_domain(self, ostype, kernel, ramdisk, cmdline, vifs_n):
+    def build_domain(self, ostype, kernel, ramdisk, cmdline):
         """Build the domain boot image.
         """
         if self.recreate or self.restore: return
@@ -761,26 +774,25 @@ class XendDomainInfo:
             raise VmError('Building domain failed: type=%s dom=%d err=%d'
                           % (ostype, dom, err))
 
-    def create_domain(self, ostype, kernel, ramdisk, cmdline, vifs_n):
+    def create_domain(self, ostype, kernel, ramdisk, cmdline):
         """Create a domain. Builds the image but does not configure it.
 
         @param ostype:  OS type
         @param kernel:  kernel image
         @param ramdisk: kernel ramdisk
         @param cmdline: kernel commandline
-        @param vifs_n:  number of network interfaces
         """
         if not self.recreate:
             if not os.path.isfile(kernel):
                 raise VmError('Kernel image does not exist: %s' % kernel)
             if ramdisk and not os.path.isfile(ramdisk):
                 raise VmError('Kernel ramdisk does not exist: %s' % ramdisk)
-        self.init_domain()
+        #self.init_domain()
         if self.console:
             self.console.registerChannel()
         else:
             self.console = xendConsole.console_create(self.dom, console_port=self.console_port)
-        self.build_domain(ostype, kernel, ramdisk, cmdline, vifs_n)
+        self.build_domain(ostype, kernel, ramdisk, cmdline)
         self.image = kernel
         self.ramdisk = ramdisk
         self.cmdline = cmdline
@@ -823,6 +835,9 @@ class XendDomainInfo:
         dev_index = len(devs)
         self.config.append(['device', dev_config])
         d = dev_handler(self, dev_config, dev_index, change=1)
+        def cbok(dev):
+            return dev.sxpr()
+        d.addCallback(cbok)
         return d
 
     def device_configure(self, dev_config, idx):
@@ -1058,8 +1073,7 @@ def vm_image_linux(vm, image):
     if args:
         cmdline += " " + args
     ramdisk = sxp.child_value(image, "ramdisk", '')
-    vifs = vm.config_devices("vif")
-    vm.create_domain("linux", kernel, ramdisk, cmdline, len(vifs))
+    vm.create_domain("linux", kernel, ramdisk, cmdline)
     return vm
 
 def vm_image_netbsd(vm, image):
@@ -1083,8 +1097,7 @@ def vm_image_netbsd(vm, image):
     if args:
         cmdline += " " + args
     ramdisk = sxp.child_value(image, "ramdisk", '')
-    vifs = vm.config_devices("vif")
-    vm.create_domain("netbsd", kernel, ramdisk, cmdline, len(vifs))
+    vm.create_domain("netbsd", kernel, ramdisk, cmdline)
     return vm
 
 
