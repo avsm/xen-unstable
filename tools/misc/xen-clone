@@ -23,6 +23,7 @@ esac
 
 DEST_DIR=${2:-xeno-clone}
 DEST_BK_REP=`basename "${BK_REP}"`
+DEST_VER=`basename ${DEST_BK_REP} .bk`
 
 echo usage: xen-clone bk_repository dest_dir orig_linux_dir
 echo Source BK Repository : ${BK_REP}
@@ -80,7 +81,6 @@ then
 
  make -j4 world
  make -j4 linux24
- make -j4 dist
  cd ../install/boot
  [ -r vmlinuz-2.6.*-xen0 ] && ln -s vmlinuz-2.6.*-xen0 xenolinux.gz
   
