@@ -46,6 +46,7 @@
 #include <linux/bcd.h>
 #include <linux/efi.h>
 #include <linux/sysctl.h>
+#include <linux/percpu.h>
 
 #include <asm/io.h>
 #include <asm/smp.h>
@@ -91,7 +92,6 @@ u32 shadow_tsc_stamp;
 u64 shadow_system_time;
 static u32 shadow_time_version;
 static struct timeval shadow_tv;
-extern u64 processed_system_time;
 
 /*
  * We use this to ensure that gettimeofday() is monotonically increasing. We
@@ -109,6 +109,7 @@ static long last_update_from_xen;   /* UTC seconds when last read Xen clock. */
 
 /* Keep track of last time we did processing/updating of jiffies and xtime. */
 u64 processed_system_time;   /* System time (ns) at last processing. */
+DEFINE_PER_CPU(u64, processed_system_time);
 
 #define NS_PER_TICK (1000000000ULL/HZ)
 
@@ -401,8 +402,12 @@ static inline void do_timer_interrupt(int irq, void *dev_id,
 		delta -= NS_PER_TICK;
 		processed_system_time += NS_PER_TICK;
 		do_timer(regs);
+#ifdef CONFIG_SMP
 		if (regs)
-		    profile_tick(CPU_PROFILING, regs);
+			update_process_times(user_mode(regs));
+#endif
+		if (regs)
+			profile_tick(CPU_PROFILING, regs);
 	}
 
 	/*
@@ -656,15 +661,27 @@ int set_timeout_timer(void)
 {
 	u64 alarm = 0;
 	int ret = 0;
+#ifdef CONFIG_SMP
+	unsigned long seq;
+#endif
 
 	/*
 	 * This is safe against long blocking (since calculations are
 	 * not based on TSC deltas). It is also safe against warped
 	 * system time since suspend-resume is cooperative and we
-	 * would first get locked out. It is safe against normal
-	 * updates of jiffies since interrupts are off.
+	 * would first get locked out.
 	 */
+#ifdef CONFIG_SMP
+	do {
+		seq = read_seqbegin(&xtime_lock);
+		if (smp_processor_id())
+			alarm = __jiffies_to_st(jiffies + 1);
+		else
+			alarm = __jiffies_to_st(jiffies + 1);
+	} while (read_seqretry(&xtime_lock, seq));
+#else
 	alarm = __jiffies_to_st(next_timer_interrupt());
+#endif
 
 	/* Failure is pretty bad, but we'd best soldier on. */
 	if ( HYPERVISOR_set_timer_op(alarm) != 0 )
@@ -696,6 +713,73 @@ void time_resume(void)
 	/* Make sure we resync UTC time with Xen on next timer interrupt. */
 	last_update_from_xen = 0;
 }
+
+#ifdef CONFIG_SMP
+#define xxprint(msg) HYPERVISOR_console_io(CONSOLEIO_write, strlen(msg), msg)
+
+static irqreturn_t local_timer_interrupt(int irq, void *dev_id,
+					 struct pt_regs *regs)
+{
+	s64 delta;
+	int cpu = smp_processor_id();
+
+	do {
+		__get_time_values_from_xen();
+
+		delta = (s64)(shadow_system_time +
+			      ((s64)cur_timer->get_offset() * 
+			       (s64)NSEC_PER_USEC) -
+			      per_cpu(processed_system_time, cpu));
+	}
+	while (!TIME_VALUES_UP_TO_DATE);
+
+	if (unlikely(delta < 0)) {
+		printk("Timer ISR/%d: Time went backwards: %lld %lld %lld %lld\n",
+		       cpu, delta, shadow_system_time,
+		       ((s64)cur_timer->get_offset() * (s64)NSEC_PER_USEC), 
+		       processed_system_time);
+		return IRQ_HANDLED;
+	}
+
+	/* Process elapsed jiffies since last call. */
+	while (delta >= NS_PER_TICK) {
+		delta -= NS_PER_TICK;
+		per_cpu(processed_system_time, cpu) += NS_PER_TICK;
+		if (regs)
+			update_process_times(user_mode(regs));
+#if 0
+		if (regs)
+			profile_tick(CPU_PROFILING, regs);
+#endif
+	}
+
+	if (smp_processor_id() == 0) {
+	    xxprint("bug bug\n");
+	    BUG();
+	}
+
+	return IRQ_HANDLED;
+}
+
+static struct irqaction local_irq_timer = {
+	local_timer_interrupt, SA_INTERRUPT, CPU_MASK_NONE, "ltimer",
+	NULL, NULL
+};
+
+void local_setup_timer(void)
+{
+	int seq, time_irq;
+	int cpu = smp_processor_id();
+
+	do {
+	    seq = read_seqbegin(&xtime_lock);
+	    per_cpu(processed_system_time, cpu) = shadow_system_time;
+	} while (read_seqretry(&xtime_lock, seq));
+
+	time_irq = bind_virq_to_irq(VIRQ_TIMER);
+	(void)setup_irq(time_irq, &local_irq_timer);
+}
+#endif
 
 /*
  * /proc/sys/xen: This really belongs in another file. It can stay here for

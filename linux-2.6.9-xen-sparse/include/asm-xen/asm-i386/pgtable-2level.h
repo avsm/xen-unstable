@@ -25,8 +25,20 @@ static inline int pgd_present(pgd_t pgd)	{ return 1; }
  */
 #define set_pte_batched(pteptr, pteval) \
 queue_l1_entry_update(pteptr, (pteval).pte_low)
+
+#ifdef CONFIG_SMP
+#define set_pte(pteptr, pteval) xen_l1_entry_update(pteptr, (pteval).pte_low)
+#if 0
+do { \
+  (*(pteptr) = pteval); \
+  HYPERVISOR_xen_version(0); \
+} while (0)
+#endif
+#define set_pte_atomic(pteptr, pteval) set_pte(pteptr, pteval)
+#else
 #define set_pte(pteptr, pteval) (*(pteptr) = pteval)
 #define set_pte_atomic(pteptr, pteval) set_pte(pteptr,pteval)
+#endif
 /*
  * (pmds are folded into pgds so this doesn't get actually called,
  * but the define is needed for a generic inline function.)

@@ -19,7 +19,7 @@
  * This makes sure that old versions of dom0 tools will stop working in a
  * well-defined way (rather than crashing the machine, for instance).
  */
-#define DOM0_INTERFACE_VERSION   0xAAAA001A
+#define DOM0_INTERFACE_VERSION   0xAAAA1001
 
 /************************************************************************/
 
@@ -85,7 +85,7 @@ typedef struct {
 typedef struct {
     /* IN variables. */
     domid_t  domain;                  /*  0 */ /* NB. IN/OUT variable. */
-    u16     __pad;
+    u16      exec_domain;
     /* OUT variables. */
 #define DOMFLAGS_DYING     (1<<0) /* Domain is scheduled to die.             */
 #define DOMFLAGS_CRASHED   (1<<1) /* Crashed domain; frozen for postmortem.  */
@@ -208,7 +208,7 @@ typedef struct {
 typedef struct {
     /* IN variables. */
     domid_t      domain;              /*  0 */
-    u16          __pad;
+    u16          exec_domain;
     s32          cpu;                 /*  4: -1 implies unpin */
 } PACKED dom0_pincpudomain_t; /* 8 bytes */
 

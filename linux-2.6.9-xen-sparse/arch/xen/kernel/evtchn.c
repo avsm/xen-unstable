@@ -42,6 +42,8 @@
 #include <asm-xen/xen-public/physdev.h>
 #include <asm-xen/ctrl_if.h>
 #include <asm-xen/hypervisor.h>
+#define XEN_EVTCHN_MASK_OPS
+#include <asm-xen/evtchn.h>
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,0)
 EXPORT_SYMBOL(force_evtchn_callback);
@@ -59,7 +61,10 @@ static int evtchn_to_irq[NR_EVENT_CHANNELS];
 static int irq_to_evtchn[NR_IRQS];
 
 /* IRQ <-> VIRQ mapping. */
-static int virq_to_irq[NR_VIRQS];
+DEFINE_PER_CPU(int, virq_to_irq[NR_VIRQS]);
+
+/* evtchn <-> IPI mapping. */
+DEFINE_PER_CPU(int, ipi_to_evtchn[NR_IPIS]);
 
 /* Reference counts for bindings to IRQs. */
 static int irq_bindcount[NR_IRQS];
@@ -89,22 +94,26 @@ asmlinkage void evtchn_do_upcall(struct pt_regs *regs)
     int            irq;
     unsigned long  flags;
     shared_info_t *s = HYPERVISOR_shared_info;
+    vcpu_info_t   *vcpu_info = &s->vcpu_data[smp_processor_id()];
 
     local_irq_save(flags);
     
-    while ( s->vcpu_data[0].evtchn_upcall_pending )
+    while ( vcpu_info->evtchn_upcall_pending )
     {
-        s->vcpu_data[0].evtchn_upcall_pending = 0;
+        vcpu_info->evtchn_upcall_pending = 0;
         /* NB. No need for a barrier here -- XCHG is a barrier on x86. */
-        l1 = xchg(&s->evtchn_pending_sel, 0);
+        l1 = xchg(&vcpu_info->evtchn_pending_sel, 0);
         while ( (l1i = ffs(l1)) != 0 )
         {
             l1i--;
             l1 &= ~(1 << l1i);
         
-            l2 = s->evtchn_pending[l1i] & ~s->evtchn_mask[l1i];
-            while ( (l2i = ffs(l2)) != 0 )
+            for ( ;; )
             {
+                l2 = s->evtchn_pending[l1i] & ~s->evtchn_mask[l1i];
+                l2i = ffs(l2);
+                if ( l2i == 0 )
+                    break;
                 l2i--;
                 l2 &= ~(1 << l2i);
             
@@ -138,10 +147,11 @@ int bind_virq_to_irq(int virq)
 {
     evtchn_op_t op;
     int evtchn, irq;
+    int cpu = smp_processor_id();
 
     spin_lock(&irq_mapping_update_lock);
 
-    if ( (irq = virq_to_irq[virq]) == -1 )
+    if ( (irq = per_cpu(virq_to_irq, cpu)[virq]) == -1 )
     {
         op.cmd              = EVTCHNOP_bind_virq;
         op.u.bind_virq.virq = virq;
@@ -153,7 +163,7 @@ int bind_virq_to_irq(int virq)
         evtchn_to_irq[evtchn] = irq;
         irq_to_evtchn[irq]    = evtchn;
 
-        virq_to_irq[virq] = irq;
+        per_cpu(virq_to_irq, cpu)[virq] = irq;
     }
 
     irq_bindcount[irq]++;
@@ -166,7 +176,8 @@ int bind_virq_to_irq(int virq)
 void unbind_virq_from_irq(int virq)
 {
     evtchn_op_t op;
-    int irq    = virq_to_irq[virq];
+    int cpu    = smp_processor_id();
+    int irq    = per_cpu(virq_to_irq, cpu)[virq];
     int evtchn = irq_to_evtchn[irq];
 
     spin_lock(&irq_mapping_update_lock);
@@ -181,7 +192,61 @@ void unbind_virq_from_irq(int virq)
 
         evtchn_to_irq[evtchn] = -1;
         irq_to_evtchn[irq]    = -1;
-        virq_to_irq[virq]     = -1;
+        per_cpu(virq_to_irq, cpu)[virq]     = -1;
+    }
+
+    spin_unlock(&irq_mapping_update_lock);
+}
+
+int bind_ipi_on_cpu_to_irq(int cpu, int ipi)
+{
+    evtchn_op_t op;
+    int evtchn, irq;
+
+    spin_lock(&irq_mapping_update_lock);
+
+    if ( (evtchn = per_cpu(ipi_to_evtchn, cpu)[ipi]) == 0 )
+    {
+        op.cmd                 = EVTCHNOP_bind_ipi;
+        op.u.bind_ipi.ipi_edom = cpu;
+        if ( HYPERVISOR_event_channel_op(&op) != 0 )
+            panic("Failed to bind virtual IPI %d on cpu %d\n", ipi, cpu);
+        evtchn = op.u.bind_ipi.port;
+
+        irq = find_unbound_irq();
+        evtchn_to_irq[evtchn] = irq;
+        irq_to_evtchn[irq]    = evtchn;
+
+        per_cpu(ipi_to_evtchn, cpu)[ipi] = evtchn;
+    } else
+	irq = evtchn_to_irq[evtchn];
+
+    irq_bindcount[irq]++;
+
+    spin_unlock(&irq_mapping_update_lock);
+
+    return irq;
+}
+
+void unbind_ipi_on_cpu_from_irq(int cpu, int ipi)
+{
+    evtchn_op_t op;
+    int evtchn = per_cpu(ipi_to_evtchn, cpu)[ipi];
+    int irq    = irq_to_evtchn[evtchn];
+
+    spin_lock(&irq_mapping_update_lock);
+
+    if ( --irq_bindcount[irq] == 0 )
+    {
+	op.cmd          = EVTCHNOP_close;
+	op.u.close.dom  = DOMID_SELF;
+	op.u.close.port = evtchn;
+	if ( HYPERVISOR_event_channel_op(&op) != 0 )
+	    panic("Failed to unbind virtual IPI %d on cpu %d\n", ipi, cpu);
+
+        evtchn_to_irq[evtchn] = -1;
+        irq_to_evtchn[irq]    = -1;
+	per_cpu(ipi_to_evtchn, cpu)[ipi] = 0;
     }
 
     spin_unlock(&irq_mapping_update_lock);
@@ -411,30 +476,15 @@ static struct hw_interrupt_type pirq_type = {
     NULL
 };
 
-static irqreturn_t misdirect_interrupt(int irq, void *dev_id,
-                                       struct pt_regs *regs)
-{
-    /* nothing */
-    return IRQ_HANDLED;
-}
-
-static struct irqaction misdirect_action = {
-    misdirect_interrupt, 
-    SA_INTERRUPT, 
-    CPU_MASK_NONE, 
-    "misdirect", 
-    NULL, 
-    NULL
-};
-
 void irq_suspend(void)
 {
     int pirq, virq, irq, evtchn;
+    int cpu = smp_processor_id(); /* XXX */
 
     /* Unbind VIRQs from event channels. */
     for ( virq = 0; virq < NR_VIRQS; virq++ )
     {
-        if ( (irq = virq_to_irq[virq]) == -1 )
+        if ( (irq = per_cpu(virq_to_irq, cpu)[virq]) == -1 )
             continue;
         evtchn = irq_to_evtchn[irq];
 
@@ -454,13 +504,14 @@ void irq_resume(void)
 {
     evtchn_op_t op;
     int         virq, irq, evtchn;
+    int cpu = smp_processor_id(); /* XXX */
 
     for ( evtchn = 0; evtchn < NR_EVENT_CHANNELS; evtchn++ )
         mask_evtchn(evtchn); /* New event-channel space is not 'live' yet. */
 
     for ( virq = 0; virq < NR_VIRQS; virq++ )
     {
-        if ( (irq = virq_to_irq[virq]) == -1 )
+        if ( (irq = per_cpu(virq_to_irq, cpu)[virq]) == -1 )
             continue;
 
         /* Get a new binding from Xen. */
@@ -482,14 +533,17 @@ void irq_resume(void)
 void __init init_IRQ(void)
 {
     int i;
+    int cpu;
 
     irq_ctx_init(0);
 
     spin_lock_init(&irq_mapping_update_lock);
 
-    /* No VIRQ -> IRQ mappings. */
-    for ( i = 0; i < NR_VIRQS; i++ )
-        virq_to_irq[i] = -1;
+    for ( cpu = 0; cpu < NR_CPUS; cpu++ ) {
+	/* No VIRQ -> IRQ mappings. */
+	for ( i = 0; i < NR_VIRQS; i++ )
+	    per_cpu(virq_to_irq, cpu)[i] = -1;
+    }
 
     /* No event-channel -> IRQ mappings. */
     for ( i = 0; i < NR_EVENT_CHANNELS; i++ )
@@ -523,8 +577,6 @@ void __init init_IRQ(void)
         irq_desc[pirq_to_irq(i)].depth   = 1;
         irq_desc[pirq_to_irq(i)].handler = &pirq_type;
     }
-
-    (void)setup_irq(bind_virq_to_irq(VIRQ_MISDIRECT), &misdirect_action);
 
     /* This needs to be done early, but after the IRQ subsystem is alive. */
     ctrl_if_init();
