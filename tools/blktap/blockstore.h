@@ -21,15 +21,40 @@
 #define SECTOR_SHIFT   9 
 #endif
 
+#define FREEBLOCK_SIZE  (BLOCK_SIZE / sizeof(u64)) - (3 * sizeof(u64))
+#define FREEBLOCK_MAGIC 0x0fee0fee0fee0fee
+
+typedef struct {
+    u64 magic;
+    u64 next;
+    u64 count;
+    u64 list[FREEBLOCK_SIZE];
+} freeblock_t; 
+
+#define BLOCKSTORE_MAGIC 0xaaaaaaa00aaaaaaa
+#define BLOCKSTORE_SUPER 1ULL
+
+typedef struct {
+    u64 magic;
+    u64 freelist_full;
+    u64 freelist_current;
+} blockstore_super_t;
 
 extern void *newblock();
 extern void *readblock(u64 id);
 extern u64 allocblock(void *block);
 extern u64 allocblock_hint(void *block, u64 hint);
 extern int writeblock(u64 id, void *block);
+
+/* Add this blockid to a freelist, to be recycled by the allocator. */
+extern void releaseblock(u64 id);
+
+/* this is a memory free() operation for block-sized allocations */
 extern void freeblock(void *block);
 extern int __init_blockstore(void);
 
+/* debug for freelist. */
+void freelist_count(int print_each);
 #define ALLOCFAIL (((u64)(-1)))
 
 /* Distribution
@@ -40,6 +65,7 @@ struct bshdr_t_struct {
     u32            operation;
     u32            flags;
     u64            id;
+    u64            luid;
 } __attribute__ ((packed));
 typedef struct bshdr_t_struct bshdr_t;
 
@@ -52,12 +78,13 @@ typedef struct bsmsg_t_struct bsmsg_t;
 
 #define MSGBUFSIZE_OP    sizeof(u32)
 #define MSGBUFSIZE_FLAGS (sizeof(u32) + sizeof(u32))
-#define MSGBUFSIZE_ID    (sizeof(u32) + sizeof(u32) + sizeof(u64))
+#define MSGBUFSIZE_ID    (sizeof(u32) + sizeof(u32) + sizeof(u64) + sizeof(u64))
 #define MSGBUFSIZE_BLOCK sizeof(bsmsg_t)
 
 #define BSOP_READBLOCK  0x01
 #define BSOP_WRITEBLOCK 0x02
 #define BSOP_ALLOCBLOCK 0x03
+#define BSOP_FREEBLOCK  0x04
 
 #define BSOP_FLAG_ERROR 0x01
 

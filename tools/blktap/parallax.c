@@ -16,7 +16,7 @@
 
 #define PARALLAX_DEV     61440
 
-#if 1
+#if 0
 #define DPRINTF(_f, _a...) printf ( _f , ## _a )
 #else
 #define DPRINTF(_f, _a...) ((void)0)
@@ -342,14 +342,14 @@ int parallax_read(blkif_request_t *req, blkif_t *blkif)
 
     rsp = (blkif_response_t *)req;
     rsp->id = req->id;
-    rsp->operation = BLKIF_OP_WRITE;
+    rsp->operation = BLKIF_OP_READ;
     rsp->status = BLKIF_RSP_OKAY;
 
     return BLKTAP_RESPOND;
 err:
     rsp = (blkif_response_t *)req;
     rsp->id = req->id;
-    rsp->operation = BLKIF_OP_WRITE;
+    rsp->operation = BLKIF_OP_READ;
     rsp->status = BLKIF_RSP_ERROR;
     
     return BLKTAP_RESPOND;  

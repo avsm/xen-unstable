@@ -365,7 +365,7 @@ static int xlvbd_init_device(vdisk_t *xd)
  */
 static int xlvbd_remove_device(int dev16)
 {
-    int i, rc = 0, minor = MINOR(dev16);
+    int i, rc = 0;
     struct gendisk *gd;
     struct block_device *bd;
     struct xlbd_disk_info *di;
@@ -393,7 +393,6 @@ static int xlvbd_remove_device(int dev16)
         goto out;
     }
 
-    BUG_ON(minor != gd->first_minor);
     /* The VBD is mapped to an entire unit. */
     
     invalidate_partition(gd, 0);
@@ -496,21 +495,16 @@ int xlvbd_init(void)
 {
     int i;
 
-    /*
-     * If compiled as a module, we don't support unloading yet. We
-     * therefore permanently increment the reference count to
-     * disallow it.
-     */
-    /* MOD_INC_USE_COUNT; */
-
     memset(major_info, 0, sizeof(major_info));
 
-    for (i = 0; i < sizeof(major_info) / sizeof(major_info[0]); i++) {
+    vbd_info = kmalloc(MAX_VBDS * sizeof(vdisk_t), GFP_KERNEL);
+    if (vbd_info == NULL) {
+        printk(KERN_ALERT "Failed to allocate memory for disk info.\n");
+        nr_vbds = 0;
+        return 0;
     }
 
-    vbd_info = kmalloc(MAX_VBDS * sizeof(vdisk_t), GFP_KERNEL);
     nr_vbds  = xlvbd_get_vbd_info(vbd_info);
-
     if (nr_vbds < 0) {
         kfree(vbd_info);
         vbd_info = NULL;

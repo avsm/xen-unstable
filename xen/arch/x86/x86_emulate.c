@@ -18,11 +18,14 @@ typedef int16_t            s16;
 typedef int32_t            s32;
 typedef int64_t            s64;
 #include <public/xen.h>
+#define DPRINTF(_f, _a...) printf( _f , ## _a )
 #else
 #include <xen/config.h>
 #include <xen/types.h>
 #include <xen/lib.h>
+#include <xen/mm.h>
 #include <asm/regs.h>
+#define DPRINTF DPRINTK
 #endif
 #include <asm-x86/x86_emulate.h>
 
@@ -178,7 +181,7 @@ static u8 twobyte_table[256] = {
     /* 0xB8 - 0xBF */
     0, 0, DstMem|SrcImmByte|ModRM, DstMem|SrcReg|ModRM, 0, 0, 0, 0,
     /* 0xC0 - 0xCF */
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, ImplicitOps|ModRM, 0, 0, 0, 0, 0, 0, 0, 0,
     /* 0xD0 - 0xDF */
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     /* 0xE0 - 0xEF */
@@ -225,22 +228,25 @@ struct operand {
 #define EFLAGS_MASK (EFLG_OF|EFLG_SF|EFLG_ZF|EFLG_AF|EFLG_PF|EFLG_CF)
 
 /* Before executing instruction: restore necessary bits in EFLAGS. */
-/* EFLAGS = (_sav & _msk) | (EFLAGS & ~_msk); _sav &= ~msk; */
 #define _PRE_EFLAGS(_sav, _msk, _tmp)           \
+/* EFLAGS = (_sav & _msk) | (EFLAGS & ~_msk); */\
 "push %"_sav"; "                                \
 "movl %"_msk",%"_LO32 _tmp"; "                  \
 "andl %"_LO32 _tmp",("_STK"); "                 \
-"notl %"_LO32 _tmp"; "                          \
-"andl %"_LO32 _tmp",%"_sav"; "                  \
 "pushf; "                                       \
+"notl %"_LO32 _tmp"; "                          \
 "andl %"_LO32 _tmp",("_STK"); "                 \
 "pop  %"_tmp"; "                                \
 "orl  %"_LO32 _tmp",("_STK"); "                 \
-"popf; "
+"popf; "                                        \
+/* _sav &= ~msk; */                             \
+"movl %"_msk",%"_LO32 _tmp"; "                  \
+"notl %"_LO32 _tmp"; "                          \
+"andl %"_LO32 _tmp",%"_sav"; "
 
 /* After executing instruction: write-back necessary bits in EFLAGS. */
-/* _sav |= EFLAGS & _msk; */
 #define _POST_EFLAGS(_sav, _msk, _tmp)          \
+/* _sav |= EFLAGS & _msk; */                    \
 "pushf; "                                       \
 "pop  %"_tmp"; "                                \
 "andl %"_msk",%"_LO32 _tmp"; "                  \
@@ -368,8 +374,6 @@ do{ __asm__ __volatile__ (                                              \
    (_eip) += (_size); \
    (_type)_x; \
 })
-
-#define DPRINTF(_f, _a...) printf( _f , ## _a )
 
 void *
 decode_register(
@@ -664,9 +668,16 @@ x86_emulate_memop(
         emulate_2op_SrcV("test", src, dst, _regs.eflags);
         break;
     case 0x86 ... 0x87: /* xchg */
-        src.val ^= dst.val;
-        dst.val ^= src.val;
-        src.val ^= dst.val;
+        /* Write back the register source. */
+        switch ( dst.bytes )
+        {
+        case 1: *(u8  *)src.ptr = (u8)dst.val; break;
+        case 2: *(u16 *)src.ptr = (u16)dst.val; break;
+        case 4: *src.ptr = (u32)dst.val; break; /* 64b mode: zero-extend */
+        case 8: *src.ptr = dst.val; break;
+        }
+        /* Write back the memory destination with implicit LOCK prefix. */
+        dst.val = src.val;
         lock_prefix = 1;
         break;
     case 0xa0 ... 0xa1: /* mov */
@@ -931,23 +942,23 @@ x86_emulate_memop(
         }
         break;
     case 0xa3: bt: /* bt */
-        src.val &= (1UL << (1 << dst.bytes)) - 1; /* only subword offset */
+        src.val &= (dst.bytes << 3) - 1; /* only subword offset */
         emulate_2op_SrcV_nobyte("bt", src, dst, _regs.eflags);
         break;
     case 0xb3: btr: /* btr */
-        src.val &= (1UL << (1 << dst.bytes)) - 1; /* only subword offset */
+        src.val &= (dst.bytes << 3) - 1; /* only subword offset */
         emulate_2op_SrcV_nobyte("btr", src, dst, _regs.eflags);
         break;
     case 0xab: bts: /* bts */
-        src.val &= (1UL << (1 << dst.bytes)) - 1; /* only subword offset */
+        src.val &= (dst.bytes << 3) - 1; /* only subword offset */
         emulate_2op_SrcV_nobyte("bts", src, dst, _regs.eflags);
         break;
     case 0xbb: btc: /* btc */
-        src.val &= (1UL << (1 << dst.bytes)) - 1; /* only subword offset */
+        src.val &= (dst.bytes << 3) - 1; /* only subword offset */
         emulate_2op_SrcV_nobyte("btc", src, dst, _regs.eflags);
         break;
     case 0xba: /* Grp8 */
-        switch ( modrm_reg >> 1 )
+        switch ( modrm_reg & 3 )
         {
         case 0: goto bt;
         case 1: goto bts;
@@ -959,8 +970,63 @@ x86_emulate_memop(
     goto writeback;
 
  twobyte_special_insn:
-    /* Only prefetch instructions get here, so nothing to do. */
-    dst.orig_val = dst.val; /* disable writeback */
+    /* Disable writeback. */
+    dst.orig_val = dst.val;
+    switch ( b )
+    {
+    case 0x0d: /* GrpP (prefetch) */
+    case 0x18: /* Grp16 (prefetch/nop) */
+        break;
+    case 0xc7: /* Grp9 (cmpxchg8b) */
+#if defined(__i386__)
+    {
+        unsigned long old_lo, old_hi;
+        if ( ((rc = ops->read_emulated(cr2+0, &old_lo, 4)) != 0) ||
+             ((rc = ops->read_emulated(cr2+4, &old_hi, 4)) != 0) )
+            goto done;
+        if ( (old_lo != _regs.eax) || (old_hi != _regs.edx) )
+        {
+            _regs.eax = old_lo;
+            _regs.edx = old_hi;
+            _regs.eflags &= ~EFLG_ZF;
+        }
+        else if ( ops->cmpxchg8b_emulated == NULL )
+        {
+            rc = X86EMUL_UNHANDLEABLE;
+            goto done;
+        }
+        else
+        {
+            if ( (rc = ops->cmpxchg8b_emulated(cr2, old_lo, old_hi,
+                                               _regs.ebx, _regs.ecx)) != 0 )
+                goto done;
+            _regs.eflags |= EFLG_ZF;
+        }
+        break;
+    }
+#elif defined(__x86_64__)
+    {
+        unsigned long old, new;
+        if ( (rc = ops->read_emulated(cr2, &old, 8)) != 0 )
+            goto done;
+        if ( ((u32)(old>>0) != (u32)_regs.eax) ||
+             ((u32)(old>>32) != (u32)_regs.edx) )
+        {
+            _regs.eax = (u32)(old>>0);
+            _regs.edx = (u32)(old>>32);
+            _regs.eflags &= ~EFLG_ZF;
+        }
+        else
+        {
+            new = (_regs.ecx<<32)|(u32)_regs.ebx;
+            if ( (rc = ops->cmpxchg_emulated(cr2, old, new, 8)) != 0 )
+                goto done;
+            _regs.eflags |= EFLG_ZF;
+        }
+        break;
+    }
+#endif
+    }
     goto writeback;
 
  cannot_emulate:

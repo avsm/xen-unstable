@@ -2398,8 +2398,7 @@ void ptwr_flush(const int which)
             l1pte_propagate_from_guest(
                 d, &l1_pgentry_val(nl1e), &l1_pgentry_val(sl1e[i]));
 
-        if ( unlikely(l1_pgentry_val(ol1e) & _PAGE_PRESENT) )
-            put_page_from_l1e(ol1e, d);
+        put_page_from_l1e(ol1e, d);
     }
     unmap_domain_mem(pl1e);
 
@@ -2443,7 +2442,7 @@ static int ptwr_emulated_update(
     struct domain *d = current->domain;
 
     /* Aligned access only, thank you. */
-    if ( (addr & (bytes-1)) != 0 )
+    if ( !access_ok(VERIFY_WRITE, addr, bytes) || ((addr & (bytes-1)) != 0) )
     {
         MEM_LOG("ptwr_emulate: Unaligned or bad size ptwr access (%d, %p)\n",
                 bytes, addr);
@@ -2481,7 +2480,8 @@ static int ptwr_emulated_update(
 
     /* We are looking only for read-only mappings of p.t. pages. */
     if ( ((pte & (_PAGE_RW | _PAGE_PRESENT)) != _PAGE_PRESENT) ||
-         ((page->u.inuse.type_info & PGT_type_mask) != PGT_l1_page_table) )
+         ((page->u.inuse.type_info & PGT_type_mask) != PGT_l1_page_table) ||
+         (page_get_owner(page) != d) )
     {
         MEM_LOG("ptwr_emulate: Page is mistyped or bad pte (%p, %x)\n",
                 pte, page->u.inuse.type_info);
@@ -2501,6 +2501,7 @@ static int ptwr_emulated_update(
         if ( cmpxchg((unsigned long *)pl1e, old, val) != old )
         {
             unmap_domain_mem(pl1e);
+            put_page_from_l1e(nl1e, d);
             return X86EMUL_CMPXCHG_FAILED;
         }
     }
@@ -2526,8 +2527,7 @@ static int ptwr_emulated_update(
     }
 
     /* Finally, drop the old PTE. */
-    if ( unlikely(l1_pgentry_val(ol1e) & _PAGE_PRESENT) )
-        put_page_from_l1e(ol1e, d);
+    put_page_from_l1e(ol1e, d);
 
     return X86EMUL_CONTINUE;
 }
@@ -2560,18 +2560,15 @@ static struct x86_mem_emulator ptwr_mem_emulator = {
 /* Write page fault handler: check if guest is trying to modify a PTE. */
 int ptwr_do_page_fault(unsigned long addr)
 {
-    unsigned long    pte, pfn, l2e;
-    struct pfn_info *page;
-    l2_pgentry_t    *pl2e;
-    int              which, cpu = smp_processor_id();
-    u32              l2_idx;
-
-#ifdef __x86_64__
-    return 0; /* Writable pagetables need fixing for x86_64. */
-#endif
+    unsigned long       pte, pfn, l2e;
+    struct pfn_info    *page;
+    l2_pgentry_t       *pl2e;
+    int                 which, cpu = smp_processor_id();
+    u32                 l2_idx;
+    struct exec_domain *ed = current;
 
     /* Can't use linear_l2_table with external tables. */
-    BUG_ON(shadow_mode_external(current->domain));
+    BUG_ON(shadow_mode_external(ed->domain));
 
     /*
      * Attempt to read the PTE that maps the VA being accessed. By checking for
@@ -2590,10 +2587,20 @@ int ptwr_do_page_fault(unsigned long addr)
 
     /* We are looking only for read-only mappings of p.t. pages. */
     if ( ((pte & (_PAGE_RW | _PAGE_PRESENT)) != _PAGE_PRESENT) ||
-         ((page->u.inuse.type_info & PGT_type_mask) != PGT_l1_page_table) )
+         ((page->u.inuse.type_info & PGT_type_mask) != PGT_l1_page_table) ||
+         (page_get_owner(page) != ed->domain) )
     {
         return 0;
     }
+
+    /* x86/64: Writable pagetable code needs auditing. Use emulator for now. */
+#if defined(__x86_64__)
+    goto emulate;
+#endif
+
+    /* Writable pagetables are not yet SMP safe. Use emulator for now. */
+    if ( (ed->eid != 0) || (ed->ed_next_list != NULL) )
+        goto emulate;
 
     /* Get the L2 index at which this L1 p.t. is always mapped. */
     l2_idx = page->u.inuse.type_info & PGT_va_mask;
@@ -2640,7 +2647,7 @@ int ptwr_do_page_fault(unsigned long addr)
      * If last batch made no updates then we are probably stuck. Emulate this 
      * update to ensure we make progress.
      */
-    if ( (ptwr_info[cpu].ptinfo[which].prev_exec_domain == current) &&
+    if ( (ptwr_info[cpu].ptinfo[which].prev_exec_domain == ed) &&
          (ptwr_info[cpu].ptinfo[which].prev_nr_updates  == 0) )
     {
         /* Force non-emul next time, or we can get stuck emulating forever. */
@@ -2653,7 +2660,7 @@ int ptwr_do_page_fault(unsigned long addr)
     
     /* For safety, disconnect the L1 p.t. page from current space. */
     if ( (which == PTWR_PT_ACTIVE) && 
-         likely(!shadow_mode_enabled(current->domain)) )
+         likely(!shadow_mode_enabled(ed->domain)) )
     {
         *pl2e = mk_l2_pgentry(l2e & ~_PAGE_PRESENT);
         flush_tlb(); /* XXX Multi-CPU guests? */

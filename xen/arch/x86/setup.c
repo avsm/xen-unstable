@@ -8,6 +8,7 @@
 #include <xen/softirq.h>
 #include <xen/acpi.h>
 #include <xen/console.h>
+#include <xen/serial.h>
 #include <xen/trace.h>
 #include <xen/multiboot.h>
 #include <asm/bitops.h>
@@ -312,7 +313,6 @@ void __init cpu_init(void)
 
     /* Set up and load the per-CPU TSS and LDT. */
     t->bitmap = IOBMP_INVALID_OFFSET;
-    memset(t->io_bitmap, ~0, sizeof(t->io_bitmap));
 #if defined(__i386__)
     t->ss0  = __HYPERVISOR_DS;
     t->esp0 = get_stack_bottom();
@@ -617,6 +617,9 @@ void __init __start_xen(multiboot_info_t *mbi)
 
     /* Give up the VGA console if DOM0 is configured to grab it. */
     console_endboot(cmdline && strstr(cmdline, "tty0"));
+
+    /* Hide UART from DOM0 if we're using it */
+    serial_endboot();
 
     domain_unpause_by_systemcontroller(current->domain);
     domain_unpause_by_systemcontroller(dom0);
