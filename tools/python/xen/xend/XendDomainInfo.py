@@ -34,6 +34,12 @@ xend = server.SrvDaemon.instance()
 
 from XendError import VmError
 
+"""The length of domain names that Xen can handle.
+The names stored in Xen itself are not used for much, and
+xend can handle domain names of any length.
+"""
+MAX_DOMAIN_NAME = 15
+
 """Flag for a block device backend domain."""
 SIF_BLK_BE_DOMAIN = (1<<4)
 
@@ -270,7 +276,7 @@ def vm_recreate(savedinfo, info):
     vm = XendDomainInfo()
     vm.recreate = 1
     vm.setdom(info['dom'])
-    vm.name = info['name']
+    #vm.name = info['name']
     vm.memory = info['mem_kb']/1024
     start_time = sxp.child_value(savedinfo, 'start_time')
     if start_time is not None:
@@ -283,8 +289,8 @@ def vm_recreate(savedinfo, info):
     if config:
         d = vm.construct(config)
     else:
-        d = defer.Deferred()
-        d.callback(vm)
+        vm.name = info['name']
+        d = defer.succeed(vm)
     vm.recreate = 0
     return d
 
@@ -438,7 +444,7 @@ class XendDomainInfo:
 
     def check_name(self, name):
         """Check if a vm name is valid. Valid names start with a non-digit
-        and contain alphabetic characters, digits, or characters in '_-.'.
+        and contain alphabetic characters, digits, or characters in '_-.:/+'.
         The same name cannot be used for more than one vm at the same time.
 
         @param name: name
@@ -451,7 +457,7 @@ class XendDomainInfo:
             raise VmError('invalid vm name')
         for c in name:
             if c in string.digits: continue
-            if c in '_-.': continue
+            if c in '_-.:/+': continue
             if c in string.ascii_letters: continue
             raise VmError('invalid vm name')
         dominfo = domain_exists(name)
@@ -460,7 +466,7 @@ class XendDomainInfo:
         # my domain id.
         if not dominfo:
             return
-        print 'check_name>', 'dom=', dominfo.name, dominfo.dom, 'self=', name, self.dom
+        #print 'check_name>', 'dom=', dominfo.name, dominfo.dom, 'self=', name, self.dom
         if dominfo.is_terminated():
             return
         if not self.dom or (dominfo.dom != self.dom):
@@ -701,14 +707,17 @@ class XendDomainInfo:
             self.start_time = time.time()
         if self.restore:
             return
+        dom = self.dom or 0
         memory = self.memory
         name = self.name
+        # If the name is over the xen limit, use the end of it.
+        if len(name) > MAX_DOMAIN_NAME:
+            name = name[-MAX_DOMAIN_NAME:]
         try:
             cpu = int(sxp.child_value(self.config, 'cpu', '-1'))
         except:
             raise VmError('invalid cpu')
         cpu_weight = self.cpu_weight
-        dom = self.dom or 0
         dom = xc.domain_create(dom= dom, mem_kb= memory * 1024,
                                name= name, cpu= cpu, cpu_weight= cpu_weight)
         if dom <= 0:
@@ -913,12 +922,10 @@ class XendDomainInfo:
     def configure(self):
         """Configure a vm.
 
-        vm         virtual machine
-        config     configuration
-
-        returns Deferred - calls callback with vm
+        @return: deferred - calls callback with vm
         """
-        d = self.create_devices()
+        d = self.create_blkif()
+        d.addCallback(lambda x: self.create_devices())
         d.addCallback(self._configure)
         return d
 
@@ -933,20 +940,31 @@ class XendDomainInfo:
         d.addErrback(cberr)
         return d
 
+    def create_blkif(self):
+        """Create the block device interface (blkif) for the vm.
+        The vm needs a blkif even if it doesn't have any disks
+        at creation time, for example when it uses NFS root.
+
+        @return: deferred
+        """
+        ctrl = xend.blkif_create(self.dom, recreate=self.recreate)
+        back = ctrl.getBackend(0)
+        return back.connect(recreate=self.recreate)
+    
     def dom_construct(self, dom, config):
         """Construct a vm for an existing domain.
 
-        @param dom:    domain id
+        @param dom: domain id
+        @param config: domain configuration
         @return: deferred
         """
         d = dom_get(dom)
         if not d:
             raise VmError("Domain not found: %d" % dom)
-        print 'dom_construct>', dom, config
         try:
             self.restore = 1
             self.setdom(dom)
-            self.name = d['name']
+            #self.name = d['name']
             self.memory = d['mem_kb']/1024
             deferred = self.construct(config)
         finally:
