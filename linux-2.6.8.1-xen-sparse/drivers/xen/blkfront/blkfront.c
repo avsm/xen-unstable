@@ -32,7 +32,7 @@ typedef unsigned char byte; /* from linux/ide.h */
 static unsigned int blkif_state = BLKIF_STATE_CLOSED;
 static unsigned int blkif_evtchn, blkif_irq;
 
-static volatile int blkif_control_rsp_valid;
+static int blkif_control_rsp_valid;
 static blkif_response_t blkif_control_rsp;
 
 static blkif_ring_t *blk_ring;
@@ -1125,10 +1125,11 @@ static void blkif_status_change(blkif_fe_interface_status_changed_t *status)
             recovery = 0;
             wmb();
 
-	    blkif_state = BLKIF_STATE_CONNECTED;
-
             /* Kicks things back into life. */
             flush_requests();
+
+	    /* Now safe to left other peope use interface */
+	    blkif_state = BLKIF_STATE_CONNECTED;
         }
         else
         {
