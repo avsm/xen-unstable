@@ -10,6 +10,7 @@
 #define __XC_H__
 
 #include <stdint.h>
+
 typedef uint8_t            u8;
 typedef uint16_t           u16;
 typedef uint32_t           u32;
@@ -23,7 +24,6 @@ typedef int64_t            s64;
 #include <xen/dom0_ops.h>
 #include <xen/event_channel.h>
 #include <xen/sched_ctl.h>
-#include <xen/io/domain_controller.h>
 
 /* Obtain or relinquish a handle on the 'xc' library. */
 int xc_interface_open(void);
@@ -62,13 +62,15 @@ int xc_domain_getinfo(int xc_handle,
                       xc_dominfo_t *info);
 int xc_domain_getfullinfo(int xc_handle,
                           u32 domid,
+                          u32 vcpu,
                           xc_domaininfo_t *info,
                           full_execution_context_t *ctxt);
 int xc_domain_setcpuweight(int xc_handle,
                            u32 domid,
                            float weight);
 long long xc_domain_get_cpu_usage(int xc_handle,
-                                  domid_t domid);
+                                  domid_t domid,
+                                  int vcpu);
 
 
 typedef dom0_shadow_control_stats_t xc_shadow_control_stats_t;
@@ -104,6 +106,16 @@ xc_plan9_build (int xc_handle,
                 const char *cmdline, 
 		unsigned int control_evtchn, 
 		unsigned long flags);
+
+struct mem_map;
+int xc_vmx_build(int xc_handle,
+                 u32 domid,
+                 const char *image_name,
+                 struct mem_map *memmap,
+                 const char *ramdisk_name,
+                 const char *cmdline,
+                 unsigned int control_evtchn,
+                 unsigned long flags);
 
 int xc_bvtsched_global_set(int xc_handle,
                            unsigned long ctx_allow);
@@ -207,5 +219,8 @@ void *xc_map_foreign_range(int xc_handle, u32 dom,
 
 void *xc_map_foreign_batch(int xc_handle, u32 dom, int prot,
                            unsigned long *arr, int num );
+
+int xc_get_pfn_list(int xc_handle, u32 domid, unsigned long *pfn_buf, 
+		    unsigned long max_pfns);
 
 #endif /* __XC_H__ */
