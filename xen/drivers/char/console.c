@@ -1,3 +1,4 @@
+/* -*-  Mode:C; c-basic-offset:4; tab-width:4; indent-tabs-mode:nil -*- */
 /******************************************************************************
  * console.c
  * 
@@ -21,7 +22,7 @@
 #include <asm/mm.h>
 
 /* opt_console: comma-separated list of console outputs. */
-static unsigned char opt_console[30] = "com1,vga";
+static unsigned char opt_console[30] = OPT_CONSOLE_STR;
 string_param("console", opt_console);
 
 /* opt_conswitch: a character pair controlling console switching. */
@@ -267,7 +268,7 @@ static void __serial_rx(unsigned char c, struct xen_regs *regs)
     {
         serial_rx_ring[SERIAL_RX_MASK(serial_rx_prod)] = c;
         if ( serial_rx_prod++ == serial_rx_cons )
-            send_guest_virq(dom0, VIRQ_CONSOLE);
+            send_guest_virq(dom0->exec_domain[0], VIRQ_CONSOLE);
     }
 }
 
@@ -300,7 +301,7 @@ long do_console_io(int cmd, int count, char *buffer)
 
 #ifndef VERBOSE
     /* Only domain-0 may access the emergency console. */
-    if ( current->id != 0 )
+    if ( current->domain->id != 0 )
         return -EPERM;
 #endif
 
