@@ -104,6 +104,7 @@ class NetDev(controller.SplitDev):
         self.evtchn = None
         self.configure(config)
         self.status = NETIF_INTERFACE_STATUS_DISCONNECTED
+        self.dom = ctrl.dom
 
     def _get_config_mac(self, config):
         vmac = sxp.child_value(config, 'mac')
@@ -307,7 +308,7 @@ class NetDev(controller.SplitDev):
     
     def recv_fe_interface_connect(self, val, req):
         if not req: return
-        self.evtchn = channel.eventChannel(0, self.controller.dom)
+        self.evtchn = channel.eventChannel(self.dom, self.controller.dom)
         msg = packMsg('netif_be_connect_t',
                       { 'domid'          : self.controller.dom,
                         'netif_handle'   : self.vif,
