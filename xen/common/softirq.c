@@ -21,20 +21,16 @@ static softirq_handler softirq_handlers[NR_SOFTIRQS] __cacheline_aligned;
 
 asmlinkage void do_softirq()
 {
-    unsigned int pending, cpu = smp_processor_id();
-    softirq_handler *h;
+    unsigned int i, pending, cpu = smp_processor_id();
 
-    while ( (pending = xchg(&softirq_pending(cpu), 0)) != 0 )
-    {
-        h = softirq_handlers;
-        while ( pending )
-        {
-            if ( pending & 1 )
-                (*h)();
-            h++;
-            pending >>= 1;
-        }
-    }
+    pending = softirq_pending(cpu);
+    ASSERT(pending != 0);
+
+    do {
+        i = find_first_set_bit(pending);
+        clear_bit(i, &softirq_pending(cpu));
+        (*softirq_handlers[i])();
+    } while ( (pending = softirq_pending(cpu)) != 0 );
 }
 
 void open_softirq(int nr, softirq_handler handler)

@@ -243,29 +243,21 @@ static void switch_serial_input(void)
                input_str[xen_rx], opt_conswitch[0], input_str[!xen_rx]);
 }
 
-static void __serial_rx(unsigned char c, struct pt_regs *regs)
+static void __serial_rx(unsigned char c, struct xen_regs *regs)
 {
-    key_handler *handler;
-    struct domain *p;
-
     if ( xen_rx )
     {
-        if ( (handler = get_key_handler(c)) != NULL )
-            (*handler)(c, NULL, regs);
+        handle_keypress(c);
     }
     else if ( (serial_rx_prod-serial_rx_cons) != SERIAL_RX_SIZE )
     {
         serial_rx_ring[SERIAL_RX_MASK(serial_rx_prod)] = c;
         if ( serial_rx_prod++ == serial_rx_cons )
-        {
-            p = find_domain_by_id(0); /* only DOM0 reads the serial buffer */
-            send_guest_virq(p, VIRQ_CONSOLE);
-            put_domain(p);
-        }
+            send_guest_virq(dom0, VIRQ_CONSOLE);
     }
 }
 
-static void serial_rx(unsigned char c, struct pt_regs *regs)
+static void serial_rx(unsigned char c, struct xen_regs *regs)
 {
     static int switch_code_count = 0;
 
