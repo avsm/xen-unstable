@@ -29,6 +29,7 @@ SRCS     += xc_linux_save.c
 SRCS     += xc_misc.c
 SRCS     += xc_physdev.c
 SRCS     += xc_private.c
+SRCS     += xc_ptrace.c
 SRCS     += xc_rrobin.c
 SRCS     += xc_vmx_build.c
 
@@ -46,7 +47,8 @@ PIC_OBJS := $(patsubst %.c,%.opic,$(SRCS))
 
 LIB      := libxc.a libxc.so libxc.so.$(MAJOR) libxc.so.$(MAJOR).$(MINOR)
 
-all: check-for-zlib mk-symlinks
+all: build
+build: check-for-zlib mk-symlinks
 	$(MAKE) $(LIB)
 
 check-for-zlib:
@@ -68,7 +70,7 @@ mk-symlinks:
 	( cd xen/linux >/dev/null ; \
 	  ln -sf ../../$(LINUX_ROOT)/include/asm-xen/linux-public/*.h . )
 
-install: all
+install: build
 	[ -d $(DESTDIR)/usr/lib ] || $(INSTALL_DIR) $(DESTDIR)/usr/lib
 	[ -d $(DESTDIR)/usr/include ] || $(INSTALL_DIR) $(DESTDIR)/usr/include
 	$(INSTALL_PROG) libxc.so.$(MAJOR).$(MINOR) $(DESTDIR)/usr/lib
@@ -85,7 +87,7 @@ TAGS:
 clean:
 	rm -rf *.a *.so* *.o *.opic *.rpm $(LIB) *~ $(DEPS) xen
 
-rpm: all
+rpm: build
 	rm -rf staging
 	mkdir staging
 	mkdir staging/i386
