@@ -363,9 +363,9 @@ EXPORT_SYMBOL(monotonic_clock);
 static inline void do_timer_interrupt(int irq, void *dev_id,
 					struct pt_regs *regs)
 {
-	s64 delta;
-	unsigned int ticks = 0;
-	long sec_diff;
+	time_t wtm_sec, sec;
+	s64 delta, nsec;
+	long sec_diff, wtm_nsec;
 
 	__get_time_values_from_xen();
 
@@ -379,14 +379,9 @@ static inline void do_timer_interrupt(int irq, void *dev_id,
 
 	/* Process elapsed jiffies since last call. */
 	while (delta >= NS_PER_TICK) {
-		ticks++;
 		delta -= NS_PER_TICK;
 		processed_system_time += NS_PER_TICK;
-	}
-
-	if (ticks != 0) {
-		jiffies_64 += ticks - 1;
-		do_timer_interrupt_hook(regs); /* implicit 'jiffies_64++' */
+		do_timer_interrupt_hook(regs);
 	}
 
 	/*
@@ -418,10 +413,17 @@ static inline void do_timer_interrupt(int irq, void *dev_id,
 		}
 
 		/* Update our unsynchronised xtime appropriately. */
-		xtime.tv_sec  = shadow_tv.tv_sec;
-		xtime.tv_nsec = shadow_tv.tv_usec * NSEC_PER_USEC;
+		sec = shadow_tv.tv_sec;
+		nsec = shadow_tv.tv_usec * NSEC_PER_USEC;
 
-		last_update_from_xen = xtime.tv_sec;
+		__normalize_time(&sec, &nsec);
+		wtm_sec  = wall_to_monotonic.tv_sec + (xtime.tv_sec - sec);
+		wtm_nsec = wall_to_monotonic.tv_nsec + (xtime.tv_nsec - nsec);
+
+		set_normalized_timespec(&xtime, sec, nsec);
+		set_normalized_timespec(&wall_to_monotonic, wtm_sec, wtm_nsec);
+
+		last_update_from_xen = sec;
 	}
 
 #ifdef CONFIG_XEN_PRIVILEGED_GUEST
@@ -596,16 +598,15 @@ void __init time_init(void)
 		return;
 	}
 #endif
-	xtime.tv_sec = HYPERVISOR_shared_info->wc_sec;
+	__get_time_values_from_xen();
+	xtime.tv_sec = shadow_tv.tv_sec;
 	wall_to_monotonic.tv_sec = -xtime.tv_sec;
-	xtime.tv_nsec = HYPERVISOR_shared_info->wc_usec * NSEC_PER_USEC;
+	xtime.tv_nsec = shadow_tv.tv_usec * NSEC_PER_USEC;
 	wall_to_monotonic.tv_nsec = -xtime.tv_nsec;
+	processed_system_time = shadow_system_time;
 
 	cur_timer = select_timer();
 	printk(KERN_INFO "Using %s for high-res timesource\n",cur_timer->name);
-
-	__get_time_values_from_xen();
-	processed_system_time = shadow_system_time;
 
 	time_irq = bind_virq_to_irq(VIRQ_TIMER);
 
