@@ -116,9 +116,10 @@ void __init zap_low_mappings(void)
  */
 static void __synchronise_pagetables(void *mask)
 {
-    struct domain *d = current;
-    if ( ((unsigned long)mask & (1<<d->processor)) && is_idle_task(d) )
-        write_ptbase(&d->mm);
+    struct exec_domain *ed = current;
+    if ( ((unsigned long)mask & (1 << ed->processor)) &&
+         is_idle_task(ed->domain) )
+        write_ptbase(&ed->mm);
 }
 void synchronise_pagetables(unsigned long cpu_mask)
 {
@@ -243,24 +244,25 @@ int check_descriptor(unsigned long *d)
 }
 
 
-void destroy_gdt(struct domain *d)
+void destroy_gdt(struct exec_domain *ed)
 {
     int i;
     unsigned long pfn;
 
     for ( i = 0; i < 16; i++ )
     {
-        if ( (pfn = l1_pgentry_to_pagenr(d->mm.perdomain_pt[i])) != 0 )
+        if ( (pfn = l1_pgentry_to_pagenr(ed->mm.perdomain_ptes[i])) != 0 )
             put_page_and_type(&frame_table[pfn]);
-        d->mm.perdomain_pt[i] = mk_l1_pgentry(0);
+        ed->mm.perdomain_ptes[i] = mk_l1_pgentry(0);
     }
 }
 
 
-long set_gdt(struct domain *d, 
+long set_gdt(struct exec_domain *ed, 
              unsigned long *frames,
              unsigned int entries)
 {
+    struct domain *d = ed->domain;
     /* NB. There are 512 8-byte entries per GDT page. */
     int i = 0, nr_pages = (entries + 511) / 512;
     struct desc_struct *vgdt;
@@ -301,15 +303,15 @@ long set_gdt(struct domain *d,
     unmap_domain_mem(vgdt);
 
     /* Tear down the old GDT. */
-    destroy_gdt(d);
+    destroy_gdt(ed);
 
     /* Install the new GDT. */
     for ( i = 0; i < nr_pages; i++ )
-        d->mm.perdomain_pt[i] =
+        ed->mm.perdomain_ptes[i] =
             mk_l1_pgentry((frames[i] << PAGE_SHIFT) | __PAGE_HYPERVISOR);
 
-    SET_GDT_ADDRESS(d, GDT_VIRT_START);
-    SET_GDT_ENTRIES(d, entries);
+    SET_GDT_ADDRESS(ed, GDT_VIRT_START(ed));
+    SET_GDT_ENTRIES(ed, entries);
 
     return 0;
 
@@ -332,11 +334,15 @@ long do_set_gdt(unsigned long *frame_list, unsigned int entries)
     if ( copy_from_user(frames, frame_list, nr_pages * sizeof(unsigned long)) )
         return -EFAULT;
 
+    LOCK_BIGLOCK(current->domain);
+
     if ( (ret = set_gdt(current, frames, entries)) == 0 )
     {
         local_flush_tlb();
         __asm__ __volatile__ ("lgdt %0" : "=m" (*current->mm.gdt));
     }
+
+    UNLOCK_BIGLOCK(current->domain);
 
     return ret;
 }
@@ -347,27 +353,36 @@ long do_update_descriptor(
 {
     unsigned long *gdt_pent, pfn = pa >> PAGE_SHIFT, d[2];
     struct pfn_info *page;
+    struct exec_domain *ed;
     long ret = -EINVAL;
 
     d[0] = word1;
     d[1] = word2;
 
-    if ( (pa & 7) || (pfn >= max_page) || !check_descriptor(d) )
+    LOCK_BIGLOCK(current->domain);
+
+    if ( (pa & 7) || (pfn >= max_page) || !check_descriptor(d) ) {
+        UNLOCK_BIGLOCK(current->domain);
         return -EINVAL;
+    }
 
     page = &frame_table[pfn];
-    if ( unlikely(!get_page(page, current)) )
+    if ( unlikely(!get_page(page, current->domain)) ) {
+        UNLOCK_BIGLOCK(current->domain);
         return -EINVAL;
+    }
 
     /* Check if the given frame is in use in an unsafe context. */
     switch ( page->u.inuse.type_info & PGT_type_mask )
     {
     case PGT_gdt_page:
         /* Disallow updates of Xen-reserved descriptors in the current GDT. */
-        if ( (l1_pgentry_to_pagenr(current->mm.perdomain_pt[0]) == pfn) &&
-             (((pa&(PAGE_SIZE-1))>>3) >= FIRST_RESERVED_GDT_ENTRY) &&
-             (((pa&(PAGE_SIZE-1))>>3) <= LAST_RESERVED_GDT_ENTRY) )
-            goto out;
+        for_each_exec_domain(current->domain, ed) {
+            if ( (l1_pgentry_to_pagenr(ed->mm.perdomain_ptes[0]) == pfn) &&
+                 (((pa&(PAGE_SIZE-1))>>3) >= FIRST_RESERVED_GDT_ENTRY) &&
+                 (((pa&(PAGE_SIZE-1))>>3) <= LAST_RESERVED_GDT_ENTRY) )
+                goto out;
+        }
         if ( unlikely(!get_page_type(page, PGT_gdt_page)) )
             goto out;
         break;
@@ -392,6 +407,9 @@ long do_update_descriptor(
 
  out:
     put_page(page);
+
+    UNLOCK_BIGLOCK(current->domain);
+
     return ret;
 }
 
@@ -457,16 +475,6 @@ void memguard_guard_range(void *p, unsigned long l)
 void memguard_unguard_range(void *p, unsigned long l)
 {
     __memguard_change_range(p, l, 0);
-}
-
-int memguard_is_guarded(void *p)
-{
-    l1_pgentry_t *l1;
-    l2_pgentry_t *l2;
-    unsigned long _p = (unsigned long)p;
-    l2  = &idle_pg_table[l2_table_offset(_p)];
-    l1  = l2_pgentry_to_l1(*l2) + l1_table_offset(_p);
-    return !(l1_pgentry_val(*l1) & _PAGE_PRESENT);
 }
 
 #endif
