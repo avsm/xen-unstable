@@ -17,6 +17,14 @@
  *  hook to drop into a debug session. It can also be used to hook off
  *  deliberately caused traps (which you then handle and return non-zero)
  *  but really these should be hooked off 'debugger_trap_entry'.
+ *
+ * 3. debugger_trap_immediate():
+ *  Called if we want to drop into a debugger now.  This is essentially the
+ *  same as debugger_trap_fatal, except that we use the current register state
+ *  rather than the state which was in effect when we took the trap.
+ *  Essentially, if we're dying because of an unhandled exception, we call
+ *  debugger_trap_fatal; if we're dying because of a panic() we call
+ *  debugger_trap_immediate().
  */
 
 #ifndef __X86_DEBUGGER_H__
@@ -29,6 +37,8 @@
     if ( debugger_trap_entry(_v, _r) ) return EXCRET_fault_fixed;
 #define DEBUGGER_trap_fatal(_v, _r) \
     if ( debugger_trap_fatal(_v, _r) ) return EXCRET_fault_fixed;
+
+int call_with_registers(int (*f)(struct xen_regs *r));
 
 #ifdef XEN_DEBUGGER
 
@@ -93,6 +103,15 @@ static inline int debugger_trap_fatal(
     return ret;
 }
 
+#define debugger_trap_immediate() ()
+
+#elif defined(CRASH_DEBUG)
+
+extern int __trap_to_cdb(struct xen_regs *r);
+#define debugger_trap_entry(_v, _r) (0)
+#define debugger_trap_fatal(_v, _r) __trap_to_cdb(_r)
+#define debugger_trap_immediate() call_with_registers(__trap_to_cdb)
+
 #elif 0
 
 extern int kdb_trap(int, int, struct xen_regs *);
@@ -113,6 +132,7 @@ static inline int debugger_trap_fatal(
 
 #define debugger_trap_entry(_v, _r) (0)
 #define debugger_trap_fatal(_v, _r) (0)
+#define debugger_trap_immediate()
 
 #endif
 
