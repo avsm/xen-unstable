@@ -68,6 +68,6 @@ search_pre_exception_table(struct xen_regs *regs)
     unsigned long addr = (unsigned long)regs->eip;
     unsigned long fixup = search_one_table(
         __start___pre_ex_table, __stop___pre_ex_table-1, addr);
-    DPRINTK("Pre-exception: %08lx -> %08lx\n", addr, fixup);
+    DPRINTK("Pre-exception: %p -> %p\n", addr, fixup);
     return fixup;
 }

@@ -52,7 +52,8 @@ void __init get_mtrr_state(void)
 	unsigned lo, dummy;
 
 	if (!mtrr_state.var_ranges) {
-		mtrr_state.var_ranges = xmalloc(num_var_ranges * sizeof (struct mtrr_var_range));
+		mtrr_state.var_ranges = xmalloc_array(struct mtrr_var_range,
+						  num_var_ranges);
 		if (!mtrr_state.var_ranges)
 			return;
 	} 
@@ -250,7 +251,7 @@ static void prepare_set(void)
 	/*  Save value of CR4 and clear Page Global Enable (bit 7)  */
 	if ( cpu_has_pge ) {
 		cr4 = read_cr4();
-		write_cr4(cr4 & (unsigned char) ~(1 << 7));
+		write_cr4(cr4 & ~X86_CR4_PGE);
 	}
 
 	/* Flush all TLBs via a mov %cr3, %reg; mov %reg, %cr3 */
