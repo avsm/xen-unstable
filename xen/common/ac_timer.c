@@ -1,5 +1,4 @@
-/* -*-  Mode:C; c-basic-offset:4; tab-width:4 -*-
- ****************************************************************************
+/****************************************************************************
  * (C) 2002-2003 - Rolf Neugebauer - Intel Research Cambridge
  * (C) 2002-2003 University of Cambridge
  ****************************************************************************
@@ -35,14 +34,7 @@
 
 #define DEFAULT_HEAP_LIMIT 127
 
-/* A timer list per CPU */
-typedef struct ac_timers_st
-{
-    spinlock_t        lock;
-    struct ac_timer **heap;
-} __cacheline_aligned ac_timers_t;
-static ac_timers_t ac_timers[NR_CPUS];
-
+struct ac_timers ac_timers[NR_CPUS];
 
 /****************************************************************************
  * HEAP OPERATIONS.
@@ -130,7 +122,7 @@ static int add_entry(struct ac_timer **heap, struct ac_timer *t)
     if ( unlikely(sz == GET_HEAP_LIMIT(heap)) )
     {
         int i, limit = (GET_HEAP_LIMIT(heap)+1) << 1;
-        struct ac_timer **new_heap = xmalloc(limit*sizeof(struct ac_timer *));
+        struct ac_timer **new_heap = xmalloc_array(struct ac_timer *, limit);
         if ( new_heap == NULL ) BUG();
         memcpy(new_heap, heap, (limit>>1)*sizeof(struct ac_timer *));
         for ( i = 0; i < smp_num_cpus; i++ )
@@ -215,6 +207,8 @@ static void ac_timer_softirq_action(void)
     s_time_t         now;
     void             (*fn)(unsigned long);
 
+    ac_timers[cpu].softirqs++;
+
     spin_lock_irq(&ac_timers[cpu].lock);
     
     do {
@@ -278,9 +272,10 @@ void __init ac_timer_init(void)
 
     for ( i = 0; i < smp_num_cpus; i++ )
     {
-        ac_timers[i].heap = xmalloc(
-            (DEFAULT_HEAP_LIMIT+1) * sizeof(struct ac_timer *));
-        if ( ac_timers[i].heap == NULL ) BUG();
+        ac_timers[i].heap = xmalloc_array(
+            struct ac_timer *, DEFAULT_HEAP_LIMIT+1);
+        BUG_ON(ac_timers[i].heap == NULL);
+
         SET_HEAP_SIZE(ac_timers[i].heap, 0);
         SET_HEAP_LIMIT(ac_timers[i].heap, DEFAULT_HEAP_LIMIT);
         spin_lock_init(&ac_timers[i].lock);
@@ -288,3 +283,13 @@ void __init ac_timer_init(void)
 
     register_keyhandler('a', dump_timerq, "dump ac_timer queues");
 }
+
+/*
+ * Local variables:
+ * mode: C
+ * c-set-style: "BSD"
+ * c-basic-offset: 4
+ * tab-width: 4
+ * indent-tabs-mode: nil
+ * End:
+ */

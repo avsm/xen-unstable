@@ -19,7 +19,7 @@
  * This makes sure that old versions of dom0 tools will stop working in a
  * well-defined way (rather than crashing the machine, for instance).
  */
-#define DOM0_INTERFACE_VERSION   0xAAAA001A
+#define DOM0_INTERFACE_VERSION   0xAAAA1002
 
 /************************************************************************/
 
@@ -85,7 +85,7 @@ typedef struct {
 typedef struct {
     /* IN variables. */
     domid_t  domain;                  /*  0 */ /* NB. IN/OUT variable. */
-    u16     __pad;
+    u16      exec_domain;
     /* OUT variables. */
 #define DOMFLAGS_DYING     (1<<0) /* Domain is scheduled to die.             */
 #define DOMFLAGS_CRASHED   (1<<1) /* Crashed domain; frozen for postmortem.  */
@@ -109,23 +109,16 @@ typedef struct {
     u64      cpu_time;                /* 40 */
 } PACKED dom0_getdomaininfo_t; /* 48 bytes */
 
-#define DOM0_BUILDDOMAIN      13
+#define DOM0_SETDOMAININFO      13
 typedef struct {
     /* IN variables. */
-    domid_t                 domain;   /*  0 */
-    u16                     __pad0;   /*  2 */
-    u32                     __pad1;   /*  4 */
+    domid_t                   domain;       /*  0 */
+    u16                       exec_domain;  /*  2 */
+    u32                       __pad0;       /*  4 */
     /* IN/OUT parameters */
-    full_execution_context_t *ctxt;   /*  8 */
+    full_execution_context_t *ctxt;         /*  8 */
     MEMORY_PADDING;
-} PACKED dom0_builddomain_t; /* 16 bytes */
-
-#define DOM0_IOPL             14
-typedef struct {
-    domid_t domain;                   /*  0 */
-    u16     __pad;
-    u32     iopl;                     /*  4 */
-} PACKED dom0_iopl_t; /* 8 bytes */
+} PACKED dom0_setdomaininfo_t;              /* 16 bytes */
 
 #define DOM0_MSR              15
 typedef struct {
@@ -208,7 +201,7 @@ typedef struct {
 typedef struct {
     /* IN variables. */
     domid_t      domain;              /*  0 */
-    u16          __pad;
+    u16          exec_domain;
     s32          cpu;                 /*  4: -1 implies unpin */
 } PACKED dom0_pincpudomain_t; /* 8 bytes */
 
@@ -267,7 +260,7 @@ typedef struct {
 #define DOM0_SHADOW_CONTROL_OP_OFF         0
 #define DOM0_SHADOW_CONTROL_OP_ENABLE_TEST 1
 #define DOM0_SHADOW_CONTROL_OP_ENABLE_LOGDIRTY 2
-#define DOM0_SHADOW_CONTROL_OP_ENABLE_TRANSLATE 3
+
 #define DOM0_SHADOW_CONTROL_OP_FLUSH       10     /* table ops */
 #define DOM0_SHADOW_CONTROL_OP_CLEAN       11
 #define DOM0_SHADOW_CONTROL_OP_PEEK        12
@@ -326,15 +319,6 @@ typedef struct {
     unsigned long *array;             /* 16 */
     MEMORY_PADDING;
 } PACKED dom0_getpageframeinfo2_t; /* 24 bytes */
-
-#define DOM0_SETDOMAINVMASSIST   30
-typedef struct {
-    /* IN variables. */
-    domid_t      domain;              /*  0 */
-    u16          __pad0;
-    u32          cmd;                 /*  4: vm_assist cmd */
-    u32          type;                /*  8: vm_assist cmd */
-} PACKED dom0_setdomainvmassist_t; /* 12 bytes */
 
 /*
  * Request memory range (@pfn, @pfn+@nr_pfns-1) to have type @type.
@@ -414,6 +398,14 @@ typedef struct {
     u32     _pad0;
 } PACKED dom0_microcode_t; /* 16 bytes */
 
+#define DOM0_IOPORT_PERMISSION   36
+typedef struct {
+    domid_t domain;                   /* 0: domain to be affected */
+    u16     first_port;               /* 2: first port int range */
+    u16     nr_ports;                 /* 4: size of port range */
+    u16     allow_access;             /* 6: allow or deny access to range? */
+} PACKED dom0_ioport_permission_t; /* 8 bytes */
+
 typedef struct {
     u32 cmd;                          /* 0 */
     u32 interface_version;            /* 4 */ /* DOM0_INTERFACE_VERSION */
@@ -426,10 +418,9 @@ typedef struct {
         dom0_getmemlist_t        getmemlist;
         dom0_schedctl_t          schedctl;
         dom0_adjustdom_t         adjustdom;
-        dom0_builddomain_t       builddomain;
+        dom0_setdomaininfo_t     setdomaininfo;
         dom0_getdomaininfo_t     getdomaininfo;
         dom0_getpageframeinfo_t  getpageframeinfo;
-        dom0_iopl_t              iopl;
 	dom0_msr_t               msr;
 	dom0_debug_t             debug;
 	dom0_settime_t           settime;
@@ -443,12 +434,12 @@ typedef struct {
 	dom0_setdomaininitialmem_t setdomaininitialmem;
 	dom0_setdomainmaxmem_t   setdomainmaxmem;
 	dom0_getpageframeinfo2_t getpageframeinfo2;
-	dom0_setdomainvmassist_t setdomainvmassist;
         dom0_add_memtype_t       add_memtype;
         dom0_del_memtype_t       del_memtype;
         dom0_read_memtype_t      read_memtype;
         dom0_perfccontrol_t      perfccontrol;
         dom0_microcode_t         microcode;
+        dom0_ioport_permission_t ioport_permission;
     } PACKED u;
 } PACKED dom0_op_t; /* 80 bytes */
 

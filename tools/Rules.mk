@@ -1,20 +1,21 @@
 #  -*- mode: Makefile; -*-
 
+include $(XEN_ROOT)/Config.mk
+
 XEN_XC             = $(XEN_ROOT)/tools/python/xen/lowlevel/xc
 XEN_LIBXC          = $(XEN_ROOT)/tools/libxc
 XEN_LIBXUTIL       = $(XEN_ROOT)/tools/libxutil
 
-COMPILE_ARCH    ?= $(shell uname -m | sed -e s/i.86/x86_32/)
-TARGET_ARCH     ?= $(COMPILE_ARCH)
-
-ifeq ($(TARGET_ARCH),x86_32)
+ifeq ($(XEN_TARGET_ARCH),x86_32)
 CFLAGS  += -m32 -march=i686
 LDFLAGS += -m elf_i386
+X11_LDPATH = -L/usr/X11R6/lib
 endif
 
-ifeq ($(TARGET_ARCH),x86_64)
+ifeq ($(XEN_TARGET_ARCH),x86_64)
 CFLAGS  += -m64
 LDFLAGS += -m elf_x86_64
+X11_LDPATH = -L/usr/X11R6/lib64
 endif
 
 %.opic: %.c

@@ -11,6 +11,7 @@
  */
 
 #include "common.h"
+#include <asm-xen/evtchn.h>
 
 /*
  * These are rather arbitrary. They are fairly large because adjacent requests
@@ -68,6 +69,18 @@ static PEND_RING_IDX pending_prod, pending_cons;
 static kmem_cache_t *buffer_head_cachep;
 #endif
 
+#ifdef CONFIG_XEN_BLKDEV_TAP_BE
+/*
+ * If the tap driver is used, we may get pages belonging to either the tap
+ * or (more likely) the real frontend.  The backend must specify which domain
+ * a given page belongs to in update_va_mapping though.  For the moment, 
+ * the tap rewrites the ID field of the request to contain the request index
+ * and the id of the real front end domain.
+ */
+#define BLKTAP_COOKIE 0xbeadfeed
+static inline domid_t ID_TO_DOM(unsigned long id) { return (id >> 16); }
+#endif
+
 static int do_block_io_op(blkif_t *blkif, int max_to_do);
 static void dispatch_probe(blkif_t *blkif, blkif_request_t *req);
 static void dispatch_rw_block_io(blkif_t *blkif, blkif_request_t *req);
@@ -82,12 +95,12 @@ static void fast_flush_area(int idx, int nr_pages)
     for ( i = 0; i < nr_pages; i++ )
     {
         mcl[i].op = __HYPERVISOR_update_va_mapping;
-        mcl[i].args[0] = MMAP_VADDR(idx, i) >> PAGE_SHIFT;
+        mcl[i].args[0] = MMAP_VADDR(idx, i);
         mcl[i].args[1] = 0;
         mcl[i].args[2] = 0;
     }
 
-    mcl[nr_pages-1].args[2] = UVMF_FLUSH_TLB;
+    mcl[nr_pages-1].args[2] = UVMF_TLB_FLUSH_ALL;
     if ( unlikely(HYPERVISOR_multicall(mcl, nr_pages) != 0) )
         BUG();
 }
@@ -265,17 +278,16 @@ irqreturn_t blkif_be_int(int irq, void *dev_id, struct pt_regs *regs)
 
 static int do_block_io_op(blkif_t *blkif, int max_to_do)
 {
-    blkif_ring_t *blk_ring = blkif->blk_ring_base;
+    blkif_back_ring_t *blk_ring = &blkif->blk_ring;
     blkif_request_t *req;
-    BLKIF_RING_IDX i, rp;
+    RING_IDX i, rp;
     int more_to_do = 0;
 
-    rp = blk_ring->req_prod;
+    rp = blk_ring->sring->req_prod;
     rmb(); /* Ensure we see queued requests up to 'rp'. */
 
-    /* Take items off the comms ring, taking care not to overflow. */
-    for ( i = blkif->blk_req_cons; 
-          (i != rp) && ((i-blkif->blk_resp_prod) != BLKIF_RING_SIZE);
+    for ( i = blk_ring->req_cons; 
+         (i != rp) && !RING_REQUEST_CONS_OVERFLOW(blk_ring, i);
           i++ )
     {
         if ( (max_to_do-- == 0) || (NR_PENDING_REQS == MAX_PENDING_REQS) )
@@ -284,7 +296,7 @@ static int do_block_io_op(blkif_t *blkif, int max_to_do)
             break;
         }
         
-        req = &blk_ring->ring[MASK_BLKIF_IDX(i)].req;
+        req = RING_GET_REQUEST(blk_ring, i);
         switch ( req->operation )
         {
         case BLKIF_OP_READ:
@@ -298,14 +310,13 @@ static int do_block_io_op(blkif_t *blkif, int max_to_do)
 
         default:
             DPRINTK("error: unknown block io operation [%d]\n",
-                    blk_ring->ring[i].req.operation);
-            make_response(blkif, blk_ring->ring[i].req.id, 
-                          blk_ring->ring[i].req.operation, BLKIF_RSP_ERROR);
+                    req->operation);
+            make_response(blkif, req->id, req->operation, BLKIF_RSP_ERROR);
             break;
         }
     }
 
-    blkif->blk_req_cons = i;
+    blk_ring->req_cons = i;
     return more_to_do;
 }
 
@@ -323,12 +334,29 @@ static void dispatch_probe(blkif_t *blkif, blkif_request_t *req)
          (blkif_last_sect(req->frame_and_sects[0]) != 7) )
         goto out;
 
-    if ( HYPERVISOR_update_va_mapping_otherdomain(
-        MMAP_VADDR(pending_idx, 0) >> PAGE_SHIFT,
-        (pte_t) { (req->frame_and_sects[0] & PAGE_MASK) | __PAGE_KERNEL },
-        0, blkif->domid) )
-        goto out;
+#ifdef CONFIG_XEN_BLKDEV_TAP_BE
+    /* Grab the real frontend out of the probe message. */
+    if (req->frame_and_sects[1] == BLKTAP_COOKIE) 
+        blkif->is_blktap = 1;
+#endif
 
+
+#ifdef CONFIG_XEN_BLKDEV_TAP_BE
+    if ( HYPERVISOR_update_va_mapping_otherdomain(
+        MMAP_VADDR(pending_idx, 0),
+        (pte_t) { (req->frame_and_sects[0] & PAGE_MASK) | __PAGE_KERNEL },
+        0, (blkif->is_blktap ? ID_TO_DOM(req->id) : blkif->domid) ) )
+        
+        goto out;
+#else
+    if ( HYPERVISOR_update_va_mapping_otherdomain(
+        MMAP_VADDR(pending_idx, 0),
+        (pte_t) { (req->frame_and_sects[0] & PAGE_MASK) | __PAGE_KERNEL },
+        0, blkif->domid) ) 
+        
+        goto out;
+#endif
+    
     rsp = vbd_probe(blkif, (vdisk_t *)MMAP_VADDR(pending_idx, 0), 
                     PAGE_SIZE / sizeof(vdisk_t));
 
@@ -408,11 +436,14 @@ static void dispatch_rw_block_io(blkif_t *blkif, blkif_request_t *req)
     for ( i = 0; i < nr_psegs; i++ )
     {
         mcl[i].op = __HYPERVISOR_update_va_mapping_otherdomain;
-        mcl[i].args[0] = MMAP_VADDR(pending_idx, i) >> PAGE_SHIFT;
+        mcl[i].args[0] = MMAP_VADDR(pending_idx, i);
         mcl[i].args[1] = (phys_seg[i].buffer & PAGE_MASK) | remap_prot;
         mcl[i].args[2] = 0;
+#ifdef CONFIG_XEN_BLKDEV_TAP_BE
+        mcl[i].args[3] = (blkif->is_blktap) ? ID_TO_DOM(req->id) : blkif->domid;
+#else
         mcl[i].args[3] = blkif->domid;
-
+#endif
         phys_to_machine_mapping[__pa(MMAP_VADDR(pending_idx, i))>>PAGE_SHIFT] =
             FOREIGN_FRAME(phys_seg[i].buffer >> PAGE_SHIFT);
     }
@@ -522,16 +553,17 @@ static void make_response(blkif_t *blkif, unsigned long id,
 {
     blkif_response_t *resp;
     unsigned long     flags;
+    blkif_back_ring_t *blk_ring = &blkif->blk_ring;
 
     /* Place on the response ring for the relevant domain. */ 
     spin_lock_irqsave(&blkif->blk_ring_lock, flags);
-    resp = &blkif->blk_ring_base->
-        ring[MASK_BLKIF_IDX(blkif->blk_resp_prod)].resp;
+    resp = RING_GET_RESPONSE(blk_ring, blk_ring->rsp_prod_pvt);
     resp->id        = id;
     resp->operation = op;
     resp->status    = st;
     wmb(); /* Ensure other side can see the response fields. */
-    blkif->blk_ring_base->resp_prod = ++blkif->blk_resp_prod;
+    blk_ring->rsp_prod_pvt++;
+    RING_PUSH_RESPONSES(blk_ring);
     spin_unlock_irqrestore(&blkif->blk_ring_lock, flags);
 
     /* Kick the relevant domain. */
@@ -575,7 +607,10 @@ static int __init blkif_init(void)
 #endif
 
     blkif_ctrlif_init();
-
+    
+#ifdef CONFIG_XEN_BLKDEV_TAP_BE
+    printk(KERN_ALERT "NOTE: Blkif backend is running with tap support on!\n");
+#endif
     return 0;
 }
 
