@@ -24,17 +24,17 @@
 
 #define PREEMPT_CHECK(_op)                          \
     if ( hypercall_preempt_check() )                \
-        return hypercall_create_continuation(       \
-            __HYPERVISOR_dom_mem_op, 5,             \
+        return hypercall5_create_continuation(      \
+            __HYPERVISOR_dom_mem_op,                \
             (_op) | (i << START_EXTENT_SHIFT),      \
             extent_list, nr_extents, extent_order,  \
-            (d == current) ? DOMID_SELF : d->id)
+            (d == current->domain) ? DOMID_SELF : d->id);
 
 static long
 alloc_dom_mem(struct domain *d, 
               unsigned long *extent_list, 
               unsigned long  start_extent,
-              unsigned long  nr_extents,
+              unsigned int   nr_extents,
               unsigned int   extent_order)
 {
     struct pfn_info *page;
@@ -44,7 +44,7 @@ alloc_dom_mem(struct domain *d,
                                    nr_extents, sizeof(*extent_list))) )
         return start_extent;
 
-    if ( (extent_order != 0) && !IS_CAPABLE_PHYSDEV(current) )
+    if ( (extent_order != 0) && !IS_CAPABLE_PHYSDEV(current->domain) )
     {
         DPRINTK("Only I/O-capable domains may allocate > order-0 memory.\n");
         return start_extent;
@@ -72,7 +72,7 @@ static long
 free_dom_mem(struct domain *d,
              unsigned long *extent_list, 
              unsigned long  start_extent,
-             unsigned long  nr_extents,
+             unsigned int   nr_extents,
              unsigned int   extent_order)
 {
     struct pfn_info *page;
@@ -93,7 +93,7 @@ free_dom_mem(struct domain *d,
         {
             if ( unlikely((mpfn + j) >= max_page) )
             {
-                DPRINTK("Domain %u page number out of range (%08lx>=%08lx)\n", 
+                DPRINTK("Domain %u page number out of range (%p>=%p)\n", 
                         d->id, mpfn + j, max_page);
                 return i;
             }
@@ -121,7 +121,7 @@ free_dom_mem(struct domain *d,
 long
 do_dom_mem_op(unsigned long  op, 
               unsigned long *extent_list, 
-              unsigned long  nr_extents,
+              unsigned int   nr_extents,
               unsigned int   extent_order,
               domid_t        domid)
 {
@@ -132,34 +132,47 @@ do_dom_mem_op(unsigned long  op,
     start_extent  = op >> START_EXTENT_SHIFT;
     op           &= (1 << START_EXTENT_SHIFT) - 1;
 
-    if ( unlikely(start_extent > nr_extents) || 
-         unlikely(nr_extents > (~0UL >> START_EXTENT_SHIFT)) )
+    if ( unlikely(start_extent > nr_extents) )
         return -EINVAL;
 
     if ( likely(domid == DOMID_SELF) )
-        d = current;
-    else if ( unlikely(!IS_PRIV(current)) )
+        d = current->domain;
+    else if ( unlikely(!IS_PRIV(current->domain)) )
         return -EPERM;
     else if ( unlikely((d = find_domain_by_id(domid)) == NULL) )
-	return -ESRCH;
+        return -ESRCH;
+
+    LOCK_BIGLOCK(d);
 
     switch ( op )
     {
     case MEMOP_increase_reservation:
         rc = alloc_dom_mem(
             d, extent_list, start_extent, nr_extents, extent_order);
-	break;
+        break;
     case MEMOP_decrease_reservation:
         rc = free_dom_mem(
             d, extent_list, start_extent, nr_extents, extent_order);
-	break;
+        break;
     default:
         rc = -ENOSYS;
         break;
     }
 
     if ( unlikely(domid != DOMID_SELF) )
-	put_domain(d);
+        put_domain(d);
+
+    UNLOCK_BIGLOCK(d);
 
     return rc;
 }
+
+/*
+ * Local variables:
+ * mode: C
+ * c-set-style: "BSD"
+ * c-basic-offset: 4
+ * tab-width: 4
+ * indent-tabs-mode: nil
+ * End:
+ */
