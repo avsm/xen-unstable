@@ -22,7 +22,7 @@
 #include <asm/debugger.h>
 
 /* opt_console: comma-separated list of console outputs. */
-static unsigned char opt_console[30] = OPT_CONSOLE_STR;
+static char opt_console[30] = OPT_CONSOLE_STR;
 string_param("console", opt_console);
 
 /* opt_conswitch: a character pair controlling console switching. */
@@ -408,7 +408,7 @@ void set_printk_prefix(const char *prefix)
 
 void init_console(void)
 {
-    unsigned char *p;
+    char *p;
 
     /* Where should console output go? */
     for ( p = opt_console; p != NULL; p = strchr(p, ',') )
@@ -577,6 +577,8 @@ static int __init debugtrace_init(void)
     debugtrace_buf = (unsigned char *)alloc_xenheap_pages(order);
     ASSERT(debugtrace_buf != NULL);
 
+    memset(debugtrace_buf, '\0', debugtrace_bytes);
+
     return 0;
 }
 __initcall(debugtrace_init);
@@ -640,4 +642,5 @@ void __out_of_line_bug(int line)
  * c-basic-offset: 4
  * tab-width: 4
  * indent-tabs-mode: nil
+ * End:
  */

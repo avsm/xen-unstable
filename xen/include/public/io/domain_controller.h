@@ -45,9 +45,8 @@ typedef u32 CONTROL_RING_IDX;
  * CONTROL_RING_MEM is currently an 8-slot ring of ctrl_msg_t structs and
  * two 32-bit counters:  (64 * 8) + (2 * 4) = 520
  */
-#define CONTROL_RING_MEM 520 
-#define CTRL_RING RING_PARAMS(control_msg_t, control_msg_t, CONTROL_RING_MEM)
-DEFINE_RING_TYPES(ctrl, CTRL_RING);
+#define CONTROL_RING_MEM 520
+DEFINE_RING_TYPES(ctrl, control_msg_t, control_msg_t, CONTROL_RING_MEM);
 
 typedef struct {
     ctrl_sring_t tx_ring; /*    0: guest -> controller  */
@@ -447,6 +446,7 @@ typedef struct {
 #define CMSG_NETIF_BE_DESTROY     1  /* Destroy a net-device interface.    */
 #define CMSG_NETIF_BE_CONNECT     2  /* Connect i/f to remote driver.        */
 #define CMSG_NETIF_BE_DISCONNECT  3  /* Disconnect i/f from remote driver.   */
+#define CMSG_NETIF_BE_CREDITLIMIT 4  /* Limit i/f to a given credit limit. */
 
 /* Messages to domain controller. */
 #define CMSG_NETIF_BE_DRIVER_STATUS 32
@@ -509,6 +509,22 @@ typedef struct {
     /* OUT */
     u32   status;             /*  8 */
 } PACKED netif_be_destroy_t; /* 12 bytes */
+
+/*
+ * CMSG_NETIF_BE_CREDITLIMIT:
+ *  Limit a virtual interface to "credit_bytes" bytes per "period_usec" 
+ *  microseconds.  
+ */
+typedef struct { 
+    /* IN */
+    domid_t    domid;          /*  0: Domain attached to new interface.   */
+    u16        __pad0;         /*  2 */
+    u32        netif_handle;   /*  4: Domain-specific interface handle.   */
+    u32        credit_bytes;   /*  8: Vifs credit of bytes per period.    */
+    u32        period_usec;    /* 12: Credit replenishment period.        */
+    /* OUT */
+    u32        status;         /* 16 */
+} PACKED netif_be_creditlimit_t; /* 20 bytes */
 
 /*
  * CMSG_NETIF_BE_CONNECT:

@@ -470,8 +470,6 @@ void alloc_dom0(void)
 }
 
 int construct_dom0(struct domain *d, 
-                   unsigned long alloc_start,
-                   unsigned long alloc_end,
                    unsigned long image_start, unsigned long image_len, 
                    unsigned long initrd_start, unsigned long initrd_len,
                    char *cmdline)
@@ -557,9 +555,6 @@ int construct_dom0(struct domain *d,
 #if 0
     strcpy(d->name,"Domain0");
 #endif
-    /* Set up shared-info area. */
-    update_dom_time(d);
-    d->shared_info->domain_time = 0;
 
 	// prepare domain0 pagetable (maps METAphysical to physical)
 	// following is roughly mm_init() in linux/kernel/fork.c

@@ -367,6 +367,12 @@ void vmx_intr_assist(struct exec_domain *d)
     else
         clear_highest_bit(d, highest_vector); 
 
+    /* close the window between guest PIT initialization and sti */
+    if (highest_vector == vpit->vector && !vpit->first_injected){
+        vpit->first_injected = 1;
+        vpit->pending_intr_nr = 0;
+    }
+
     intr_fields = (INTR_INFO_VALID_MASK | INTR_TYPE_EXT_INTR | highest_vector);
     __vmwrite(VM_ENTRY_INTR_INFO_FIELD, intr_fields);
 
@@ -381,11 +387,11 @@ void vmx_intr_assist(struct exec_domain *d)
 
 void vmx_do_resume(struct exec_domain *d) 
 {
-    if ( d->arch.guest_vtable )
+    if ( test_bit(VMX_CPU_STATE_PG_ENABLED, &d->arch.arch_vmx.cpu_state) )
         __vmwrite(GUEST_CR3, pagetable_val(d->arch.shadow_table));
     else
-        // we haven't switched off the 1:1 pagetable yet...
-        __vmwrite(GUEST_CR3, pagetable_val(d->arch.guest_table));
+        // paging is not enabled in the guest
+        __vmwrite(GUEST_CR3, pagetable_val(d->arch.phys_table));
 
     __vmwrite(HOST_CR3, pagetable_val(d->arch.monitor_table));
     __vmwrite(HOST_ESP, (unsigned long)get_stack_bottom());
@@ -418,4 +424,5 @@ void vmx_do_resume(struct exec_domain *d)
  * c-basic-offset: 4
  * tab-width: 4
  * indent-tabs-mode: nil
+ * End:
  */

@@ -20,10 +20,6 @@
 #include <asm/shadow.h>
 #include <asm/e820.h>
 
-/* opt_dom0_mem: Kilobytes of memory allocated to domain 0. */
-static unsigned int opt_dom0_mem = 16000;
-integer_param("dom0_mem", opt_dom0_mem);
-
 /*
  * opt_xenheap_megabytes: Size of Xen heap in megabytes, excluding the
  * pfn_info table and allocation bitmap.
@@ -205,8 +201,8 @@ static void __init init_amd(struct cpuinfo_x86 *c)
  */
 void __init identify_cpu(struct cpuinfo_x86 *c)
 {
-    int junk, i, cpu = smp_processor_id();
-    u32 xlvl, tfms;
+    int i, cpu = smp_processor_id();
+    u32 xlvl, tfms, junk;
 
     phys_proc_id[cpu]    = cpu;
     logical_proc_id[cpu] = 0;
@@ -221,10 +217,10 @@ void __init identify_cpu(struct cpuinfo_x86 *c)
         panic("Ancient processors not supported\n");
 
     /* Get vendor name */
-    cpuid(0x00000000, &c->cpuid_level,
-          (int *)&c->x86_vendor_id[0],
-          (int *)&c->x86_vendor_id[8],
-          (int *)&c->x86_vendor_id[4]);
+    cpuid(0x00000000, (unsigned int *)&c->cpuid_level,
+          (unsigned int *)&c->x86_vendor_id[0],
+          (unsigned int *)&c->x86_vendor_id[8],
+          (unsigned int *)&c->x86_vendor_id[4]);
 
     get_cpu_vendor(c);
 		
@@ -459,11 +455,10 @@ static void __init start_of_day(void)
 
 void __init __start_xen(multiboot_info_t *mbi)
 {
-    unsigned char *cmdline;
+    char *cmdline;
     module_t *mod = (module_t *)__va(mbi->mods_addr);
     void *heap_start;
     unsigned long firsthole_start, nr_pages;
-    unsigned long dom0_memory_start, dom0_memory_end;
     unsigned long initial_images_start, initial_images_end;
     struct e820entry e820_raw[E820MAX];
     int i, e820_raw_nr = 0, bytes = 0;
@@ -567,15 +562,6 @@ void __init __start_xen(multiboot_info_t *mbi)
            nr_pages >> (20 - PAGE_SHIFT),
            nr_pages << (PAGE_SHIFT - 10));
 
-    /* Allocate an aligned chunk of RAM for DOM0. */
-    dom0_memory_start = alloc_boot_pages(opt_dom0_mem << 10, 4UL << 20);
-    dom0_memory_end   = dom0_memory_start + (opt_dom0_mem << 10);
-    if ( dom0_memory_start == 0 )
-    {
-        printk("Not enough memory for DOM0 memory reservation.\n");
-        for ( ; ; ) ;
-    }
-
     init_frametable();
 
     end_boot_allocator();
@@ -601,7 +587,7 @@ void __init __start_xen(multiboot_info_t *mbi)
     set_bit(DF_PRIVILEGED, &dom0->d_flags);
 
     /* Grab the DOM0 command line. Skip past the image name. */
-    cmdline = (unsigned char *)(mod[0].string ? __va(mod[0].string) : NULL);
+    cmdline = (char *)(mod[0].string ? __va(mod[0].string) : NULL);
     if ( cmdline != NULL )
     {
         while ( *cmdline == ' ' ) cmdline++;
@@ -613,7 +599,7 @@ void __init __start_xen(multiboot_info_t *mbi)
      * We're going to setup domain0 using the module(s) that we stashed safely
      * above our heap. The second module, if present, is an initrd ramdisk.
      */
-    if ( construct_dom0(dom0, dom0_memory_start, dom0_memory_end,
+    if ( construct_dom0(dom0,
                         initial_images_start, 
                         mod[0].mod_end-mod[0].mod_start,
                         (mbi->mods_count == 1) ? 0 :
@@ -624,9 +610,7 @@ void __init __start_xen(multiboot_info_t *mbi)
                         cmdline) != 0)
         panic("Could not set up DOM0 guest OS\n");
 
-    /* The stash space for the initial kernel image can now be freed up. */
-    init_domheap_pages(initial_images_start, initial_images_end);
-
+    /* Scrub RAM that is still free and so may go to an unprivileged domain. */
     scrub_heap_pages();
 
     init_trace_bufs();
@@ -646,4 +630,5 @@ void __init __start_xen(multiboot_info_t *mbi)
  * c-basic-offset: 4
  * tab-width: 4
  * indent-tabs-mode: nil
+ * End:
  */

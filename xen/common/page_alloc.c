@@ -203,8 +203,8 @@ unsigned long alloc_boot_pages(unsigned long size, unsigned long align)
 #define MEMZONE_DOM 1
 #define NR_ZONES    2
 
-/* Up to 2^10 pages can be allocated at once. */
-#define MAX_ORDER 10
+/* Up to 2^20 pages can be allocated at once. */
+#define MAX_ORDER 20
 static struct list_head heap[NR_ZONES][MAX_ORDER+1];
 
 static unsigned long avail[NR_ZONES];
@@ -392,6 +392,13 @@ void init_xenheap_pages(unsigned long ps, unsigned long pe)
     pe = round_pgdown(pe);
 
     memguard_guard_range(__va(ps), pe - ps);
+
+    /*
+     * Yuk! Ensure there is a one-page buffer between Xen and Dom zones, to
+     * prevent merging of power-of-two blocks across the zone boundary.
+     */
+    if ( !IS_XEN_HEAP_FRAME(phys_to_page(pe)) )
+        pe -= PAGE_SIZE;
 
     local_irq_save(flags);
     init_heap_pages(MEMZONE_XEN, phys_to_page(ps), (pe - ps) >> PAGE_SHIFT);
@@ -615,4 +622,5 @@ unsigned long avail_domheap_pages(void)
  * c-basic-offset: 4
  * tab-width: 4
  * indent-tabs-mode: nil
+ * End:
  */

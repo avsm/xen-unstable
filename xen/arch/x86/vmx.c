@@ -138,10 +138,17 @@ static int vmx_do_page_fault(unsigned long va, struct xen_regs *regs)
     if (mmio_space(gpa))
         handle_mmio(va, gpa);
 
-    if ((result = shadow_fault(va, regs)))
-        return result;
-    
-    return 0;       /* failed to resolve, i.e raise #PG */
+    result = shadow_fault(va, regs);
+
+#if 0
+    if ( !result )
+    {
+        __vmread(GUEST_EIP, &eip);
+        printk("vmx pgfault to guest va=%p eip=%p\n", va, eip);
+    }
+#endif
+
+    return result;
 }
 
 static void vmx_do_general_protection_fault(struct xen_regs *regs) 
@@ -171,7 +178,7 @@ static void vmx_do_general_protection_fault(struct xen_regs *regs)
 
 static void vmx_vmexit_do_cpuid(unsigned long input, struct xen_regs *regs) 
 {
-    int eax, ebx, ecx, edx;
+    unsigned int eax, ebx, ecx, edx;
     unsigned long eip;
 
     __vmread(GUEST_EIP, &eip);
@@ -274,17 +281,9 @@ static void vmx_vmexit_do_invlpg(unsigned long va)
      * copying from guest
      */
     shadow_invlpg(ed, va);
-    index = (va >> L2_PAGETABLE_SHIFT);
+    index = l2_table_offset(va);
     ed->arch.hl2_vtable[index] = 
         mk_l2_pgentry(0); /* invalidate pgd cache */
-}
-
-static inline void hl2_table_invalidate(struct exec_domain *ed)
-{
-    /*
-     * Need to optimize this
-     */
-    memset(ed->arch.hl2_vtable, 0, PAGE_SIZE);
 }
 
 static void vmx_io_instruction(struct xen_regs *regs, 
@@ -949,4 +948,5 @@ asmlinkage void load_cr2(void)
  * c-basic-offset: 4
  * tab-width: 4
  * indent-tabs-mode: nil
+ * End:
  */

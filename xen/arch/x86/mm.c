@@ -1687,6 +1687,7 @@ int do_mmu_update(
 
     perfc_incrc(calls_to_mmu_update); 
     perfc_addc(num_page_updates, count);
+    perfc_incr_histo(bpt_updates, count, PT_UPDATES);
 
     if ( unlikely(!array_access_ok(VERIFY_READ, ureqs, count, sizeof(req))) )
     {
@@ -2051,7 +2052,12 @@ int do_update_va_mapping(unsigned long va,
         rc = -EINVAL;
 
     if ( unlikely(shadow_mode_enabled(d)) )
+    {
+        if ( shadow_mode_external(current->domain) )
+            BUG(); // can't use linear_l2_table with external tables.
+
         update_shadow_va_mapping(va, val, ed, d);
+    }
 
     deferred_ops = percpu_info[cpu].deferred_ops;
     percpu_info[cpu].deferred_ops = 0;
@@ -2299,6 +2305,9 @@ void ptwr_flush(const int which)
     int            i, cpu = smp_processor_id();
     struct exec_domain *ed = current;
     struct domain *d = ed->domain;
+#ifdef PERF_COUNTERS
+    unsigned int   modified = 0;
+#endif
 
     l1va = ptwr_info[cpu].ptinfo[which].l1va;
     ptep = (unsigned long *)&linear_pg_table[l1_linear_offset(l1va)];
@@ -2367,6 +2376,11 @@ void ptwr_flush(const int which)
         if ( likely(l1_pgentry_val(ol1e) == l1_pgentry_val(nl1e)) )
             continue;
 
+#ifdef PERF_COUNTERS
+        /* Update number of entries modified. */
+        modified++;
+#endif
+
         /*
          * Fast path for PTEs that have merely been write-protected
          * (e.g., during a Unix fork()). A strict reduction in privilege.
@@ -2408,6 +2422,8 @@ void ptwr_flush(const int which)
     }
     unmap_domain_mem(pl1e);
 
+    perfc_incr_histo(wpt_updates, modified, PT_UPDATES);
+
     /*
      * STEP 3. Reattach the L1 p.t. page into the current address space.
      */
@@ -2448,6 +2464,9 @@ int ptwr_do_page_fault(unsigned long addr)
      * Attempt to read the PTE that maps the VA being accessed. By checking for
      * PDE validity in the L2 we avoid many expensive fixups in __get_user().
      */
+    if ( shadow_mode_external(current->domain) )
+        BUG(); // can't use linear_l2_table with external tables.
+
     if ( !(l2_pgentry_val(linear_l2_table[addr>>L2_PAGETABLE_SHIFT]) &
            _PAGE_PRESENT) ||
          __get_user(pte, (unsigned long *)
@@ -2484,6 +2503,9 @@ int ptwr_do_page_fault(unsigned long addr)
      * Is the L1 p.t. mapped into the current address space? If so we call it
      * an ACTIVE p.t., otherwise it is INACTIVE.
      */
+    if ( shadow_mode_external(current->domain) )
+        BUG(); // can't use linear_l2_table with external tables.
+
     pl2e = &linear_l2_table[l2_idx];
     l2e  = l2_pgentry_val(*pl2e);
     which = PTWR_PT_INACTIVE;
@@ -3050,4 +3072,5 @@ void audit_domains_key(unsigned char key)
  * c-basic-offset: 4
  * tab-width: 4
  * indent-tabs-mode: nil
+ * End:
  */

@@ -35,7 +35,7 @@ void serial_set_rx_handler(int handle, serial_rx_fn fn);
 void serial_putc(int handle, unsigned char c);
 
 /* Transmit a NULL-terminated string via the specified COM port. */
-void serial_puts(int handle, const unsigned char *s);
+void serial_puts(int handle, const char *s);
 
 /*
  * An alternative to registering a character-receive hook. This function
@@ -59,4 +59,5 @@ void serial_force_unlock(int handle);
  * c-basic-offset: 4
  * tab-width: 4
  * indent-tabs-mode: nil
+ * End:
  */

@@ -283,9 +283,6 @@ int final_setup_guest(struct domain *p, dom0_builddomain_t *builddomain)
     if ( (rc = arch_final_setup_guest(p->exec_domain[0],c)) != 0 )
         goto out;
 
-    /* Set up the shared info structure. */
-    update_dom_time(p);
-
     set_bit(DF_CONSTRUCTED, &p->d_flags);
 
  out:    
@@ -339,9 +336,6 @@ long do_boot_vcpu(unsigned long vcpu, full_execution_context_t *ctxt)
         goto out;
     }
 
-    /* Set up the shared info structure. */
-    update_dom_time(d);
-
     /* domain_unpause_by_systemcontroller */
     if ( test_and_clear_bit(EDF_CTRLPAUSE, &ed->ed_flags) )
         domain_wake(ed);
@@ -386,4 +380,5 @@ long vm_assist(struct domain *p, unsigned int cmd, unsigned int type)
  * c-basic-offset: 4
  * tab-width: 4
  * indent-tabs-mode: nil
+ * End:
  */
