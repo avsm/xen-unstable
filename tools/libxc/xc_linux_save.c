@@ -13,7 +13,7 @@
 #define BATCH_SIZE 1024   /* 1024 pages (4MB) at a time */
 
 #define DEBUG 1
-#define DDEBUG 0
+#define DDEBUG 1
 
 #if DEBUG
 #define DPRINTF(_f, _a...) printf ( _f , ## _a )
@@ -320,7 +320,7 @@ int xc_linux_save(int xc_handle, XcIOContext *ioctxt)
     unsigned long page[1024];
 
     /* A copy of the pfn-to-mfn table frame list. */
-    unsigned long *live_pfn_to_mfn_frame_list;
+    unsigned long *live_pfn_to_mfn_frame_list = NULL;
     unsigned long pfn_to_mfn_frame_list[1024];
 
     /* Live mapping of the table mapping each PFN to its current MFN. */
@@ -330,13 +330,13 @@ int xc_linux_save(int xc_handle, XcIOContext *ioctxt)
     unsigned long mfn_to_pfn_table_start_mfn;
     
     /* Live mapping of shared info structure */
-    shared_info_t *live_shinfo;
+    shared_info_t *live_shinfo = NULL;
 
     /* base of the region in which domain memory is mapped */
     unsigned char *region_base = NULL;
 
     /* A temporary mapping, and a copy, of the guest's suspend record. */
-    suspend_record_t *p_srec;
+    suspend_record_t *p_srec = NULL;
 
     /* number of pages we're dealing with */
     unsigned long nr_pfns;
@@ -639,7 +639,7 @@ int xc_linux_save(int xc_handle, XcIOContext *ioctxt)
 
                     set_bit( n, to_fix );
                     if( iter>1 )
-                        DDPRINTF("netbuf race: iter %d, pfn %lx. mfn %lx\n",
+                        DDPRINTF("netbuf race: iter %d, pfn %x. mfn %lx\n",
                                  iter,n,pfn_type[batch]);
                     continue;
                 }
@@ -658,7 +658,7 @@ int xc_linux_save(int xc_handle, XcIOContext *ioctxt)
                 batch++;
             }
      
-            DDPRINTF("batch %d:%d (n=%d)\n", iter, batch, n);
+//            DDPRINTF("batch %d:%d (n=%d)\n", iter, batch, n);
 
             if ( batch == 0 )
                 goto skip; /* vanishingly unlikely... */
@@ -679,6 +679,7 @@ int xc_linux_save(int xc_handle, XcIOContext *ioctxt)
             for ( j = 0; j < batch; j++ ){
                 if ( (pfn_type[j] & LTAB_MASK) == XTAB ){
                     DDPRINTF("type fail: page %i mfn %08lx\n",j,pfn_type[j]);
+printf("type fail: page %i mfn %08lx\n",j,pfn_type[j]);
                     continue;
                 }
   
@@ -713,12 +714,12 @@ int xc_linux_save(int xc_handle, XcIOContext *ioctxt)
                     continue;
                 }
   
-                if ( ((pfn_type[j] & LTAB_MASK) == L1TAB) || 
-                     ((pfn_type[j] & LTAB_MASK) == L2TAB) ){
+                if ( ((pfn_type[j] & LTABTYPE_MASK) == L1TAB) || 
+                     ((pfn_type[j] & LTABTYPE_MASK) == L2TAB) ){
                     memcpy(page, region_base + (PAGE_SIZE*j), PAGE_SIZE);
       
                     for ( k = 0; 
-                          k < (((pfn_type[j] & LTAB_MASK) == L2TAB) ? 
+                          k < (((pfn_type[j] & LTABTYPE_MASK) == L2TAB) ? 
                                (HYPERVISOR_VIRT_START >> L2_PAGETABLE_SHIFT) :
                                1024); 
                           k++ ){
@@ -829,7 +830,7 @@ int xc_linux_save(int xc_handle, XcIOContext *ioctxt)
 		    goto out;
 		}
 
-		printf("SUSPPPPPPPP flags %08lx shinfo %08lx eip %08lx esi %08lx\n", 
+		printf("SUSPEND flags %08lx shinfo %08lx eip %08lx esi %08lx\n", 
 		       op.u.getdomaininfo.flags, op.u.getdomaininfo.shared_info_frame,
 		       ctxt.cpu_ctxt.eip, ctxt.cpu_ctxt.esi );
 
@@ -894,7 +895,7 @@ printf("nrpfns according to suspend record is %ld\n", p_srec->nr_pfns );
         xcio_error(ioctxt, "Suspend record is not in range of pseudophys map");
         goto out;
     }
-       
+
     /* Canonicalise each GDT frame number. */
     for ( i = 0; i < ctxt.gdt_ents; i += 512 ) {
         if ( !translate_mfn_to_pfn(&ctxt.gdt_frames[i]) ) {
@@ -916,9 +917,16 @@ printf("nrpfns according to suspend record is %ld\n", p_srec->nr_pfns );
         xcio_error(ioctxt, "Error when writing to state file (1)");
         goto out;
     }
-    munmap(live_shinfo, PAGE_SIZE);
+
 printf("Everything saved OK!\n");
  out:
+
+    if ( live_shinfo )          munmap(live_shinfo, PAGE_SIZE);
+    if ( p_srec )               munmap(p_srec, sizeof(*p_srec));
+    if ( live_pfn_to_mfn_frame_list ) munmap(live_pfn_to_mfn_frame_list, PAGE_SIZE);
+    if ( live_pfn_to_mfn_table ) munmap(live_pfn_to_mfn_table, nr_pfns*4 );
+    if ( live_mfn_to_pfn_table ) munmap(live_mfn_to_pfn_table, PAGE_SIZE*1024 );
+
     if ( pfn_type != NULL ) free(pfn_type);
     DPRINTF("Save exit rc=%d\n",rc);
     return !!rc;

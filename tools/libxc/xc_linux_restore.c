@@ -11,7 +11,7 @@
 
 #define MAX_BATCH_SIZE 1024
 
-#define DEBUG 0
+#define DEBUG 1
 
 #if DEBUG
 #define DPRINTF(_f, _a...) printf ( _f , ## _a )
@@ -112,7 +112,7 @@ int xc_linux_restore(int xc_handle, XcIOContext *ioctxt)
     unsigned long *region_mfn = NULL;
 
     /* A temporary mapping, and a copy, of one frame of guest memory. */
-    unsigned long *ppage;
+    unsigned long *ppage = NULL;
 
     /* A copy of the pfn-to-mfn table frame list. */
     unsigned long pfn_to_mfn_frame_list[1024];
@@ -224,7 +224,7 @@ int xc_linux_restore(int xc_handle, XcIOContext *ioctxt)
 
     /* XXX create domain on CPU=-1 so that in future it auto load ballances by default */
     if ( xc_domain_create( xc_handle,  nr_pfns * (PAGE_SIZE / 1024),
-			   name, -1, 1, &dom ) )
+			   "", -1, 1, &dom ) )
     {
 	xcio_error(ioctxt, "Could not create domain. pfns=%d, %dKB",
 		   nr_pfns,nr_pfns * (PAGE_SIZE / 1024));
@@ -365,7 +365,7 @@ int xc_linux_restore(int xc_handle, XcIOContext *ioctxt)
                 goto out;
             }
 
-            switch( region_pfn_type[i] )
+            switch( region_pfn_type[i] & LTABTYPE_MASK )
             {
             case 0:
                 break;
@@ -473,8 +473,9 @@ int xc_linux_restore(int xc_handle, XcIOContext *ioctxt)
      */
     for ( i = 0; i < nr_pfns; i++ )
     {
-        if ( pfn_type[i] == L1TAB )
+        if ( pfn_type[i] == (L1TAB|LPINTAB) )
         {
+printf("XXXXXXXXXXXXXXX pin L1\n");
             if ( add_mmu_update(xc_handle, mmu,
                                 (pfn_to_mfn_table[i]<<PAGE_SHIFT) | 
                                 MMU_EXTENDED_COMMAND,
@@ -484,8 +485,9 @@ int xc_linux_restore(int xc_handle, XcIOContext *ioctxt)
                 goto out;
             }
         }
-        else if ( pfn_type[i] == L2TAB )
+        else if ( pfn_type[i] == (L2TAB|LPINTAB) )
         {
+printf("XXXXXXXXXXXXXXX pin L2\n");
             if ( add_mmu_update(xc_handle, mmu,
                                 (pfn_to_mfn_table[i]<<PAGE_SHIFT) | 
                                 MMU_EXTENDED_COMMAND,
@@ -530,6 +532,7 @@ int xc_linux_restore(int xc_handle, XcIOContext *ioctxt)
         xcio_error(ioctxt, "GDT entry count out of range");
         goto out;
     }
+
     for ( i = 0; i < ctxt.gdt_ents; i += 512 )
     {
         pfn = ctxt.gdt_frames[i];
@@ -543,7 +546,7 @@ int xc_linux_restore(int xc_handle, XcIOContext *ioctxt)
 
     /* Uncanonicalise the page table base pointer. */
     pfn = ctxt.pt_base >> PAGE_SHIFT;
-    if ( (pfn >= nr_pfns) || (pfn_type[pfn] != L2TAB) )
+    if ( (pfn >= nr_pfns) || ((pfn_type[pfn]&LTABTYPE_MASK) != L2TAB) )
     {
         printf("PT base is bad. pfn=%lu nr=%lu type=%08lx %08lx\n",
                pfn, nr_pfns, pfn_type[pfn], (unsigned long)L2TAB);
