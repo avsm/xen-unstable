@@ -101,7 +101,7 @@ struct domain
 
     /* Scheduling. */
     int              shutdown_code; /* code value from OS (if DF_SHUTDOWN). */
-    spinlock_t       state_lock;    /* wake/sleep lock                      */
+    spinlock_t       sleep_lock;    /* wake/sleep lock                      */
     s_time_t         lastschd;      /* time this domain was last scheduled */
     s_time_t         lastdeschd;    /* time this domain was last descheduled */
     s_time_t         cpu_time;      /* total CPU time received till now */
@@ -144,6 +144,7 @@ struct domain
     unsigned long *io_bitmap; /* Pointer to task's IO bitmap or NULL */
 
     unsigned long flags;
+    unsigned long vm_assist;
 
     atomic_t refcnt;
     atomic_t pausecnt;
@@ -154,10 +155,8 @@ struct domain
 extern struct domain idle0_task;
 
 extern struct domain *idle_task[NR_CPUS];
-#define IDLE_DOMAIN_ID   (0x7FFFFFFFU)
+#define IDLE_DOMAIN_ID   (0x7FFFU)
 #define is_idle_task(_p) (test_bit(DF_IDLETASK, &(_p)->flags))
-
-#include <xen/slab.h>
 
 void free_domain_struct(struct domain *d);
 struct domain *alloc_domain_struct();
@@ -291,6 +290,9 @@ static inline void domain_unpause_by_systemcontroller(struct domain *d)
 #define IS_PRIV(_d) (test_bit(DF_PRIVILEGED, &(_d)->flags))
 #define IS_CAPABLE_PHYSDEV(_d) (test_bit(DF_PHYSDEV, &(_d)->flags))
 
+#define VM_ASSIST(_d,_t) (test_bit((_t), &(_d)->vm_assist))
+
+#include <xen/slab.h>
 #include <asm/domain.h>
 
 #endif /* __SCHED_H__ */

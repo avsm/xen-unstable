@@ -225,8 +225,7 @@ static int blkif_queue_request(struct request *req)
 	ring_req->nr_segments = 0;
 	rq_for_each_bio(bio, req) {
 		bio_for_each_segment(bvec, bio, idx) {
-			buffer_ma =
-                                phys_to_machine(page_to_phys(bvec->bv_page));
+			buffer_ma = page_to_phys(bvec->bv_page);
 			if (unlikely((buffer_ma & ((1<<9)-1)) != 0))
 				BUG();
 
@@ -466,7 +465,8 @@ static void blkif_status_change(blkif_fe_interface_status_changed_t *status)
 
         blkif_evtchn = status->evtchn;
         blkif_irq = bind_evtchn_to_irq(blkif_evtchn);
-        (void)request_irq(blkif_irq, blkif_int, 0, "blkif", NULL);
+        (void)request_irq(blkif_irq, blkif_int, 
+                          SA_SAMPLE_RANDOM, "blkif", NULL);
 
         if ( recovery )
         {

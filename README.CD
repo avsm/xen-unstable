@@ -277,9 +277,12 @@ that may be able to help diagnose problems:
 
  noht		  Disable Hyperthreading.
 
- ifname=ethXX	  Select which Ethernet interface to use.
-
- ifname=dummy	  Don't use any network interface.
+ badpage=<page number>[,<page number>]*
+                  Specify a list of pages not to be allocated for use 
+                  because they contain bad bytes. For example, if your
+                  memory tester says that byte 0x12345678 is bad, you would
+                  place 'badpage=0x12345' on Xen's command line (i.e., the
+                  last three digits of the byte address are not included!).
 
  com1=<baud>,DPS[,<io_base>,<irq>]
  com2=<baud>,DPS[,<io_base>,<irq>]
@@ -316,6 +319,13 @@ that may be able to help diagnose problems:
                   then auto-switching is disabled. Any other value, or
                   omitting the character, enables auto-switching.
  [NB. Default for this option is 'a']
+
+ nmi=<nmi-error-behaviour>
+                  Specify what to do with an NMI parity or I/O error.
+                  'nmi=fatal':  Xen prints a diagnostic and then hangs.
+                  'nmi=dom0':   Inform DOM0 of the NMI.
+                  'nmi=ignore': Ignore the NMI.
+ [NB. Default is 'dom0' ('fatal' for debug builds).]
 
  dom0_mem=xxx 	  Set the initial amount of memory for domain0.
 

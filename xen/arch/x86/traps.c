@@ -1,7 +1,7 @@
 /******************************************************************************
  * arch/i386/traps.c
  * 
- * Modifications to Linux original are copyright (c) 2002-2003, K A Fraser
+ * Modifications to Linux original are copyright (c) 2002-2004, K A Fraser
  * 
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -19,8 +19,6 @@
  */
 
 /*
- *  xen/arch/i386/traps.c
- *
  *  Copyright (C) 1991, 1992  Linus Torvalds
  *
  *  Pentium III FXSR, SSE support
@@ -33,11 +31,14 @@
 #include <xen/lib.h>
 #include <xen/errno.h>
 #include <xen/mm.h>
+#include <xen/console.h>
 #include <asm/ptrace.h>
 #include <xen/delay.h>
+#include <xen/event.h>
 #include <xen/spinlock.h>
 #include <xen/irq.h>
 #include <xen/perfc.h>
+#include <xen/softirq.h>
 #include <asm/shadow.h>
 #include <asm/domain_page.h>
 #include <asm/system.h>
@@ -50,6 +51,8 @@
 #include <asm/uaccess.h>
 #include <asm/i387.h>
 #include <asm/pdb.h>
+
+extern char opt_nmi[];
 
 struct guest_trap_bounce guest_trap_bounce[NR_CPUS] = { { 0 } };
 
@@ -140,7 +143,7 @@ void show_registers(struct pt_regs *regs)
     unsigned long esp;
     unsigned short ss;
 
-    esp = (unsigned long) (&regs->esp);
+    esp = (unsigned long)(&regs->esp);
     ss  = __HYPERVISOR_DS;
     if ( regs->xcs & 3 )
     {
@@ -215,30 +218,29 @@ static inline void do_trap(int trapnr, char *str,
 #define DO_ERROR_NOCODE(trapnr, str, name) \
 asmlinkage void do_##name(struct pt_regs * regs, long error_code) \
 { \
-do_trap(trapnr, str, regs, error_code, 0); \
+    do_trap(trapnr, str, regs, error_code, 0); \
 }
 
 #define DO_ERROR(trapnr, str, name) \
 asmlinkage void do_##name(struct pt_regs * regs, long error_code) \
 { \
-do_trap(trapnr, str, regs, error_code, 1); \
+    do_trap(trapnr, str, regs, error_code, 1); \
 }
 
 DO_ERROR_NOCODE( 0, "divide error", divide_error)
-    DO_ERROR_NOCODE( 4, "overflow", overflow)
-    DO_ERROR_NOCODE( 5, "bounds", bounds)
-    DO_ERROR_NOCODE( 6, "invalid operand", invalid_op)
-    DO_ERROR_NOCODE( 9, "coprocessor segment overrun", coprocessor_segment_overrun)
-    DO_ERROR(10, "invalid TSS", invalid_TSS)
-    DO_ERROR(11, "segment not present", segment_not_present)
-    DO_ERROR(12, "stack segment", stack_segment)
-/* Vector 15 reserved by Intel */
-    DO_ERROR_NOCODE(16, "fpu error", coprocessor_error)
-    DO_ERROR(17, "alignment check", alignment_check)
-    DO_ERROR_NOCODE(18, "machine check", machine_check)
-    DO_ERROR_NOCODE(19, "simd error", simd_coprocessor_error)
+DO_ERROR_NOCODE( 4, "overflow", overflow)
+DO_ERROR_NOCODE( 5, "bounds", bounds)
+DO_ERROR_NOCODE( 6, "invalid operand", invalid_op)
+DO_ERROR_NOCODE( 9, "coprocessor segment overrun", coprocessor_segment_overrun)
+DO_ERROR(10, "invalid TSS", invalid_TSS)
+DO_ERROR(11, "segment not present", segment_not_present)
+DO_ERROR(12, "stack segment", stack_segment)
+DO_ERROR_NOCODE(16, "fpu error", coprocessor_error)
+DO_ERROR(17, "alignment check", alignment_check)
+DO_ERROR_NOCODE(18, "machine check", machine_check)
+DO_ERROR_NOCODE(19, "simd error", simd_coprocessor_error)
 
-    asmlinkage void do_int3(struct pt_regs *regs, long error_code)
+asmlinkage void do_int3(struct pt_regs *regs, long error_code)
 {
     struct domain *p = current;
     struct guest_trap_bounce *gtb = guest_trap_bounce+smp_processor_id();
@@ -271,7 +273,6 @@ DO_ERROR_NOCODE( 0, "divide error", divide_error)
 
 asmlinkage void do_double_fault(void)
 {
-    extern spinlock_t console_lock;
     struct tss_struct *tss = &doublefault_tss;
     unsigned int cpu = ((tss->back_link>>3)-__FIRST_TSS_ENTRY)>>1;
 
@@ -295,7 +296,7 @@ asmlinkage void do_double_fault(void)
     printk("************************************\n");
 
     /* Lock up the console to prevent spurious output from other CPUs. */
-    spin_lock(&console_lock); 
+    console_force_lock();
 
     /* Wait for manual reset. */
     for ( ; ; ) ;
@@ -306,41 +307,54 @@ asmlinkage void do_page_fault(struct pt_regs *regs, long error_code)
     struct guest_trap_bounce *gtb = guest_trap_bounce+smp_processor_id();
     trap_info_t *ti;
     unsigned long off, addr, fixup;
-    struct domain *p = current;
+    struct domain *d = current;
     extern int map_ldt_shadow_page(unsigned int);
+    int cpu = d->processor;
 
     __asm__ __volatile__ ("movl %%cr2,%0" : "=r" (addr) : );
 
     perfc_incrc(page_faults);
 
     if ( unlikely(addr >= LDT_VIRT_START) && 
-         (addr < (LDT_VIRT_START + (p->mm.ldt_ents*LDT_ENTRY_SIZE))) )
+         (addr < (LDT_VIRT_START + (d->mm.ldt_ents*LDT_ENTRY_SIZE))) )
     {
         /*
          * Copy a mapping from the guest's LDT, if it is valid. Otherwise we
          * send the fault up to the guest OS to be handled.
          */
         off  = addr - LDT_VIRT_START;
-        addr = p->mm.ldt_base + off;
+        addr = d->mm.ldt_base + off;
         if ( likely(map_ldt_shadow_page(off >> PAGE_SHIFT)) )
             return; /* successfully copied the mapping */
     }
 
-    if ( unlikely(p->mm.shadow_mode) && 
+    if ( (addr >> L2_PAGETABLE_SHIFT) == ptwr_info[cpu].disconnected )
+    {
+        ptwr_reconnect_disconnected(addr);
+        return;
+    }
+
+    if ( VM_ASSIST(d, VMASST_TYPE_writeable_pagetables) && 
+         (addr < PAGE_OFFSET) &&
+         ((error_code & 3) == 3) && /* write-protection fault */
+         ptwr_do_page_fault(addr) )
+        return;
+
+    if ( unlikely(d->mm.shadow_mode) && 
          (addr < PAGE_OFFSET) && shadow_fault(addr, error_code) )
         return; /* Returns TRUE if fault was handled. */
 
     if ( unlikely(!(regs->xcs & 3)) )
         goto xen_fault;
 
-    ti = p->thread.traps + 14;
+    ti = d->thread.traps + 14;
     gtb->flags = GTBF_TRAP_CR2; /* page fault pushes %cr2 */
     gtb->cr2        = addr;
     gtb->error_code = error_code;
     gtb->cs         = ti->cs;
     gtb->eip        = ti->address;
     if ( TI_GET_IF(ti) )
-        p->shared_info->vcpu_data[0].evtchn_upcall_mask = 1;
+        d->shared_info->vcpu_data[0].evtchn_upcall_mask = 1;
     return; 
 
  xen_fault:
@@ -348,7 +362,7 @@ asmlinkage void do_page_fault(struct pt_regs *regs, long error_code)
     if ( likely((fixup = search_exception_table(regs->eip)) != 0) )
     {
         perfc_incrc(copy_user_faults);
-        if ( !p->mm.shadow_mode )
+        if ( !d->mm.shadow_mode )
             DPRINTK("Page fault: %08lx -> %08lx\n", regs->eip, fixup);
         regs->eip = fixup;
         regs->xds = regs->xes = regs->xfs = regs->xgs = __HYPERVISOR_DS;
@@ -392,7 +406,7 @@ asmlinkage void do_page_fault(struct pt_regs *regs, long error_code)
 
 asmlinkage void do_general_protection(struct pt_regs *regs, long error_code)
 {
-    struct domain *p = current;
+    struct domain *d = current;
     struct guest_trap_bounce *gtb = guest_trap_bounce+smp_processor_id();
     trap_info_t *ti;
     unsigned long fixup;
@@ -444,7 +458,9 @@ asmlinkage void do_general_protection(struct pt_regs *regs, long error_code)
     }
 
 #if defined(__i386__)
-    if ( (error_code == 0) && gpf_emulate_4gb(regs) )
+    if ( VM_ASSIST(d, VMASST_TYPE_4gb_segments) && 
+         (error_code == 0) && 
+         gpf_emulate_4gb(regs) )
         return;
 #endif
     
@@ -456,7 +472,7 @@ asmlinkage void do_general_protection(struct pt_regs *regs, long error_code)
     gtb->cs         = ti->cs;
     gtb->eip        = ti->address;
     if ( TI_GET_IF(ti) )
-        p->shared_info->vcpu_data[0].evtchn_upcall_mask = 1;
+        d->shared_info->vcpu_data[0].evtchn_upcall_mask = 1;
     return;
 
  gp_in_kernel:
@@ -472,28 +488,44 @@ asmlinkage void do_general_protection(struct pt_regs *regs, long error_code)
     die("general protection fault", regs, error_code);
 }
 
-asmlinkage void mem_parity_error(unsigned char reason, struct pt_regs * regs)
+asmlinkage void mem_parity_error(struct pt_regs *regs)
 {
-    printk("NMI received. Dazed and confused, but trying to continue\n");
-    printk("You probably have a hardware problem with your RAM chips\n");
+    console_force_unlock();
 
-    /* Clear and disable the memory parity error line. */
-    reason = (reason & 0xf) | 4;
-    outb(reason, 0x61);
+    printk("\n\n");
 
     show_registers(regs);
-    panic("PARITY ERROR");
+
+    printk("************************************\n");
+    printk("CPU%d MEMORY ERROR -- system shutdown\n", smp_processor_id());
+    printk("System needs manual reset.\n");
+    printk("************************************\n");
+
+    /* Lock up the console to prevent spurious output from other CPUs. */
+    console_force_lock();
+
+    /* Wait for manual reset. */
+    for ( ; ; ) ;
 }
 
-asmlinkage void io_check_error(unsigned char reason, struct pt_regs * regs)
+asmlinkage void io_check_error(struct pt_regs *regs)
 {
-    printk("NMI: IOCK error (debug interrupt?)\n");
+    console_force_unlock();
 
-    reason = (reason & 0xf) | 8;
-    outb(reason, 0x61);
+    printk("\n\n");
 
     show_registers(regs);
-    panic("IOCK ERROR");
+
+    printk("************************************\n");
+    printk("CPU%d I/O ERROR -- system shutdown\n", smp_processor_id());
+    printk("System needs manual reset.\n");
+    printk("************************************\n");
+
+    /* Lock up the console to prevent spurious output from other CPUs. */
+    console_force_lock();
+
+    /* Wait for manual reset. */
+    for ( ; ; ) ;
 }
 
 static void unknown_nmi_error(unsigned char reason, struct pt_regs * regs)
@@ -513,6 +545,23 @@ asmlinkage void do_nmi(struct pt_regs * regs, unsigned long reason)
     else
 #endif
         unknown_nmi_error((unsigned char)(reason&0xff), regs);
+}
+
+unsigned long nmi_softirq_reason;
+static void nmi_softirq(void)
+{
+    struct domain *d = find_domain_by_id(0);
+
+    if ( d == NULL )
+        return;
+
+    if ( test_and_clear_bit(0, &nmi_softirq_reason) )
+        send_guest_virq(d, VIRQ_PARITY_ERR);
+
+    if ( test_and_clear_bit(1, &nmi_softirq_reason) )
+        send_guest_virq(d, VIRQ_IO_ERR);
+
+    put_domain(d);
 }
 
 asmlinkage void math_state_restore(struct pt_regs *regs, long error_code)
@@ -727,6 +776,8 @@ void __init trap_init(void)
         extern void cpu_init(void);
         cpu_init();
     }
+
+    open_softirq(NMI_SOFTIRQ, nmi_softirq);
 }
 
 

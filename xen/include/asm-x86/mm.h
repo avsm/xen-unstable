@@ -72,8 +72,11 @@ struct pfn_info
  /* Has this page been validated for use as its current type? */
 #define _PGT_validated      28
 #define PGT_validated       (1<<_PGT_validated)
- /* 28-bit count of uses of this frame as its current type. */
-#define PGT_count_mask      ((1<<28)-1)
+ /* 10-bit most significant bits of va address if used as l1 page table */
+#define PGT_va_shift        18
+#define PGT_va_mask         (((1<<10)-1)<<PGT_va_shift)
+ /* 18-bit count of uses of this frame as its current type. */
+#define PGT_count_mask      ((1<<18)-1)
 
  /* For safety, force a TLB flush when this page's type changes. */
 #define _PGC_tlb_flush_on_type_change 31
@@ -144,7 +147,7 @@ static inline int get_page(struct pfn_info *page,
         p  = np;
         if ( unlikely((x & PGC_count_mask) == 0) ||  /* Not allocated? */
              unlikely((nx & PGC_count_mask) == 0) || /* Count overflow? */
-             unlikely(p != domain) )                 /* Wrong owner? */
+             unlikely(!IS_PRIV(domain) && p != domain) ) /* Wrong owner? */
         {
             DPRINTK("Error pfn %08lx: ed=%p(%u), sd=%p(%u),"
                     " caf=%08x, taf=%08x\n",
@@ -325,5 +328,41 @@ int memguard_is_guarded(void *p);
 #define memguard_unguard_range(_p,_l)  ((void)0)
 #define memguard_is_guarded(_p)        (0)
 #endif
+
+
+/* Writable Pagetables */
+#define	PTWR_NR_WRITABLES 1
+typedef struct {
+    unsigned long disconnected;
+    l1_pgentry_t disconnected_page[ENTRIES_PER_L1_PAGETABLE];
+    unsigned long *writable_l1;
+    unsigned long *writables[PTWR_NR_WRITABLES];
+    int writable_idx;
+    l1_pgentry_t writable_page[PTWR_NR_WRITABLES][ENTRIES_PER_L1_PAGETABLE];
+#ifdef PTWR_TRACK_DOMAIN
+    domid_t domain;
+#endif
+} __cacheline_aligned ptwr_info_t;
+
+extern ptwr_info_t ptwr_info[];
+
+#define PTWR_CLEANUP_ACTIVE	1
+#define PTWR_CLEANUP_INACTIVE	2
+
+void ptwr_reconnect_disconnected(unsigned long addr);
+void ptwr_flush_inactive(void);
+int ptwr_do_page_fault(unsigned long);
+
+static inline void cleanup_writable_pagetable(const int what)
+{
+    int cpu = smp_processor_id();
+
+    if (what & PTWR_CLEANUP_ACTIVE)
+        if (ptwr_info[cpu].disconnected != ENTRIES_PER_L2_PAGETABLE)
+            ptwr_reconnect_disconnected(0L);
+    if (what & PTWR_CLEANUP_INACTIVE)
+        if (ptwr_info[cpu].writable_idx)
+            ptwr_flush_inactive();
+}
 
 #endif /* __ASM_X86_MM_H__ */

@@ -51,11 +51,6 @@
 3e6377f8Me8IqtvEhb70XFgOvqQH7A linux-2.4.26-xen-sparse/arch/xen/drivers/balloon/balloon.c
 4083dc16z0jvZEH4PiVDbDRreaNp6w linux-2.4.26-xen-sparse/arch/xen/drivers/blkif/Makefile
 4083dc16KQus88a4U3uCV6qVCA6_8Q linux-2.4.26-xen-sparse/arch/xen/drivers/blkif/backend/Makefile
-4087cf0dPeHOvzmZAazvwLslKEF93A linux-2.4.26-xen-sparse/arch/xen/drivers/blkif/backend/common.h
-4087cf0da2cROOiybf9A-j4R_yHnjg linux-2.4.26-xen-sparse/arch/xen/drivers/blkif/backend/control.c
-4087cf0dvXL1PKX23t_LvO1wVPb7OA linux-2.4.26-xen-sparse/arch/xen/drivers/blkif/backend/interface.c
-4087cf0dkVF3I19gpT1cNubeJgQr7g linux-2.4.26-xen-sparse/arch/xen/drivers/blkif/backend/main.c
-4087cf0dlv1Dw4MAbeRStPPG8IvPPg linux-2.4.26-xen-sparse/arch/xen/drivers/blkif/backend/vbd.c
 4075806dI5kfeMD5RV-DA0PYoThx_w linux-2.4.26-xen-sparse/arch/xen/drivers/blkif/frontend/Makefile
 4075806d4-j7vN0Mn0bklI1cRUX1vQ linux-2.4.26-xen-sparse/arch/xen/drivers/blkif/frontend/common.h
 4075806d3fJqqDC1pYYPTZPc575iKg linux-2.4.26-xen-sparse/arch/xen/drivers/blkif/frontend/main.c
@@ -72,7 +67,6 @@
 3e5a4e65RMGcuA-HCn3-wNx3fFQwdg linux-2.4.26-xen-sparse/arch/xen/kernel/i386_ksyms.c
 3e5a4e653U6cELGv528IxOLHvCq8iA linux-2.4.26-xen-sparse/arch/xen/kernel/irq.c
 3e5a4e65muT6SU3ck47IP87Q7Ti5hA linux-2.4.26-xen-sparse/arch/xen/kernel/ldt.c
-4051db84bZeRX7a_Kh6VyyDuT5FOIg linux-2.4.26-xen-sparse/arch/xen/kernel/pci-dma.c
 4051db95N9N99FjsRwi49YKUNHWI8A linux-2.4.26-xen-sparse/arch/xen/kernel/pci-pc.c
 3e5a4e65IGt3WwQDNiL4h-gYWgNTWQ linux-2.4.26-xen-sparse/arch/xen/kernel/process.c
 3e5a4e66tR-qJMLj3MppcKqmvuI2XQ linux-2.4.26-xen-sparse/arch/xen/kernel/setup.c
@@ -117,10 +111,8 @@
 3f1056a9L_kqHcFheV00KbKBzv9j5w linux-2.4.26-xen-sparse/include/asm-xen/vga.h
 40659defgWA92arexpMGn8X3QMDj3w linux-2.4.26-xen-sparse/include/asm-xen/xor.h
 3f056927gMHl7mWB89rb73JahbhQIA linux-2.4.26-xen-sparse/include/linux/blk.h
-41051ec1m6bJVjZocTG0C0V0O6RsVg linux-2.4.26-xen-sparse/include/linux/blkdev.h
 401c0590D_kwJDU59X8NyvqSv_Cl2A linux-2.4.26-xen-sparse/include/linux/sched.h
 40a248afgI0_JKthdYAe8beVfXSTpQ linux-2.4.26-xen-sparse/include/linux/skbuff.h
-3e5a4e686V0nioX2ZpFf056sgvdiQw linux-2.4.26-xen-sparse/include/linux/sunrpc/debug.h
 401c0592pLrp_aCbQRo9GXiYQQaVVA linux-2.4.26-xen-sparse/include/linux/timer.h
 3f9d4b44247udoqWEgFkaHiWv6Uvyg linux-2.4.26-xen-sparse/kernel/time.c
 401c059bjLBFYHRD4Py2uM3eA1D4zQ linux-2.4.26-xen-sparse/kernel/timer.c
@@ -173,10 +165,12 @@
 40f56239bvOjuuuViZ0XMlNiREFC0A linux-2.6.7-xen-sparse/arch/xen/kernel/ctrl_if.c
 40f56239pYRq5yshPTkv3ujXKc8K6g linux-2.6.7-xen-sparse/arch/xen/kernel/empty.c
 40f56238xFQe9T7M_U_FItM-bZIpLw linux-2.6.7-xen-sparse/arch/xen/kernel/evtchn.c
+4110f478aeQWllIN7J4kouAHiAqrPw linux-2.6.7-xen-sparse/arch/xen/kernel/fixup.c
 40f56239sFcjHiIRmnObRIDF-zaeKQ linux-2.6.7-xen-sparse/arch/xen/kernel/process.c
 40f562392LBhwmOxVPsYdkYXMxI_ZQ linux-2.6.7-xen-sparse/arch/xen/kernel/reboot.c
 3f68905c5eiA-lBMQSvXLMWS1ikDEA linux-2.6.7-xen-sparse/arch/xen/kernel/xen_proc.c
 4108f5c1WfTIrs0HZFeV39sttekCTw linux-2.6.7-xen-sparse/drivers/char/mem.c
+4111308bZAIzwf_Kzu6x1TZYZ3E0_Q linux-2.6.7-xen-sparse/drivers/char/tty_io.c
 40f56239Dp_vMTgz8TEbvo1hjHGc3w linux-2.6.7-xen-sparse/drivers/xen/Makefile
 410d0893otFGghmv4dUXDUBBdY5aIA linux-2.6.7-xen-sparse/drivers/xen/blkback/Makefile
 4087cf0d1XgMkooTZAiJS6NrcpLQNQ linux-2.6.7-xen-sparse/drivers/xen/blkback/blkback.c
@@ -223,6 +217,7 @@
 40f5623aFTyFTR-vdiA-KaGxk5JOKQ linux-2.6.7-xen-sparse/include/asm-xen/asm-i386/msr.h
 40f5623adgjZq9nAgCt0IXdWl7udSA linux-2.6.7-xen-sparse/include/asm-xen/asm-i386/page.h
 40f5623a54NuG-7qHihGYmw4wWQnMA linux-2.6.7-xen-sparse/include/asm-xen/asm-i386/param.h
+41137cc1kkvg0cg7uxddcEfjL7L67w linux-2.6.7-xen-sparse/include/asm-xen/asm-i386/pci.h
 40f5623atCokYc2uCysSJ8jFO8TEsw linux-2.6.7-xen-sparse/include/asm-xen/asm-i386/pgalloc.h
 40f5623aEToIXouJgO-ao5d5pcEt1w linux-2.6.7-xen-sparse/include/asm-xen/asm-i386/pgtable-2level.h
 40f5623aCCXRPlGpNthVXstGz9ZV3A linux-2.6.7-xen-sparse/include/asm-xen/asm-i386/pgtable.h
@@ -303,6 +298,7 @@
 4022a73cEKvrYe_DVZW2JlAxobg9wg tools/misc/nsplitd/Makefile
 4022a73cKms4Oq030x2JBzUB426lAQ tools/misc/nsplitd/nsplitd.c
 3f870808_8aFBAcZbWiWGdgrGQyIEw tools/misc/p4perf.h
+4113d1afyPjO8m8-9E1pVBDHzGe1jQ tools/misc/setdomainmaxmem
 3f5ef5a2ir1kVAthS14Dc5QIRCEFWg tools/misc/xen-clone
 3f5ef5a2dTZP0nnsFoeq2jRf3mWDDg tools/misc/xen-clone.README
 3f870808zS6T6iFhqYPGelroZlVfGQ tools/misc/xen_cpuperf.c
