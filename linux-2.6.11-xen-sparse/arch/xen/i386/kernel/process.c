@@ -94,10 +94,11 @@ EXPORT_SYMBOL(enable_hlt);
 extern int set_timeout_timer(void);
 void xen_idle(void)
 {
-	int cpu = smp_processor_id();
+	int cpu;
 
 	local_irq_disable();
 
+	cpu = smp_processor_id();
 	if (rcu_pending(cpu))
 		rcu_check_callbacks(cpu, 0);
 
@@ -289,7 +290,6 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long esp,
 	struct pt_regs * childregs;
 	struct task_struct *tsk;
 	int err;
-	unsigned long eflags;
 
 	childregs = ((struct pt_regs *) (THREAD_SIZE + (unsigned long) p->thread_info)) - 1;
 	*childregs = *regs;
@@ -339,9 +339,7 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long esp,
 		desc->b = LDT_entry_b(&info);
 	}
 
-
-	__asm__ __volatile__ ( "pushfl; popl %0" : "=r" (eflags) : );
-	p->thread.io_pl = (eflags >> 12) & 3;
+        p->thread.io_pl = current->thread.io_pl;
 
 	err = 0;
  out:
@@ -516,7 +514,7 @@ struct task_struct fastcall * __switch_to(struct task_struct *prev_p, struct tas
 	 */
 	if (prev_p->thread_info->status & TS_USEDFPU) {
 		__save_init_fpu(prev_p); /* _not_ save_init_fpu() */
-		queue_multicall0(__HYPERVISOR_fpu_taskswitch);
+		queue_multicall1(__HYPERVISOR_fpu_taskswitch, 1);
 	}
 
 	/*
