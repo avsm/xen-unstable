@@ -169,7 +169,7 @@ ignore_int:
 /*** STACK LOCATION ***/
         
 ENTRY(stack_start)
-        .long SYMBOL_NAME(cpu0_stack) + 8100 - __PAGE_OFFSET
+        .long SYMBOL_NAME(cpu0_stack) + STACK_SIZE - 200 - __PAGE_OFFSET
         .long __HYPERVISOR_DS
         
 /*** DESCRIPTOR TABLES ***/
@@ -214,7 +214,7 @@ ENTRY(gdt_table)
         .org 0x1000
 ENTRY(idle_pg_table) # Initial page directory is 4kB
         .org 0x2000
-ENTRY(cpu0_stack)    # Initial stack is 8kB
-        .org 0x4000
+ENTRY(cpu0_stack)
+        .org 0x2000 + STACK_SIZE
 ENTRY(stext)
 ENTRY(_stext)

@@ -1,3 +1,4 @@
+/* -*-  Mode:C; c-basic-offset:4; tab-width:4; indent-tabs-mode:nil -*- */
 /******************************************************************************
  * kernel.c
  * 
@@ -78,7 +79,7 @@ long do_xen_version(int cmd)
 vm_assist_info_t vm_assist_info[MAX_VMASST_TYPE + 1];
 long do_vm_assist(unsigned int cmd, unsigned int type)
 {
-    return vm_assist(current, cmd, type);
+    return vm_assist(current->domain, cmd, type);
 }
 
 long do_ni_hypercall(void)

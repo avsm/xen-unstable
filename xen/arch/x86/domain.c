@@ -1,3 +1,4 @@
+/* -*-  Mode:C; c-basic-offset:4; tab-width:4; indent-tabs-mode:nil -*- */
 /******************************************************************************
  * arch/x86/domain.c
  * 
@@ -33,25 +34,15 @@
 #include <asm/shadow.h>
 #include <xen/console.h>
 #include <xen/elf.h>
+#include <asm/vmx.h>
+#include <asm/vmx_vmcs.h>
+#include <xen/kernel.h>
+#include <public/io/ioreq.h>
 #include <xen/multicall.h>
 
 /* opt_noreboot: If true, machine will need manual reset on error. */
 static int opt_noreboot = 0;
 boolean_param("noreboot", opt_noreboot);
-
-#if !defined(CONFIG_X86_64BITMODE)
-/* No ring-3 access in initial page tables. */
-#define L1_PROT (_PAGE_PRESENT|_PAGE_RW|_PAGE_ACCESSED)
-#else
-/* Allow ring-3 access in long mode as guest cannot use ring 1. */
-#define L1_PROT (_PAGE_PRESENT|_PAGE_RW|_PAGE_ACCESSED|_PAGE_USER)
-#endif
-#define L2_PROT (_PAGE_PRESENT|_PAGE_RW|_PAGE_ACCESSED|_PAGE_DIRTY|_PAGE_USER)
-#define L3_PROT (_PAGE_PRESENT|_PAGE_RW|_PAGE_ACCESSED|_PAGE_DIRTY|_PAGE_USER)
-#define L4_PROT (_PAGE_PRESENT|_PAGE_RW|_PAGE_ACCESSED|_PAGE_DIRTY|_PAGE_USER)
-
-#define round_pgup(_p)    (((_p)+(PAGE_SIZE-1))&PAGE_MASK)
-#define round_pgdown(_p)  ((_p)&PAGE_MASK)
 
 static void default_idle(void)
 {
@@ -77,8 +68,8 @@ static __attribute_used__ void idle_loop(void)
 void startup_cpu_idle_loop(void)
 {
     /* Just some sanity to ensure that the scheduler is set up okay. */
-    ASSERT(current->id == IDLE_DOMAIN_ID);
-    domain_unpause_by_systemcontroller(current);
+    ASSERT(current->domain->id == IDLE_DOMAIN_ID);
+    domain_unpause_by_systemcontroller(current->domain);
     __enter_scheduler();
 
     /*
@@ -162,6 +153,9 @@ void machine_restart(char * __unused)
     smp_send_stop();
     disable_IO_APIC();
 #endif
+#ifdef CONFIG_VMX
+    stop_vmx();
+#endif
 
     if(!reboot_thru_bios) {
         /* rebooting needs to touch the page at absolute addr 0 */
@@ -216,121 +210,270 @@ void dump_pageframe_info(struct domain *d)
            page->u.inuse.type_info);
 }
 
-xmem_cache_t *domain_struct_cachep;
-void __init domain_startofday(void)
-{
-    domain_struct_cachep = xmem_cache_create(
-        "domain_cache", sizeof(struct domain),
-        0, SLAB_HWCACHE_ALIGN, NULL, NULL);
-    if ( domain_struct_cachep == NULL )
-        panic("No slab cache for domain structs.");
-}
-
 struct domain *arch_alloc_domain_struct(void)
 {
-    return xmem_cache_alloc(domain_struct_cachep);
+    return xmalloc(struct domain);
 }
 
 void arch_free_domain_struct(struct domain *d)
 {
-    xmem_cache_free(domain_struct_cachep, d);
+    xfree(d);
+}
+
+struct exec_domain *arch_alloc_exec_domain_struct(void)
+{
+    return xmalloc(struct exec_domain);
+}
+
+void arch_free_exec_domain_struct(struct exec_domain *ed)
+{
+    xfree(ed);
 }
 
 void free_perdomain_pt(struct domain *d)
 {
-    free_xenheap_page((unsigned long)d->mm.perdomain_pt);
+    free_xenheap_page((unsigned long)d->arch.mm_perdomain_pt);
 }
 
-static void continue_idle_task(struct domain *d)
+static void continue_idle_task(struct exec_domain *ed)
 {
     reset_stack_and_jump(idle_loop);
 }
 
-static void continue_nonidle_task(struct domain *d)
+static void continue_nonidle_task(struct exec_domain *ed)
 {
     reset_stack_and_jump(ret_from_intr);
 }
 
-void arch_do_createdomain(struct domain *d)
+void arch_do_createdomain(struct exec_domain *ed)
 {
-#ifdef ARCH_HAS_FAST_TRAP
-    SET_DEFAULT_FAST_TRAP(&d->thread);
-#endif
+    struct domain *d = ed->domain;
+
+    SET_DEFAULT_FAST_TRAP(&ed->arch);
 
     if ( d->id == IDLE_DOMAIN_ID )
     {
-        d->thread.schedule_tail = continue_idle_task;
+        ed->arch.schedule_tail = continue_idle_task;
     }
     else
     {
-        d->thread.schedule_tail = continue_nonidle_task;
+        ed->arch.schedule_tail = continue_nonidle_task;
 
         d->shared_info = (void *)alloc_xenheap_page();
         memset(d->shared_info, 0, PAGE_SIZE);
-        d->shared_info->arch.mfn_to_pfn_start = m2p_start_mfn;
+        ed->vcpu_info = &d->shared_info->vcpu_data[ed->eid];
         SHARE_PFN_WITH_DOMAIN(virt_to_page(d->shared_info), d);
         machine_to_phys_mapping[virt_to_phys(d->shared_info) >> 
                                PAGE_SHIFT] = INVALID_P2M_ENTRY;
 
-        d->mm.perdomain_pt = (l1_pgentry_t *)alloc_xenheap_page();
-        memset(d->mm.perdomain_pt, 0, PAGE_SIZE);
-        machine_to_phys_mapping[virt_to_phys(d->mm.perdomain_pt) >> 
+        d->arch.mm_perdomain_pt = (l1_pgentry_t *)alloc_xenheap_page();
+        memset(d->arch.mm_perdomain_pt, 0, PAGE_SIZE);
+        machine_to_phys_mapping[virt_to_phys(d->arch.mm_perdomain_pt) >> 
                                PAGE_SHIFT] = INVALID_P2M_ENTRY;
+        ed->arch.perdomain_ptes = d->arch.mm_perdomain_pt;
     }
 }
 
-int arch_final_setup_guestos(struct domain *d, full_execution_context_t *c)
+void arch_do_boot_vcpu(struct exec_domain *ed)
+{
+    struct domain *d = ed->domain;
+    ed->arch.schedule_tail = d->exec_domain[0]->arch.schedule_tail;
+    ed->arch.perdomain_ptes = 
+        d->arch.mm_perdomain_pt + (ed->eid << PDPT_VCPU_SHIFT);
+}
+
+#ifdef CONFIG_VMX
+void arch_vmx_do_resume(struct exec_domain *ed) 
+{
+    u64 vmcs_phys_ptr = (u64) virt_to_phys(ed->arch.arch_vmx.vmcs);
+
+    load_vmcs(&ed->arch.arch_vmx, vmcs_phys_ptr);
+    vmx_do_resume(ed);
+    reset_stack_and_jump(vmx_asm_do_resume);
+}
+
+void arch_vmx_do_launch(struct exec_domain *ed) 
+{
+    u64 vmcs_phys_ptr = (u64) virt_to_phys(ed->arch.arch_vmx.vmcs);
+
+    load_vmcs(&ed->arch.arch_vmx, vmcs_phys_ptr);
+    vmx_do_launch(ed);
+    reset_stack_and_jump(vmx_asm_do_launch);
+}
+
+static void monitor_mk_pagetable(struct exec_domain *ed)
+{
+    unsigned long mpfn;
+    l2_pgentry_t *mpl2e, *phys_table;
+    struct pfn_info *mpfn_info;
+    struct domain *d = ed->domain;
+
+    mpfn_info = alloc_domheap_page(NULL);
+    ASSERT( mpfn_info ); 
+
+    mpfn = (unsigned long) (mpfn_info - frame_table);
+    mpl2e = (l2_pgentry_t *) map_domain_mem(mpfn << PAGE_SHIFT);
+    memset(mpl2e, 0, PAGE_SIZE);
+
+    memcpy(&mpl2e[DOMAIN_ENTRIES_PER_L2_PAGETABLE], 
+           &idle_pg_table[DOMAIN_ENTRIES_PER_L2_PAGETABLE],
+           HYPERVISOR_ENTRIES_PER_L2_PAGETABLE * sizeof(l2_pgentry_t));
+
+    ed->arch.monitor_table = mk_pagetable(mpfn << PAGE_SHIFT);
+    d->arch.shadow_mode = SHM_full_32;
+
+    mpl2e[PERDOMAIN_VIRT_START >> L2_PAGETABLE_SHIFT] =
+        mk_l2_pgentry((__pa(d->arch.mm_perdomain_pt) & PAGE_MASK) 
+                      | __PAGE_HYPERVISOR);
+
+    phys_table = (l2_pgentry_t *) map_domain_mem(pagetable_val(
+                                        ed->arch.phys_table));
+    memcpy(d->arch.mm_perdomain_pt, phys_table,
+           ENTRIES_PER_L1_PAGETABLE * sizeof(l1_pgentry_t));
+
+    unmap_domain_mem(phys_table);
+    unmap_domain_mem(mpl2e);
+}
+
+/*
+ * Free the pages for monitor_table and guest_pl2e_cache
+ */
+static void monitor_rm_pagetable(struct exec_domain *ed)
+{
+    l2_pgentry_t *mpl2e;
+    unsigned long mpfn;
+
+    ASSERT( pagetable_val(ed->arch.monitor_table) );
+    
+    mpl2e = (l2_pgentry_t *) map_domain_mem(pagetable_val(ed->arch.monitor_table));
+    /*
+     * First get the pfn for guest_pl2e_cache by looking at monitor_table
+     */
+    mpfn = l2_pgentry_val(mpl2e[LINEAR_PT_VIRT_START >> L2_PAGETABLE_SHIFT])
+        >> PAGE_SHIFT;
+
+    free_domheap_page(&frame_table[mpfn]);
+    unmap_domain_mem(mpl2e);
+
+    /*
+     * Then free monitor_table.
+     */
+    mpfn = (pagetable_val(ed->arch.monitor_table)) >> PAGE_SHIFT;
+    free_domheap_page(&frame_table[mpfn]);
+
+    ed->arch.monitor_table = mk_pagetable(0);
+}
+
+static int vmx_final_setup_guestos(struct exec_domain *ed,
+                                   full_execution_context_t *full_context)
+{
+    int error;
+    execution_context_t *context;
+    struct vmcs_struct *vmcs;
+
+    context = &full_context->cpu_ctxt;
+
+    /*
+     * Create a new VMCS
+     */
+    if (!(vmcs = alloc_vmcs())) {
+        printk("Failed to create a new VMCS\n");
+        return -ENOMEM;
+    }
+
+    memset(&ed->arch.arch_vmx, 0, sizeof (struct arch_vmx_struct));
+
+    ed->arch.arch_vmx.vmcs = vmcs;
+    error = construct_vmcs(&ed->arch.arch_vmx, context, full_context, VMCS_USE_HOST_ENV);
+    if (error < 0) {
+        printk("Failed to construct a new VMCS\n");
+        goto out;
+    }
+
+    monitor_mk_pagetable(ed);
+    ed->arch.schedule_tail = arch_vmx_do_launch;
+    clear_bit(VMX_CPU_STATE_PG_ENABLED, &ed->arch.arch_vmx.cpu_state);
+
+#if defined (__i386)
+    ed->arch.arch_vmx.vmx_platform.real_mode_data = 
+        (unsigned long *) context->esi;
+#endif
+
+    if (ed == ed->domain->exec_domain[0]) {
+        /* 
+         * Required to do this once per domain
+         */
+        memset(&ed->domain->shared_info->evtchn_mask[0], 0xff, 
+               sizeof(ed->domain->shared_info->evtchn_mask));
+        clear_bit(IOPACKET_PORT, &ed->domain->shared_info->evtchn_mask[0]);
+    }
+
+    return 0;
+
+out:
+    free_vmcs(vmcs);
+    ed->arch.arch_vmx.vmcs = 0;
+    return error;
+}
+#endif
+
+int arch_final_setup_guestos(
+    struct exec_domain *d, full_execution_context_t *c)
 {
     unsigned long phys_basetab;
     int i, rc;
 
-    clear_bit(DF_DONEFPUINIT, &d->flags);
+    clear_bit(EDF_DONEFPUINIT, &d->ed_flags);
     if ( c->flags & ECF_I387_VALID )
-        set_bit(DF_DONEFPUINIT, &d->flags);
+        set_bit(EDF_DONEFPUINIT, &d->ed_flags);
 
-    memcpy(&d->thread.user_ctxt,
+    memcpy(&d->arch.user_ctxt,
            &c->cpu_ctxt,
-           sizeof(d->thread.user_ctxt));
+           sizeof(d->arch.user_ctxt));
+
+    /* Clear IOPL for unprivileged domains. */
+    if (!IS_PRIV(d->domain))
+        d->arch.user_ctxt.eflags &= 0xffffcfff;
 
     /*
      * This is sufficient! If the descriptor DPL differs from CS RPL then we'll
      * #GP. If DS, ES, FS, GS are DPL 0 then they'll be cleared automatically.
      * If SS RPL or DPL differs from CS RPL then we'll #GP.
      */
-    if ( ((d->thread.user_ctxt.cs & 3) == 0) ||
-         ((d->thread.user_ctxt.ss & 3) == 0) )
-        return -EINVAL;
+    if (!(c->flags & ECF_VMX_GUEST)) 
+        if ( ((d->arch.user_ctxt.cs & 3) == 0) ||
+             ((d->arch.user_ctxt.ss & 3) == 0) )
+                return -EINVAL;
 
-    memcpy(&d->thread.i387,
+    memcpy(&d->arch.i387,
            &c->fpu_ctxt,
-           sizeof(d->thread.i387));
+           sizeof(d->arch.i387));
 
-    memcpy(d->thread.traps,
+    memcpy(d->arch.traps,
            &c->trap_ctxt,
-           sizeof(d->thread.traps));
+           sizeof(d->arch.traps));
 
-#ifdef ARCH_HAS_FAST_TRAP
     if ( (rc = (int)set_fast_trap(d, c->fast_trap_idx)) != 0 )
         return rc;
-#endif
 
-    d->mm.ldt_base = c->ldt_base;
-    d->mm.ldt_ents = c->ldt_ents;
+    d->arch.ldt_base = c->ldt_base;
+    d->arch.ldt_ents = c->ldt_ents;
 
-    d->thread.guestos_ss = c->guestos_ss;
-    d->thread.guestos_sp = c->guestos_esp;
+    d->arch.guestos_ss = c->guestos_ss;
+    d->arch.guestos_sp = c->guestos_esp;
 
     for ( i = 0; i < 8; i++ )
         (void)set_debugreg(d, i, c->debugreg[i]);
 
-    d->thread.event_selector    = c->event_callback_cs;
-    d->thread.event_address     = c->event_callback_eip;
-    d->thread.failsafe_selector = c->failsafe_callback_cs;
-    d->thread.failsafe_address  = c->failsafe_callback_eip;
+    d->arch.event_selector    = c->event_callback_cs;
+    d->arch.event_address     = c->event_callback_eip;
+    d->arch.failsafe_selector = c->failsafe_callback_cs;
+    d->arch.failsafe_address  = c->failsafe_callback_eip;
     
     phys_basetab = c->pt_base;
-    d->mm.pagetable = mk_pagetable(phys_basetab);
-    if ( !get_page_and_type(&frame_table[phys_basetab>>PAGE_SHIFT], d, 
+    d->arch.pagetable = mk_pagetable(phys_basetab);
+    d->arch.phys_table = d->arch.pagetable;
+    if ( !get_page_and_type(&frame_table[phys_basetab>>PAGE_SHIFT], d->domain, 
                             PGT_base_page_table) )
         return -EINVAL;
 
@@ -346,28 +489,32 @@ int arch_final_setup_guestos(struct domain *d, full_execution_context_t *c)
         }
     }
 
+#ifdef CONFIG_VMX
+    if (c->flags & ECF_VMX_GUEST)
+        return vmx_final_setup_guestos(d, c);
+#endif
+
     return 0;
 }
 
-#if defined(__i386__)
-
-void new_thread(struct domain *d,
+void new_thread(struct exec_domain *d,
                 unsigned long start_pc,
                 unsigned long start_stack,
                 unsigned long start_info)
 {
-    execution_context_t *ec = &d->thread.user_ctxt;
+    execution_context_t *ec = &d->arch.user_ctxt;
 
     /*
      * Initial register values:
-     *  DS,ES,FS,GS = FLAT_RING1_DS
-     *       CS:EIP = FLAT_RING1_CS:start_pc
-     *       SS:ESP = FLAT_RING1_DS:start_stack
+     *  DS,ES,FS,GS = FLAT_GUESTOS_DS
+     *       CS:EIP = FLAT_GUESTOS_CS:start_pc
+     *       SS:ESP = FLAT_GUESTOS_SS:start_stack
      *          ESI = start_info
      *  [EAX,EBX,ECX,EDX,EDI,EBP are zero]
      */
-    ec->ds = ec->es = ec->fs = ec->gs = ec->ss = FLAT_RING1_DS;
-    ec->cs = FLAT_RING1_CS;
+    ec->ds = ec->es = ec->fs = ec->gs = FLAT_GUESTOS_DS;
+    ec->ss = FLAT_GUESTOS_SS;
+    ec->cs = FLAT_GUESTOS_CS;
     ec->eip = start_pc;
     ec->esp = start_stack;
     ec->esi = start_info;
@@ -380,74 +527,92 @@ void new_thread(struct domain *d,
 /*
  * This special macro can be used to load a debugging register
  */
-#define loaddebug(thread,register) \
-		__asm__("movl %0,%%db" #register  \
+#define loaddebug(_ed,_reg) \
+		__asm__("mov %0,%%db" #_reg  \
 			: /* no output */ \
-			:"r" (thread->debugreg[register]))
+			:"r" ((_ed)->debugreg[_reg]))
 
-
-void switch_to(struct domain *prev_p, struct domain *next_p)
+void switch_to(struct exec_domain *prev_p, struct exec_domain *next_p)
 {
-    struct thread_struct *next = &next_p->thread;
     struct tss_struct *tss = init_tss + smp_processor_id();
     execution_context_t *stack_ec = get_execution_context();
     int i;
-    
+#ifdef CONFIG_VMX
+    unsigned long vmx_domain = next_p->arch.arch_vmx.flags; 
+#endif
+
     __cli();
 
     /* Switch guest general-register state. */
-    if ( !is_idle_task(prev_p) )
+    if ( !is_idle_task(prev_p->domain) )
     {
-        memcpy(&prev_p->thread.user_ctxt,
+        memcpy(&prev_p->arch.user_ctxt,
                stack_ec, 
                sizeof(*stack_ec));
         unlazy_fpu(prev_p);
-        CLEAR_FAST_TRAP(&prev_p->thread);
+        CLEAR_FAST_TRAP(&prev_p->arch);
     }
 
-    if ( !is_idle_task(next_p) )
+    if ( !is_idle_task(next_p->domain) )
     {
         memcpy(stack_ec,
-               &next_p->thread.user_ctxt,
+               &next_p->arch.user_ctxt,
                sizeof(*stack_ec));
 
-        SET_FAST_TRAP(&next_p->thread);
-
-        /* Switch the guest OS ring-1 stack. */
-        tss->esp1 = next->guestos_sp;
-        tss->ss1  = next->guestos_ss;
-
         /* Maybe switch the debug registers. */
-        if ( unlikely(next->debugreg[7]) )
+        if ( unlikely(next_p->arch.debugreg[7]) )
         {
-            loaddebug(next, 0);
-            loaddebug(next, 1);
-            loaddebug(next, 2);
-            loaddebug(next, 3);
+            loaddebug(&next_p->arch, 0);
+            loaddebug(&next_p->arch, 1);
+            loaddebug(&next_p->arch, 2);
+            loaddebug(&next_p->arch, 3);
             /* no 4 and 5 */
-            loaddebug(next, 6);
-            loaddebug(next, 7);
+            loaddebug(&next_p->arch, 6);
+            loaddebug(&next_p->arch, 7);
         }
 
+#ifdef CONFIG_VMX
+        if ( vmx_domain )
+        {
+            /* Switch page tables. */
+            write_ptbase(next_p);
+ 
+            set_current(next_p);
+            /* Switch GDT and LDT. */
+            __asm__ __volatile__ ("lgdt %0" : "=m" (*next_p->arch.gdt));
+
+            __sti();
+            return;
+        }
+#endif
+ 
+        SET_FAST_TRAP(&next_p->arch);
+
+#ifdef __i386__
+        /* Switch the guest OS ring-1 stack. */
+        tss->esp1 = next_p->arch.guestos_sp;
+        tss->ss1  = next_p->arch.guestos_ss;
+#endif
+
         /* Switch page tables. */
-        write_ptbase(&next_p->mm);
+        write_ptbase(next_p);
     }
 
-    if ( unlikely(prev_p->thread.io_bitmap != NULL) )
+    if ( unlikely(prev_p->arch.io_bitmap != NULL) )
     {
-        for ( i = 0; i < sizeof(prev_p->thread.io_bitmap_sel) * 8; i++ )
-            if ( !test_bit(i, &prev_p->thread.io_bitmap_sel) )
+        for ( i = 0; i < sizeof(prev_p->arch.io_bitmap_sel) * 8; i++ )
+            if ( !test_bit(i, &prev_p->arch.io_bitmap_sel) )
                 memset(&tss->io_bitmap[i * IOBMP_BYTES_PER_SELBIT],
                        ~0U, IOBMP_BYTES_PER_SELBIT);
         tss->bitmap = IOBMP_INVALID_OFFSET;
     }
 
-    if ( unlikely(next_p->thread.io_bitmap != NULL) )
+    if ( unlikely(next_p->arch.io_bitmap != NULL) )
     {
-        for ( i = 0; i < sizeof(next_p->thread.io_bitmap_sel) * 8; i++ )
-            if ( !test_bit(i, &next_p->thread.io_bitmap_sel) )
+        for ( i = 0; i < sizeof(next_p->arch.io_bitmap_sel) * 8; i++ )
+            if ( !test_bit(i, &next_p->arch.io_bitmap_sel) )
                 memcpy(&tss->io_bitmap[i * IOBMP_BYTES_PER_SELBIT],
-                       &next_p->thread.io_bitmap[i * IOBMP_BYTES_PER_SELBIT],
+                       &next_p->arch.io_bitmap[i * IOBMP_BYTES_PER_SELBIT],
                        IOBMP_BYTES_PER_SELBIT);
         tss->bitmap = IOBMP_OFFSET;
     }
@@ -455,7 +620,7 @@ void switch_to(struct domain *prev_p, struct domain *next_p)
     set_current(next_p);
 
     /* Switch GDT and LDT. */
-    __asm__ __volatile__ ("lgdt %0" : "=m" (*next_p->mm.gdt));
+    __asm__ __volatile__ ("lgdt %0" : "=m" (*next_p->arch.gdt));
     load_LDT(next_p);
 
     __sti();
@@ -470,14 +635,11 @@ long do_iopl(domid_t domain, unsigned int new_io_pl)
     return 0;
 }
 
-#endif
-
-unsigned long hypercall_create_continuation(
+unsigned long __hypercall_create_continuation(
     unsigned int op, unsigned int nr_args, ...)
 {
     struct mc_state *mcs = &mc_state[smp_processor_id()];
     execution_context_t *ec;
-    unsigned long *preg;
     unsigned int i;
     va_list args;
 
@@ -497,10 +659,34 @@ unsigned long hypercall_create_continuation(
         ec->eax  = op;
         ec->eip -= 2;  /* re-execute 'int 0x82' */
         
-        for ( i = 0, preg = &ec->ebx; i < nr_args; i++, preg++ )
-            *preg = va_arg(args, unsigned long);
-#else
-        preg = NULL; /* XXX x86/64 */
+        for ( i = 0; i < nr_args; i++ )
+        {
+            switch ( i )
+            {
+            case 0: ec->ebx = va_arg(args, unsigned long); break;
+            case 1: ec->ecx = va_arg(args, unsigned long); break;
+            case 2: ec->edx = va_arg(args, unsigned long); break;
+            case 3: ec->esi = va_arg(args, unsigned long); break;
+            case 4: ec->edi = va_arg(args, unsigned long); break;
+            case 5: ec->ebp = va_arg(args, unsigned long); break;
+            }
+        }
+#elif defined(__x86_64__)
+        ec->rax  = op;
+        ec->rip -= 2;  /* re-execute 'syscall' */
+        
+        for ( i = 0; i < nr_args; i++ )
+        {
+            switch ( i )
+            {
+            case 0: ec->rdi = va_arg(args, unsigned long); break;
+            case 1: ec->rsi = va_arg(args, unsigned long); break;
+            case 2: ec->rdx = va_arg(args, unsigned long); break;
+            case 3: ec->r10 = va_arg(args, unsigned long); break;
+            case 4: ec->r8  = va_arg(args, unsigned long); break;
+            case 5: ec->r9  = va_arg(args, unsigned long); break;
+            }
+        }
 #endif
     }
 
@@ -567,9 +753,24 @@ static void relinquish_list(struct domain *d, struct list_head *list)
     spin_unlock_recursive(&d->page_alloc_lock);
 }
 
+#ifdef CONFIG_VMX
+static void vmx_domain_relinquish_memory(struct exec_domain *ed)
+{
+    /*
+     * Free VMCS
+     */
+    ASSERT(ed->arch.arch_vmx.vmcs);
+    free_vmcs(ed->arch.arch_vmx.vmcs);
+    ed->arch.arch_vmx.vmcs = 0;
+    
+    monitor_rm_pagetable(ed);
+}
+#endif
 
 void domain_relinquish_memory(struct domain *d)
 {
+    struct exec_domain *ed;
+
     /* Ensure that noone is running over the dead domain's page tables. */
     synchronise_pagetables(~0UL);
 
@@ -577,380 +778,29 @@ void domain_relinquish_memory(struct domain *d)
     shadow_mode_disable(d);
 
     /* Drop the in-use reference to the page-table base. */
-    if ( pagetable_val(d->mm.pagetable) != 0 )
+    for_each_exec_domain ( d, ed )
     {
-        put_page_and_type(&frame_table[pagetable_val(d->mm.pagetable) >>
-                                      PAGE_SHIFT]);
-	d->mm.pagetable = mk_pagetable(0);
+        if ( pagetable_val(ed->arch.pagetable) != 0 )
+            put_page_and_type(&frame_table[pagetable_val(ed->arch.pagetable) >>
+                                           PAGE_SHIFT]);
+        ed->arch.pagetable = mk_pagetable(0);
     }
+
+#ifdef CONFIG_VMX
+    if ( VMX_DOMAIN(d->exec_domain[0]) )
+        for_each_exec_domain ( d, ed )
+            vmx_domain_relinquish_memory(ed);
+#endif
 
     /*
      * Relinquish GDT mappings. No need for explicit unmapping of the LDT as 
      * it automatically gets squashed when the guest's mappings go away.
      */
-    destroy_gdt(d);
+    for_each_exec_domain(d, ed)
+        destroy_gdt(ed);
 
     /* Relinquish every page of memory. */
     relinquish_list(d, &d->xenpage_list);
     relinquish_list(d, &d->page_list);
 }
 
-
-int construct_dom0(struct domain *p, 
-                   unsigned long alloc_start,
-                   unsigned long alloc_end,
-                   char *image_start, unsigned long image_len, 
-                   char *initrd_start, unsigned long initrd_len,
-                   char *cmdline)
-{
-    char *dst;
-    int i, rc;
-    unsigned long pfn, mfn;
-    unsigned long nr_pages = (alloc_end - alloc_start) >> PAGE_SHIFT;
-    unsigned long nr_pt_pages;
-    unsigned long count;
-    l2_pgentry_t *l2tab, *l2start;
-    l1_pgentry_t *l1tab = NULL, *l1start = NULL;
-    struct pfn_info *page = NULL;
-    start_info_t *si;
-
-    /*
-     * This fully describes the memory layout of the initial domain. All 
-     * *_start address are page-aligned, except v_start (and v_end) which are 
-     * superpage-aligned.
-     */
-    struct domain_setup_info dsi;
-    unsigned long vinitrd_start;
-    unsigned long vinitrd_end;
-    unsigned long vphysmap_start;
-    unsigned long vphysmap_end;
-    unsigned long vstartinfo_start;
-    unsigned long vstartinfo_end;
-    unsigned long vstack_start;
-    unsigned long vstack_end;
-    unsigned long vpt_start;
-    unsigned long vpt_end;
-    unsigned long v_end;
-
-    /* Machine address of next candidate page-table page. */
-    unsigned long mpt_alloc;
-
-    extern void physdev_init_dom0(struct domain *);
-
-    /* Sanity! */
-    if ( p->id != 0 ) 
-        BUG();
-    if ( test_bit(DF_CONSTRUCTED, &p->flags) ) 
-        BUG();
-
-    memset(&dsi, 0, sizeof(struct domain_setup_info));
-
-    printk("*** LOADING DOMAIN 0 ***\n");
-
-    /*
-     * This is all a bit grim. We've moved the modules to the "safe" physical 
-     * memory region above MAP_DIRECTMAP_ADDRESS (48MB). Later in this 
-     * routine we're going to copy it down into the region that's actually 
-     * been allocated to domain 0. This is highly likely to be overlapping, so 
-     * we use a forward copy.
-     * 
-     * MAP_DIRECTMAP_ADDRESS should be safe. The worst case is a machine with 
-     * 4GB and lots of network/disk cards that allocate loads of buffers. 
-     * We'll have to revisit this if we ever support PAE (64GB).
-     */
-
-    rc = parseelfimage(image_start, image_len, &dsi);
-    if ( rc != 0 )
-        return rc;
-
-    /* Set up domain options */
-    if ( dsi.use_writable_pagetables )
-        vm_assist(p, VMASST_CMD_enable, VMASST_TYPE_writable_pagetables);
-
-    if ( (dsi.v_start & (PAGE_SIZE-1)) != 0 )
-    {
-        printk("Initial guest OS must load to a page boundary.\n");
-        return -EINVAL;
-    }
-
-    /*
-     * Why do we need this? The number of page-table frames depends on the 
-     * size of the bootstrap address space. But the size of the address space 
-     * depends on the number of page-table frames (since each one is mapped 
-     * read-only). We have a pair of simultaneous equations in two unknowns, 
-     * which we solve by exhaustive search.
-     */
-    vinitrd_start    = round_pgup(dsi.v_kernend);
-    vinitrd_end      = vinitrd_start + initrd_len;
-    vphysmap_start   = round_pgup(vinitrd_end);
-    vphysmap_end     = vphysmap_start + (nr_pages * sizeof(unsigned long));
-    vpt_start        = round_pgup(vphysmap_end);
-    for ( nr_pt_pages = 2; ; nr_pt_pages++ )
-    {
-        vpt_end          = vpt_start + (nr_pt_pages * PAGE_SIZE);
-        vstartinfo_start = vpt_end;
-        vstartinfo_end   = vstartinfo_start + PAGE_SIZE;
-        vstack_start     = vstartinfo_end;
-        vstack_end       = vstack_start + PAGE_SIZE;
-        v_end            = (vstack_end + (1<<22)-1) & ~((1<<22)-1);
-        if ( (v_end - vstack_end) < (512 << 10) )
-            v_end += 1 << 22; /* Add extra 4MB to get >= 512kB padding. */
-        if ( (((v_end - dsi.v_start + ((1<<L2_PAGETABLE_SHIFT)-1)) >> 
-               L2_PAGETABLE_SHIFT) + 1) <= nr_pt_pages )
-            break;
-    }
-
-    printk("PHYSICAL MEMORY ARRANGEMENT:\n"
-           " Kernel image:  %p->%p\n"
-           " Initrd image:  %p->%p\n"
-           " Dom0 alloc.:   %08lx->%08lx\n",
-           image_start, image_start + image_len,
-           initrd_start, initrd_start + initrd_len,
-           alloc_start, alloc_end);
-    printk("VIRTUAL MEMORY ARRANGEMENT:\n"
-           " Loaded kernel: %08lx->%08lx\n"
-           " Init. ramdisk: %08lx->%08lx\n"
-           " Phys-Mach map: %08lx->%08lx\n"
-           " Page tables:   %08lx->%08lx\n"
-           " Start info:    %08lx->%08lx\n"
-           " Boot stack:    %08lx->%08lx\n"
-           " TOTAL:         %08lx->%08lx\n",
-           dsi.v_kernstart, dsi.v_kernend, 
-           vinitrd_start, vinitrd_end,
-           vphysmap_start, vphysmap_end,
-           vpt_start, vpt_end,
-           vstartinfo_start, vstartinfo_end,
-           vstack_start, vstack_end,
-           dsi.v_start, v_end);
-    printk(" ENTRY ADDRESS: %08lx\n", dsi.v_kernentry);
-
-    if ( (v_end - dsi.v_start) > (nr_pages * PAGE_SIZE) )
-    {
-        printk("Initial guest OS requires too much space\n"
-               "(%luMB is greater than %luMB limit)\n",
-               (v_end-dsi.v_start)>>20, (nr_pages<<PAGE_SHIFT)>>20);
-        return -ENOMEM;
-    }
-
-    /*
-     * Protect the lowest 1GB of memory. We use a temporary mapping there
-     * from which we copy the kernel and ramdisk images.
-     */
-    if ( dsi.v_start < (1<<30) )
-    {
-        printk("Initial loading isn't allowed to lowest 1GB of memory.\n");
-        return -EINVAL;
-    }
-
-    /* Paranoia: scrub DOM0's memory allocation. */
-    printk("Scrubbing DOM0 RAM: ");
-    dst = (char *)alloc_start;
-    while ( dst < (char *)alloc_end )
-    {
-#define SCRUB_BYTES (100 * 1024 * 1024) /* 100MB */
-        printk(".");
-        touch_nmi_watchdog();
-        if ( ((char *)alloc_end - dst) > SCRUB_BYTES )
-        {
-            memset(dst, 0, SCRUB_BYTES);
-            dst += SCRUB_BYTES;
-        }
-        else
-        {
-            memset(dst, 0, (char *)alloc_end - dst);
-            break;
-        }
-    }
-    printk("done.\n");
-
-    /* Construct a frame-allocation list for the initial domain. */
-    for ( mfn = (alloc_start>>PAGE_SHIFT); 
-          mfn < (alloc_end>>PAGE_SHIFT); 
-          mfn++ )
-    {
-        page = &frame_table[mfn];
-        page->u.inuse.domain    = p;
-        page->u.inuse.type_info = 0;
-        page->count_info        = PGC_allocated | 1;
-        list_add_tail(&page->list, &p->page_list);
-        p->tot_pages++; p->max_pages++;
-    }
-
-    mpt_alloc = (vpt_start - dsi.v_start) + alloc_start;
-
-    SET_GDT_ENTRIES(p, DEFAULT_GDT_ENTRIES);
-    SET_GDT_ADDRESS(p, DEFAULT_GDT_ADDRESS);
-
-    /*
-     * We're basically forcing default RPLs to 1, so that our "what privilege
-     * level are we returning to?" logic works.
-     */
-    p->thread.failsafe_selector = FLAT_GUESTOS_CS;
-    p->thread.event_selector    = FLAT_GUESTOS_CS;
-    p->thread.guestos_ss = FLAT_GUESTOS_DS;
-    for ( i = 0; i < 256; i++ ) 
-        p->thread.traps[i].cs = FLAT_GUESTOS_CS;
-
-    /* WARNING: The new domain must have its 'processor' field filled in! */
-    l2start = l2tab = (l2_pgentry_t *)mpt_alloc; mpt_alloc += PAGE_SIZE;
-    memcpy(l2tab, &idle_pg_table[0], PAGE_SIZE);
-    l2tab[LINEAR_PT_VIRT_START >> L2_PAGETABLE_SHIFT] =
-        mk_l2_pgentry((unsigned long)l2start | __PAGE_HYPERVISOR);
-    l2tab[PERDOMAIN_VIRT_START >> L2_PAGETABLE_SHIFT] =
-        mk_l2_pgentry(__pa(p->mm.perdomain_pt) | __PAGE_HYPERVISOR);
-    p->mm.pagetable = mk_pagetable((unsigned long)l2start);
-
-    l2tab += l2_table_offset(dsi.v_start);
-    mfn = alloc_start >> PAGE_SHIFT;
-    for ( count = 0; count < ((v_end-dsi.v_start)>>PAGE_SHIFT); count++ )
-    {
-        if ( !((unsigned long)l1tab & (PAGE_SIZE-1)) )
-        {
-            l1start = l1tab = (l1_pgentry_t *)mpt_alloc; 
-            mpt_alloc += PAGE_SIZE;
-            *l2tab++ = mk_l2_pgentry((unsigned long)l1start | L2_PROT);
-            clear_page(l1tab);
-            if ( count == 0 )
-                l1tab += l1_table_offset(dsi.v_start);
-        }
-        *l1tab++ = mk_l1_pgentry((mfn << PAGE_SHIFT) | L1_PROT);
-        
-        page = &frame_table[mfn];
-        if ( !get_page_and_type(page, p, PGT_writable_page) )
-            BUG();
-
-        mfn++;
-    }
-
-    /* Pages that are part of page tables must be read only. */
-    l2tab = l2start + l2_table_offset(vpt_start);
-    l1start = l1tab = (l1_pgentry_t *)l2_pgentry_to_phys(*l2tab);
-    l1tab += l1_table_offset(vpt_start);
-    l2tab++;
-    for ( count = 0; count < nr_pt_pages; count++ ) 
-    {
-        *l1tab = mk_l1_pgentry(l1_pgentry_val(*l1tab) & ~_PAGE_RW);
-        page = &frame_table[l1_pgentry_to_pagenr(*l1tab)];
-        if ( count == 0 )
-        {
-            page->u.inuse.type_info &= ~PGT_type_mask;
-            page->u.inuse.type_info |= PGT_l2_page_table;
-
-            /*
-             * No longer writable: decrement the type_count.
-             * Installed as CR3: increment both the ref_count and type_count.
-             * Net: just increment the ref_count.
-             */
-            get_page(page, p); /* an extra ref because of readable mapping */
-
-            /* Get another ref to L2 page so that it can be pinned. */
-            if ( !get_page_and_type(page, p, PGT_l2_page_table) )
-                BUG();
-            set_bit(_PGT_pinned, &page->u.inuse.type_info);
-        }
-        else
-        {
-            page->u.inuse.type_info &= ~PGT_type_mask;
-            page->u.inuse.type_info |= PGT_l1_page_table;
-	    page->u.inuse.type_info |= 
-		((dsi.v_start>>L2_PAGETABLE_SHIFT)+(count-1))<<PGT_va_shift;
-
-            /*
-             * No longer writable: decrement the type_count.
-             * This is an L1 page, installed in a validated L2 page:
-             * increment both the ref_count and type_count.
-             * Net: just increment the ref_count.
-             */
-            get_page(page, p); /* an extra ref because of readable mapping */
-        }
-        l1tab++;
-        if( !((unsigned long)l1tab & (PAGE_SIZE - 1)) )
-            l1start = l1tab = (l1_pgentry_t *)l2_pgentry_to_phys(*l2tab);
-    }
-
-    /* Set up shared-info area. */
-    update_dom_time(p->shared_info);
-    p->shared_info->domain_time = 0;
-    /* Mask all upcalls... */
-    for ( i = 0; i < MAX_VIRT_CPUS; i++ )
-        p->shared_info->vcpu_data[i].evtchn_upcall_mask = 1;
-
-    /* Install the new page tables. */
-    __cli();
-    write_ptbase(&p->mm);
-
-    /* Copy the OS image. */
-    (void)loadelfimage(image_start);
-
-    /* Copy the initial ramdisk. */
-    if ( initrd_len != 0 )
-        memcpy((void *)vinitrd_start, initrd_start, initrd_len);
-    
-    /* Set up start info area. */
-    si = (start_info_t *)vstartinfo_start;
-    memset(si, 0, PAGE_SIZE);
-    si->nr_pages     = p->tot_pages;
-    si->shared_info  = virt_to_phys(p->shared_info);
-    si->flags        = SIF_PRIVILEGED | SIF_INITDOMAIN;
-    si->pt_base      = vpt_start;
-    si->nr_pt_frames = nr_pt_pages;
-    si->mfn_list     = vphysmap_start;
-
-    /* Write the phys->machine and machine->phys table entries. */
-    for ( pfn = 0; pfn < p->tot_pages; pfn++ )
-    {
-        mfn = pfn + (alloc_start>>PAGE_SHIFT);
-#ifndef NDEBUG
-#define REVERSE_START ((v_end - dsi.v_start) >> PAGE_SHIFT)
-        if ( pfn > REVERSE_START )
-            mfn = (alloc_end>>PAGE_SHIFT) - (pfn - REVERSE_START);
-#endif
-        ((unsigned long *)vphysmap_start)[pfn] = mfn;
-        machine_to_phys_mapping[mfn] = pfn;
-    }
-
-    if ( initrd_len != 0 )
-    {
-        si->mod_start = vinitrd_start;
-        si->mod_len   = initrd_len;
-        printk("Initrd len 0x%lx, start at 0x%08lx\n",
-               si->mod_len, si->mod_start);
-    }
-
-    dst = si->cmd_line;
-    if ( cmdline != NULL )
-    {
-        for ( i = 0; i < 255; i++ )
-        {
-            if ( cmdline[i] == '\0' )
-                break;
-            *dst++ = cmdline[i];
-        }
-    }
-    *dst = '\0';
-
-    /* Reinstate the caller's page tables. */
-    write_ptbase(&current->mm);
-    __sti();
-
-    /* Destroy low mappings - they were only for our convenience. */
-    for ( i = 0; i < DOMAIN_ENTRIES_PER_L2_PAGETABLE; i++ )
-        if ( l2_pgentry_val(l2start[i]) & _PAGE_PSE )
-            l2start[i] = mk_l2_pgentry(0);
-    zap_low_mappings(); /* Do the same for the idle page tables. */
-    
-    /* DOM0 gets access to everything. */
-    physdev_init_dom0(p);
-
-    set_bit(DF_CONSTRUCTED, &p->flags);
-
-    new_thread(p, dsi.v_kernentry, vstack_end, vstartinfo_start);
-
-#if 0 /* XXXXX DO NOT CHECK IN ENABLED !!! (but useful for testing so leave) */
-    shadow_lock(&p->mm);
-    shadow_mode_enable(p, SHM_test); 
-    shadow_unlock(&p->mm);
-#endif
-
-    return 0;
-}

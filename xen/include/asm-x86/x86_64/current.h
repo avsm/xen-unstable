@@ -1,26 +1,27 @@
+/* -*-  Mode:C; c-basic-offset:4; tab-width:4; indent-tabs-mode:nil -*- */
+
 #ifndef _X86_64_CURRENT_H
 #define _X86_64_CURRENT_H
 
-#if !defined(__ASSEMBLY__)
 struct domain;
 
-#include <asm/pda.h>
-
 #define STACK_RESERVED \
-    (sizeof(execution_context_t))
+    (sizeof(execution_context_t) + sizeof(struct domain *))
 
-static inline struct domain * get_current(void)
+static inline struct exec_domain *get_current(void)
 {
-    struct domain *current;
-    current = read_pda(pcurrent);
-    return current;
+    struct exec_domain *ed;
+    __asm__ ( "orq %%rsp,%0; andq $~7,%0; movq (%0),%0" 
+              : "=r" (ed) : "0" (STACK_SIZE-8) );
+    return ed;
 }
  
 #define current get_current()
 
-static inline void set_current(struct domain *p)
+static inline void set_current(struct exec_domain *ed)
 {
-    write_pda(pcurrent,p);
+    __asm__ ( "orq %%rsp,%0; andq $~7,%0; movq %1,(%0)" 
+              : : "r" (STACK_SIZE-8), "r" (ed) );    
 }
 
 static inline execution_context_t *get_execution_context(void)
@@ -45,16 +46,6 @@ static inline unsigned long get_stack_top(void)
         "movq %0,%%rsp; jmp "STR(__fn)                            \
         : : "r" (get_execution_context()) )
 
-#define schedule_tail(_d) ((_d)->thread.schedule_tail)(_d)
-
-#else
-
-#ifndef ASM_OFFSET_H
-#include <asm/offset.h> 
-#endif
-
-#define GET_CURRENT(reg) movq %gs:(pda_pcurrent),reg
-
-#endif
+#define schedule_tail(_ed) ((_ed)->arch.schedule_tail)(_ed)
 
 #endif /* !(_X86_64_CURRENT_H) */
