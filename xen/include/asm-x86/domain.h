@@ -14,6 +14,10 @@ struct trap_bounce {
 struct arch_domain
 {
     l1_pgentry_t *mm_perdomain_pt;
+#ifdef __x86_64__
+    l2_pgentry_t *mm_perdomain_l2;
+    l3_pgentry_t *mm_perdomain_l3;
+#endif
 
     /* shadow mode status and controls */
     unsigned int shadow_mode;  /* flags to control shadow table operation */
@@ -41,8 +45,8 @@ struct arch_domain
 
 struct arch_exec_domain
 {
-    unsigned long      guestos_sp;
-    unsigned long      guestos_ss;
+    unsigned long      kernel_sp;
+    unsigned long      kernel_ss;
 
     unsigned long      flags; /* TF_ */
 
@@ -64,11 +68,14 @@ struct arch_exec_domain
      * for segment registers %ds, %es, %fs and %gs:
      * 	%ds, %es, %fs, %gs, %eip, %cs, %eflags [, %oldesp, %oldss]
      */
-    unsigned long event_selector;    /* entry CS  */
+
+    unsigned long event_selector;    /* entry CS  (x86/32 only) */
     unsigned long event_address;     /* entry EIP */
 
-    unsigned long failsafe_selector; /* entry CS  */
+    unsigned long failsafe_selector; /* entry CS  (x86/32 only) */
     unsigned long failsafe_address;  /* entry EIP */
+
+    unsigned long syscall_address;   /* entry EIP (x86/64 only) */
 
     /* Bounce information for propagating an exception to guest OS. */
     struct trap_bounce trap_bounce;
@@ -93,10 +100,14 @@ struct arch_exec_domain
      * are put in this table (eg. the current GDT is mapped here).
      */
     l1_pgentry_t *perdomain_ptes;
-    pagetable_t  pagetable;
 
-    pagetable_t  monitor_table;
-    pagetable_t  shadow_table;
+    pagetable_t  guest_table_user;      /* x86/64: user-space pagetable. */
+    pagetable_t  guest_table;           /* guest notion of cr3 */
+    pagetable_t  shadow_table;          /* shadow of guest */
+    pagetable_t  monitor_table;         /* used in hypervisor */
+
+    pagetable_t  phys_table;            /* guest 1:1 pagetable */
+
     l2_pgentry_t *vpagetable;	        /* virtual address of pagetable */
     l2_pgentry_t *shadow_vtable;	/* virtual address of shadow_table */
     l2_pgentry_t *guest_pl2e_cache;	/* guest page directory cache */
@@ -113,7 +124,7 @@ struct arch_exec_domain
 #define IDLE0_ARCH_EXEC_DOMAIN                                      \
 {                                                                   \
     perdomain_ptes: 0,                                              \
-    pagetable:      mk_pagetable(__pa(idle_pg_table))               \
+    monitor_table:  mk_pagetable(__pa(idle_pg_table))               \
 }
 
 #endif /* __ASM_DOMAIN_H__ */

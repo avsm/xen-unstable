@@ -10,6 +10,7 @@
 #include <xen/serial.h>
 #include <xen/sched.h>
 #include <xen/softirq.h>
+#include <asm/debugger.h>
 
 #define KEY_MAX 256
 #define STR_MAX  64
@@ -27,7 +28,7 @@ static struct {
 
 static unsigned char keypress_key;
 
-void keypress_softirq(void)
+static void keypress_softirq(void)
 {
     keyhandler_t *h;
     unsigned char key = keypress_key;
@@ -94,7 +95,7 @@ static void halt_machine(unsigned char key, struct xen_regs *regs)
     machine_restart(NULL); 
 }
 
-void do_task_queues(unsigned char key)
+static void do_task_queues(unsigned char key)
 {
     struct domain *d;
     struct exec_domain *ed;
@@ -146,6 +147,14 @@ extern void perfc_printall(unsigned char key);
 extern void perfc_reset(unsigned char key);
 #endif
 
+void do_debug_key(unsigned char key, struct xen_regs *regs)
+{
+    (void)debugger_trap_fatal(0xf001, regs);
+    nop(); /* Prevent the compiler doing tail call
+                             optimisation, as that confuses xendbg a
+                             bit. */
+}
+
 void initialize_keytable(void)
 {
     open_softirq(KEYPRESS_SOFTIRQ, keypress_softirq);
@@ -176,4 +185,6 @@ void initialize_keytable(void)
     register_keyhandler(
         'P', perfc_reset,    "reset performance counters"); 
 #endif
+
+    register_irq_keyhandler('%', do_debug_key,   "Trap to xendbg");
 }

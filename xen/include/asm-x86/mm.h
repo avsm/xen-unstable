@@ -13,6 +13,7 @@
 #include <asm/desc.h>
 #include <asm/flushtlb.h>
 #include <asm/io.h>
+#include <asm/uaccess.h>
 
 #include <public/xen.h>
 
@@ -99,16 +100,13 @@ struct pfn_info
 #define IS_XEN_HEAP_FRAME(_pfn) (page_to_phys(_pfn) < xenheap_phys_end)
 
 #if defined(__i386__)
-
 #define pickle_domptr(_d)   ((u32)(unsigned long)(_d))
 #define unpickle_domptr(_d) ((struct domain *)(unsigned long)(_d))
-
 #elif defined(__x86_64__)
 static inline struct domain *unpickle_domptr(u32 _domain)
 { return (_domain == 0) ? NULL : __va(_domain); }
 static inline u32 pickle_domptr(struct domain *domain)
 { return (domain == NULL) ? 0 : (u32)__pa(domain); }
-
 #endif
 
 #define page_get_owner(_p)    (unpickle_domptr((_p)->u.inuse._domain))
@@ -129,8 +127,6 @@ static inline u32 pickle_domptr(struct domain *domain)
         list_add_tail(&(_pfn)->list, &(_dom)->xenpage_list);                \
         spin_unlock(&(_dom)->page_alloc_lock);                              \
     } while ( 0 )
-
-#define INVALID_P2M_ENTRY (~0UL)
 
 extern struct pfn_info *frame_table;
 extern unsigned long frame_table_size;
@@ -170,7 +166,7 @@ static inline int get_page(struct pfn_info *page,
              unlikely((nx & PGC_count_mask) == 0) || /* Count overflow? */
              unlikely(d != _domain) )                /* Wrong owner? */
         {
-            DPRINTK("Error pfn %08lx: ed=%p, sd=%p, caf=%08x, taf=%08x\n",
+            DPRINTK("Error pfn %p: ed=%p, sd=%p, caf=%08x, taf=%08x\n",
                     page_to_pfn(page), domain, unpickle_domptr(d),
                     x, page->u.inuse.type_info);
             return 0;
@@ -218,7 +214,7 @@ static inline int get_page_and_type(struct pfn_info *page,
     ASSERT(((_p)->count_info & PGC_count_mask) != 0);          \
     ASSERT(page_get_owner(_p) == (_d))
 
-int check_descriptor(unsigned long *d);
+int check_descriptor(struct desc_struct *d);
 
 /*
  * Use currently-executing domain's pagetables on the specified CPUs.
@@ -233,16 +229,29 @@ void synchronise_pagetables(unsigned long cpu_mask);
  * contiguous (or near contiguous) physical memory.
  */
 #undef  machine_to_phys_mapping
+#define machine_to_phys_mapping ((u32 *)RDWR_MPT_VIRT_START)
+#define INVALID_M2P_ENTRY        (~0U)
+#define IS_INVALID_M2P_ENTRY(_e) (!!((_e) & (1U<<31)))
 
 /*
  * The phys_to_machine_mapping is the reversed mapping of MPT for full
  * virtualization.
  */
-#undef  phys_to_machine_mapping
+#define __phys_to_machine_mapping ((unsigned long *)PERDOMAIN_VIRT_START)
 
-#define machine_to_phys_mapping ((unsigned long *)RDWR_MPT_VIRT_START)
-#define phys_to_machine_mapping ((unsigned long *)PERDOMAIN_VIRT_START)
+/* Returns the machine physical */
+static inline unsigned long phys_to_machine_mapping(unsigned long pfn) 
+{
+    unsigned long mfn;
+    l1_pgentry_t pte;
 
+   if (__get_user(l1_pgentry_val(pte), (__phys_to_machine_mapping + pfn))) {
+       return 0;
+   }
+               
+   mfn = l1_pgentry_to_phys(pte) >> PAGE_SHIFT;
+   return mfn; 
+}
 #define set_machinetophys(_mfn, _pfn) machine_to_phys_mapping[(_mfn)] = (_pfn)
 
 #define DEFAULT_GDT_ENTRIES     (LAST_RESERVED_GDT_ENTRY+1)

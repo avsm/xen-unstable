@@ -20,10 +20,11 @@
 #include <xen/event.h>
 #include <xen/elf.h>
 #include <xen/kernel.h>
+#include <asm/shadow.h>
 
 /* No ring-3 access in initial page tables. */
 #define L1_PROT (_PAGE_PRESENT|_PAGE_RW|_PAGE_ACCESSED)
-#define L2_PROT (_PAGE_PRESENT|_PAGE_RW|_PAGE_ACCESSED|_PAGE_DIRTY|_PAGE_USER)
+#define L2_PROT (_PAGE_PRESENT|_PAGE_RW|_PAGE_ACCESSED|_PAGE_USER)
 
 #define round_pgup(_p)    (((_p)+(PAGE_SIZE-1))&PAGE_MASK)
 #define round_pgdown(_p)  ((_p)&PAGE_MASK)
@@ -115,7 +116,7 @@ int construct_dom0(struct domain *d,
     vinitrd_start    = round_pgup(dsi.v_kernend);
     vinitrd_end      = vinitrd_start + initrd_len;
     vphysmap_start   = round_pgup(vinitrd_end);
-    vphysmap_end     = vphysmap_start + (nr_pages * sizeof(unsigned long));
+    vphysmap_end     = vphysmap_start + (nr_pages * sizeof(u32));
     vpt_start        = round_pgup(vphysmap_end);
     for ( nr_pt_pages = 2; ; nr_pt_pages++ )
     {
@@ -217,11 +218,11 @@ int construct_dom0(struct domain *d,
      * We're basically forcing default RPLs to 1, so that our "what privilege
      * level are we returning to?" logic works.
      */
-    ed->arch.failsafe_selector = FLAT_GUESTOS_CS;
-    ed->arch.event_selector    = FLAT_GUESTOS_CS;
-    ed->arch.guestos_ss = FLAT_GUESTOS_SS;
+    ed->arch.failsafe_selector = FLAT_KERNEL_CS;
+    ed->arch.event_selector    = FLAT_KERNEL_CS;
+    ed->arch.kernel_ss = FLAT_KERNEL_SS;
     for ( i = 0; i < 256; i++ ) 
-        ed->arch.traps[i].cs = FLAT_GUESTOS_CS;
+        ed->arch.traps[i].cs = FLAT_KERNEL_CS;
 
     /* WARNING: The new domain must have its 'processor' field filled in! */
     l2start = l2tab = (l2_pgentry_t *)mpt_alloc; mpt_alloc += PAGE_SIZE;
@@ -230,7 +231,7 @@ int construct_dom0(struct domain *d,
         mk_l2_pgentry((unsigned long)l2start | __PAGE_HYPERVISOR);
     l2tab[PERDOMAIN_VIRT_START >> L2_PAGETABLE_SHIFT] =
         mk_l2_pgentry(__pa(d->arch.mm_perdomain_pt) | __PAGE_HYPERVISOR);
-    ed->arch.pagetable = mk_pagetable((unsigned long)l2start);
+    ed->arch.guest_table = mk_pagetable((unsigned long)l2start);
 
     l2tab += l2_table_offset(dsi.v_start);
     mfn = alloc_start >> PAGE_SHIFT;
@@ -261,7 +262,7 @@ int construct_dom0(struct domain *d,
     for ( count = 0; count < nr_pt_pages; count++ ) 
     {
         *l1tab = mk_l1_pgentry(l1_pgentry_val(*l1tab) & ~_PAGE_RW);
-        page = &frame_table[l1_pgentry_to_pagenr(*l1tab)];
+        page = &frame_table[l1_pgentry_to_pfn(*l1tab)];
         if ( count == 0 )
         {
             page->u.inuse.type_info &= ~PGT_type_mask;
@@ -306,6 +307,9 @@ int construct_dom0(struct domain *d,
         d->shared_info->vcpu_data[i].evtchn_upcall_mask = 1;
     d->shared_info->n_vcpu = smp_num_cpus;
 
+    /* setup shadow and monitor tables */
+    update_pagetables(ed);
+
     /* Install the new page tables. */
     __cli();
     write_ptbase(ed);
@@ -336,7 +340,7 @@ int construct_dom0(struct domain *d,
         if ( pfn > REVERSE_START )
             mfn = (alloc_end>>PAGE_SHIFT) - (pfn - REVERSE_START);
 #endif
-        ((unsigned long *)vphysmap_start)[pfn] = mfn;
+        ((u32 *)vphysmap_start)[pfn] = mfn;
         machine_to_phys_mapping[mfn] = pfn;
     }
 
@@ -377,10 +381,12 @@ int construct_dom0(struct domain *d,
 
     new_thread(ed, dsi.v_kernentry, vstack_end, vstartinfo_start);
 
-#if 0 /* XXXXX DO NOT CHECK IN ENABLED !!! (but useful for testing so leave) */
-    shadow_lock(&d->mm);
-    shadow_mode_enable(d, SHM_test); 
-    shadow_unlock(&d->mm);
+#ifndef NDEBUG
+    if (0) /* XXXXX DO NOT CHECK IN ENABLED !!! (but useful for testing so leave) */
+    {
+        shadow_mode_enable(d, SHM_enable); 
+        update_pagetables(ed); /* XXX SMP */
+    }
 #endif
 
     return 0;

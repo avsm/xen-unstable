@@ -67,12 +67,8 @@ char opt_nmi[10] = "fatal";
 #endif
 string_param("nmi", opt_nmi);
 
-asmlinkage int hypercall(void);
-
-/* Master table, and the one used by CPU0. */
+/* Master table, used by all CPUs on x86/64, and by CPU0 on x86/32.*/
 idt_entry_t idt_table[IDT_ENTRIES] = { {0, 0}, };
-/* All other CPUs have their own copy. */
-idt_entry_t *idt_tables[NR_CPUS] = { 0 };
 
 asmlinkage void divide_error(void);
 asmlinkage void debug(void);
@@ -127,6 +123,8 @@ asmlinkage void fatal_trap(int trapnr, struct xen_regs *regs)
     printk("System shutting down -- need manual reset.\n");
     printk("************************************\n");
 
+    (void)debugger_trap_fatal(trapnr, regs);
+
     /* Lock up the console to prevent spurious output from other CPUs. */
     console_force_lock();
 
@@ -146,8 +144,13 @@ static inline int do_trap(int trapnr, char *str,
 
     DEBUGGER_trap_entry(trapnr, regs);
 
-    if ( !GUEST_FAULT(regs) )
+    if ( !GUEST_MODE(regs) )
         goto xen_fault;
+
+#ifndef NDEBUG
+    if ( (ed->arch.traps[trapnr].address == 0) && (ed->domain->id == 0) )
+        goto xen_fault;
+#endif
 
     ti = current->arch.traps + trapnr;
     tb->flags = TBF_EXCEPTION;
@@ -212,7 +215,7 @@ asmlinkage int do_int3(struct xen_regs *regs)
 
     DEBUGGER_trap_entry(TRAP_int3, regs);
 
-    if ( !GUEST_FAULT(regs) )
+    if ( !GUEST_MODE(regs) )
     {
         DEBUGGER_trap_fatal(TRAP_int3, regs);
         show_registers(regs);
@@ -311,8 +314,13 @@ asmlinkage int do_page_fault(struct xen_regs *regs)
             return EXCRET_fault_fixed; /* successfully copied the mapping */
     }
 
-    if ( !GUEST_FAULT(regs) )
+    if ( !GUEST_MODE(regs) )
         goto xen_fault;
+
+#ifndef NDEBUG
+    if ( (ed->arch.traps[TRAP_page_fault].address == 0) && (d->id == 0) )
+        goto xen_fault;
+#endif
 
     propagate_page_fault(addr, regs->error_code);
     return 0; 
@@ -393,7 +401,7 @@ static int emulate_privileged_op(struct xen_regs *regs)
             break;
             
         case 3: /* Read CR3 */
-            *reg = pagetable_val(ed->arch.pagetable);
+            *reg = pagetable_val(ed->arch.guest_table);
             break;
 
         default:
@@ -475,7 +483,7 @@ asmlinkage int do_general_protection(struct xen_regs *regs)
     if ( regs->error_code & 1 )
         goto hardware_gp;
 
-    if ( !GUEST_FAULT(regs) )
+    if ( !GUEST_MODE(regs) )
         goto gp_in_kernel;
 
     /*
@@ -502,7 +510,7 @@ asmlinkage int do_general_protection(struct xen_regs *regs)
     {
         /* This fault must be due to <INT n> instruction. */
         ti = current->arch.traps + (regs->error_code>>3);
-        if ( TI_GET_DPL(ti) >= (VM86_MODE(regs) ? 3 : (regs->cs & 3)) )
+        if ( PERMIT_SOFTINT(TI_GET_DPL(ti), ed, regs) )
         {
             tb->flags = TBF_EXCEPTION;
             regs->eip += 2;
@@ -512,7 +520,7 @@ asmlinkage int do_general_protection(struct xen_regs *regs)
 
     /* Emulate some simple privileged instructions when exec'ed in ring 1. */
     if ( (regs->error_code == 0) &&
-         RING_1(regs) &&
+         KERNEL_MODE(ed, regs) &&
          emulate_privileged_op(regs) )
         return 0;
 
@@ -521,6 +529,12 @@ asmlinkage int do_general_protection(struct xen_regs *regs)
          (regs->error_code == 0) && 
          gpf_emulate_4gb(regs) )
         return 0;
+#endif
+
+#ifndef NDEBUG
+    if ( (ed->arch.traps[TRAP_gp_fault].address == 0) &&
+         (ed->domain->id == 0) )
+        goto gp_in_kernel;
 #endif
 
     /* Pass on GPF as is. */
@@ -553,19 +567,55 @@ asmlinkage int do_general_protection(struct xen_regs *regs)
     return 0;
 }
 
+unsigned long nmi_softirq_reason;
+static void nmi_softirq(void)
+{
+    if ( dom0 == NULL )
+        return;
+
+    if ( test_and_clear_bit(0, &nmi_softirq_reason) )
+        send_guest_virq(dom0->exec_domain[0], VIRQ_PARITY_ERR);
+
+    if ( test_and_clear_bit(1, &nmi_softirq_reason) )
+        send_guest_virq(dom0->exec_domain[0], VIRQ_IO_ERR);
+}
+
 asmlinkage void mem_parity_error(struct xen_regs *regs)
 {
-    console_force_unlock();
-    printk("\n\nNMI - MEMORY ERROR\n");
-    fatal_trap(TRAP_nmi, regs);
+    /* Clear and disable the parity-error line. */
+    outb((inb(0x61)&15)|4,0x61);
+
+    switch ( opt_nmi[0] )
+    {
+    case 'd': /* 'dom0' */
+        set_bit(0, &nmi_softirq_reason);
+        raise_softirq(NMI_SOFTIRQ);
+    case 'i': /* 'ignore' */
+        break;
+    default:  /* 'fatal' */
+        console_force_unlock();
+        printk("\n\nNMI - MEMORY ERROR\n");
+        fatal_trap(TRAP_nmi, regs);
+    }
 }
 
 asmlinkage void io_check_error(struct xen_regs *regs)
 {
-    console_force_unlock();
+    /* Clear and disable the I/O-error line. */
+    outb((inb(0x61)&15)|8,0x61);
 
-    printk("\n\nNMI - I/O ERROR\n");
-    fatal_trap(TRAP_nmi, regs);
+    switch ( opt_nmi[0] )
+    {
+    case 'd': /* 'dom0' */
+        set_bit(0, &nmi_softirq_reason);
+        raise_softirq(NMI_SOFTIRQ);
+    case 'i': /* 'ignore' */
+        break;
+    default:  /* 'fatal' */
+        console_force_unlock();
+        printk("\n\nNMI - I/O ERROR\n");
+        fatal_trap(TRAP_nmi, regs);
+    }
 }
 
 static void unknown_nmi_error(unsigned char reason)
@@ -579,25 +629,15 @@ asmlinkage void do_nmi(struct xen_regs *regs, unsigned long reason)
 {
     ++nmi_count(smp_processor_id());
 
-#if CONFIG_X86_LOCAL_APIC
     if ( nmi_watchdog )
         nmi_watchdog_tick(regs);
-    else
-#endif
+
+    if ( reason & 0x80 )
+        mem_parity_error(regs);
+    else if ( reason & 0x40 )
+        io_check_error(regs);
+    else if ( !nmi_watchdog )
         unknown_nmi_error((unsigned char)(reason&0xff));
-}
-
-unsigned long nmi_softirq_reason;
-static void nmi_softirq(void)
-{
-    if ( dom0 == NULL )
-        return;
-
-    if ( test_and_clear_bit(0, &nmi_softirq_reason) )
-        send_guest_virq(dom0->exec_domain[0], VIRQ_PARITY_ERR);
-
-    if ( test_and_clear_bit(1, &nmi_softirq_reason) )
-        send_guest_virq(dom0->exec_domain[0], VIRQ_IO_ERR);
 }
 
 asmlinkage int math_state_restore(struct xen_regs *regs)
@@ -643,7 +683,7 @@ asmlinkage int do_debug(struct xen_regs *regs)
         goto out;
     }
 
-    if ( !GUEST_FAULT(regs) )
+    if ( !GUEST_MODE(regs) )
     {
         /* Clear TF just for absolute sanity. */
         regs->eflags &= ~EF_TF;
@@ -670,13 +710,6 @@ asmlinkage int do_debug(struct xen_regs *regs)
 asmlinkage int do_spurious_interrupt_bug(struct xen_regs *regs)
 {
     return EXCRET_not_a_fault;
-}
-
-BUILD_SMP_INTERRUPT(deferred_nmi, TRAP_deferred_nmi)
-asmlinkage void smp_deferred_nmi(struct xen_regs regs)
-{
-    ack_APIC_irq();
-    do_nmi(&regs, 0);
 }
 
 void set_intr_gate(unsigned int n, void *addr)
@@ -706,8 +739,8 @@ void set_tss_desc(unsigned int n, void *addr)
 
 void __init trap_init(void)
 {
-    extern void doublefault_init(void);
-    doublefault_init();
+    extern void percpu_traps_init(void);
+    extern void cpu_init(void);
 
     /*
      * Note that interrupt gates are always used, rather than trap gates. We 
@@ -736,22 +769,10 @@ void __init trap_init(void)
     set_intr_gate(TRAP_alignment_check,&alignment_check);
     set_intr_gate(TRAP_machine_check,&machine_check);
     set_intr_gate(TRAP_simd_error,&simd_coprocessor_error);
-    set_intr_gate(TRAP_deferred_nmi,&deferred_nmi);
 
-#if defined(__i386__)
-    _set_gate(idt_table+HYPERCALL_VECTOR, 14, 1, &hypercall);
-#endif
+    percpu_traps_init();
 
-    /* CPU0 uses the master IDT. */
-    idt_tables[0] = idt_table;
-
-    /*
-     * Should be a barrier for any external CPU state.
-     */
-    {
-        extern void cpu_init(void);
-        cpu_init();
-    }
+    cpu_init();
 
     open_softirq(NMI_SOFTIRQ, nmi_softirq);
 }
@@ -769,8 +790,8 @@ long do_set_trap_table(trap_info_t *traps)
         if ( hypercall_preempt_check() )
         {
             UNLOCK_BIGLOCK(current->domain);
-            return hypercall_create_continuation(
-                __HYPERVISOR_set_trap_table, 1, traps);
+            return hypercall1_create_continuation(
+                __HYPERVISOR_set_trap_table, traps);
         }
 
         if ( copy_from_user(&cur, traps, sizeof(cur)) ) return -EFAULT;
@@ -789,25 +810,6 @@ long do_set_trap_table(trap_info_t *traps)
 }
 
 
-long do_set_callbacks(unsigned long event_selector,
-                      unsigned long event_address,
-                      unsigned long failsafe_selector,
-                      unsigned long failsafe_address)
-{
-    struct exec_domain *d = current;
-
-    if ( !VALID_CODESEL(event_selector) || !VALID_CODESEL(failsafe_selector) )
-        return -EPERM;
-
-    d->arch.event_selector    = event_selector;
-    d->arch.event_address     = event_address;
-    d->arch.failsafe_selector = failsafe_selector;
-    d->arch.failsafe_address  = failsafe_address;
-
-    return 0;
-}
-
-
 long do_fpu_taskswitch(void)
 {
     set_bit(EDF_GUEST_STTS, &current->ed_flags);
@@ -816,6 +818,13 @@ long do_fpu_taskswitch(void)
 }
 
 
+#if defined(__i386__)
+#define DB_VALID_ADDR(_a) \
+    ((_a) <= (PAGE_OFFSET - 4))
+#elif defined(__x86_64__)
+#define DB_VALID_ADDR(_a) \
+    ((_a) >= HYPERVISOR_VIRT_END) || ((_a) <= (HYPERVISOR_VIRT_START-8))
+#endif
 long set_debugreg(struct exec_domain *p, int reg, unsigned long value)
 {
     int i;
@@ -823,22 +832,22 @@ long set_debugreg(struct exec_domain *p, int reg, unsigned long value)
     switch ( reg )
     {
     case 0: 
-        if ( value > (PAGE_OFFSET-4) ) return -EPERM;
+        if ( !DB_VALID_ADDR(value) ) return -EPERM;
         if ( p == current ) 
             __asm__ ( "mov %0, %%db0" : : "r" (value) );
         break;
     case 1: 
-        if ( value > (PAGE_OFFSET-4) ) return -EPERM;
+        if ( !DB_VALID_ADDR(value) ) return -EPERM;
         if ( p == current ) 
             __asm__ ( "mov %0, %%db1" : : "r" (value) );
         break;
     case 2: 
-        if ( value > (PAGE_OFFSET-4) ) return -EPERM;
+        if ( !DB_VALID_ADDR(value) ) return -EPERM;
         if ( p == current ) 
             __asm__ ( "mov %0, %%db2" : : "r" (value) );
         break;
     case 3:
-        if ( value > (PAGE_OFFSET-4) ) return -EPERM;
+        if ( !DB_VALID_ADDR(value) ) return -EPERM;
         if ( p == current ) 
             __asm__ ( "mov %0, %%db3" : : "r" (value) );
         break;

@@ -382,44 +382,49 @@ void __init smp_callin(void)
 
 static int cpucount;
 
+#ifdef __i386__
+static void construct_percpu_idt(unsigned int cpu)
+{
+    unsigned char idt_load[10];
+
+    idt_tables[cpu] = xmalloc_array(idt_entry_t, IDT_ENTRIES);
+    memcpy(idt_tables[cpu], idt_table, IDT_ENTRIES*sizeof(idt_entry_t));
+
+    *(unsigned short *)(&idt_load[0]) = (IDT_ENTRIES*sizeof(idt_entry_t))-1;
+    *(unsigned long  *)(&idt_load[2]) = (unsigned long)idt_tables[cpu];
+    __asm__ __volatile__ ( "lidt %0" : "=m" (idt_load) );
+}
+#endif
+
 /*
  * Activate a secondary processor.
  */
 void __init start_secondary(void)
 {
     unsigned int cpu = cpucount;
-    /* 6 bytes suitable for passing to LIDT instruction. */
-    unsigned char idt_load[6];
 
+    extern void percpu_traps_init(void);
     extern void cpu_init(void);
 
     set_current(idle_task[cpu]);
 
-    /*
-     * Dont put anything before smp_callin(), SMP
-     * booting is too fragile that we want to limit the
-     * things done here to the most necessary things.
-     */
+    percpu_traps_init();
+
     cpu_init();
+
     smp_callin();
 
     while (!atomic_read(&smp_commenced))
         rep_nop();
 
+#ifdef __i386__
     /*
      * At this point, boot CPU has fully initialised the IDT. It is
      * now safe to make ourselves a private copy.
      */
-    idt_tables[cpu] = xmalloc_array(idt_entry_t, IDT_ENTRIES);
-    memcpy(idt_tables[cpu], idt_table, IDT_ENTRIES*sizeof(idt_entry_t));
-    *(unsigned short *)(&idt_load[0]) = (IDT_ENTRIES*sizeof(idt_entry_t))-1;
-    *(unsigned long  *)(&idt_load[2]) = (unsigned long)idt_tables[cpu];
-    __asm__ __volatile__ ( "lidt %0" : "=m" (idt_load) );
+    construct_percpu_idt(cpu);
+#endif
 
-    /*
-     * low-memory mappings have been cleared, flush them from the local TLBs 
-     * too.
-     */
     local_flush_tlb();
 
     startup_cpu_idle_loop();
@@ -663,7 +668,7 @@ static void __init do_boot_cpu (int apicid)
 
     set_bit(DF_IDLETASK, &idle->d_flags);
 
-    ed->arch.pagetable = mk_pagetable(__pa(idle_pg_table));
+    ed->arch.monitor_table = mk_pagetable(__pa(idle_pg_table));
 
     map_cpu_to_boot_apicid(cpu, apicid);
 

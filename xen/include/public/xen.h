@@ -23,7 +23,14 @@
  * XEN "SYSTEM CALLS" (a.k.a. HYPERCALLS).
  */
 
-/* EAX = vector; EBX, ECX, EDX, ESI, EDI = args 1, 2, 3, 4, 5. */
+/*
+ * x86_32: EAX = vector; EBX, ECX, EDX, ESI, EDI = args 1, 2, 3, 4, 5.
+ *         EAX = return value
+ *         (argument registers may be clobbered on return)
+ * x86_64: RAX = vector; RDI, RSI, RDX, R10, R8, R9 = args 1, 2, 3, 4, 5, 6. 
+ *         RAX = return value
+ *         (argument registers not clobbered on return; RCX, R11 are)
+ */
 #define __HYPERVISOR_set_trap_table        0
 #define __HYPERVISOR_mmu_update            1
 #define __HYPERVISOR_set_gdt               2
@@ -35,7 +42,7 @@
 #define __HYPERVISOR_set_debugreg          8
 #define __HYPERVISOR_get_debugreg          9
 #define __HYPERVISOR_update_descriptor    10
-#define __HYPERVISOR_set_fast_trap        11
+#define __HYPERVISOR_set_fast_trap        11 /* x86/32 only */
 #define __HYPERVISOR_dom_mem_op           12
 #define __HYPERVISOR_multicall            13
 #define __HYPERVISOR_update_va_mapping    14
@@ -47,8 +54,10 @@
 #define __HYPERVISOR_grant_table_op       20
 #define __HYPERVISOR_vm_assist            21
 #define __HYPERVISOR_update_va_mapping_otherdomain 22
-#define __HYPERVISOR_switch_vm86          23
+#define __HYPERVISOR_switch_vm86          23 /* x86/32 only */
+#define __HYPERVISOR_switch_to_user       23 /* x86/64 only */
 #define __HYPERVISOR_boot_vcpu            24
+#define __HYPERVISOR_set_segment_base     25 /* x86/64 only */
 
 /*
  * MULTICALLS
@@ -111,6 +120,10 @@
  *   val[7:0] == MMUEXT_NEW_BASEPTR:
  *   ptr[:2]  -- Machine address of new page-table base to install in MMU.
  * 
+ *   val[7:0] == MMUEXT_NEW_USER_BASEPTR: [x86/64 only]
+ *   ptr[:2]  -- Machine address of new page-table base to install in MMU
+ *               when in user space.
+ * 
  *   val[7:0] == MMUEXT_TLB_FLUSH:
  *   No additional arguments.
  * 
@@ -159,6 +172,7 @@
 #define MMUEXT_CLEAR_FOREIGNDOM 11
 #define MMUEXT_TRANSFER_PAGE    12 /* ptr = MA of frame; val[31:16] = dom    */
 #define MMUEXT_REASSIGN_PAGE    13
+#define MMUEXT_NEW_USER_BASEPTR 14
 #define MMUEXT_CMD_MASK        255
 #define MMUEXT_CMD_SHIFT         8
 
@@ -292,7 +306,7 @@ typedef struct
 } PACKED vcpu_info_t;                   /* 8 + arch */
 
 /*
- * Xen/guestos shared data -- pointer provided in start_info.
+ * Xen/kernel shared data -- pointer provided in start_info.
  * NB. We expect that this struct is smaller than a page.
  */
 typedef struct shared_info_st

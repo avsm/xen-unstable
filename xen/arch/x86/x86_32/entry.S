@@ -58,12 +58,13 @@
 #include <xen/softirq.h>
 #include <asm/asm_defns.h>
 #include <asm/apicdef.h>
+#include <asm/page.h>
 #include <public/xen.h>
 
-#define GET_CURRENT(reg)   \
-        movl $8192-4, reg; \
-        orl  %esp, reg;    \
-        andl $~3,reg;      \
+#define GET_CURRENT(reg)         \
+        movl $STACK_SIZE-4, reg; \
+        orl  %esp, reg;          \
+        andl $~3,reg;            \
         movl (reg),reg;
 
 #ifdef CONFIG_VMX
@@ -80,7 +81,7 @@
  *   (9)  u32 fs;
  *   (8)  u32 ds;
  *   (7)  u32 es;
- *               <- get_stack_top() (= HOST_ESP)
+ *               <- get_stack_bottom() (= HOST_ESP)
  *   (6)  u32 ss;
  *   (5)  u32 esp;
  *   (4)  u32 eflags;
@@ -88,8 +89,8 @@
  *   (2)  u32 eip;
  * (2/1)  u16 entry_vector;
  * (1/1)  u16 error_code;
- * However, get_stack_top() acturally returns 20 bytes below the real
- * top of the stack to allow space for:
+ * However, get_stack_bottom() actually returns 20 bytes before the real
+ * bottom of the stack to allow space for:
  * domain pointer, DS, ES, FS, GS. Therefore, we effectively skip 6 registers.
  */
 #define VMX_MONITOR_EFLAGS	0x202 /* IF on */
@@ -169,15 +170,11 @@ vmx_process_softirqs:
         call SYMBOL_NAME(do_softirq)
         jmp  vmx_test_all_events
 #endif
-        
-ENTRY(continue_nonidle_task)
-        GET_CURRENT(%ebx)
-        jmp test_all_events
 
         ALIGN
 restore_all_guest:
-        testb $TF_failsafe_return,EDOMAIN_thread_flags(%ebx)
-        jnz  failsafe_callback
+        btr  $_TF_failsafe_return,EDOMAIN_thread_flags(%ebx)
+        jc   failsafe_callback
         testl $X86_EFLAGS_VM,XREGS_eflags(%esp)
         jnz  restore_all_vm86
 FLT1:   movl XREGS_ds(%esp),%ds
@@ -219,9 +216,8 @@ FIX1:   SET_XEN_SEGMENTS(a)
 DBLFLT1:GET_CURRENT(%ebx)
         jmp   test_all_events
 DBLFIX1:GET_CURRENT(%ebx)
-        testb $TF_failsafe_return,EDOMAIN_thread_flags(%ebx)
-        jnz   domain_crash             # cannot reenter failsafe code
-        orb   $TF_failsafe_return,EDOMAIN_thread_flags(%ebx)
+        bts   $_TF_failsafe_return,EDOMAIN_thread_flags(%ebx)
+        jc    domain_crash             # cannot reenter failsafe code
         jmp   test_all_events          # will return via failsafe code
 .previous
 .section __pre_ex_table,"a"
@@ -238,7 +234,6 @@ DBLFIX1:GET_CURRENT(%ebx)
 /* No special register assumptions */
 failsafe_callback:
         GET_CURRENT(%ebx)
-        andb $~TF_failsafe_return,EDOMAIN_thread_flags(%ebx)
         leal EDOMAIN_trap_bounce(%ebx),%edx
         movl EDOMAIN_failsafe_addr(%ebx),%eax
         movl %eax,TRAPBOUNCE_eip(%edx)
@@ -261,6 +256,7 @@ FIX6:   pushl %ebx
         orb   $TF_failsafe_return,EDOMAIN_thread_flags(%ebx)
         pop   %ebx
         jmp   FIX5
+.previous
 .section __pre_ex_table,"a"
 	.long FLT6,FIX6
 .previous
@@ -285,8 +281,6 @@ ENTRY(hypercall)
         GET_CURRENT(%ebx)
 	andl $(NR_hypercalls-1),%eax
 	call *SYMBOL_NAME(hypercall_table)(,%eax,4)
-
-ret_from_hypercall:
         movl %eax,XREGS_eax(%esp)       # save the return value
 
 test_all_events:
@@ -487,7 +481,7 @@ exception_with_ints_disabled:
         testl $(3|X86_EFLAGS_VM),%eax   # interrupts disabled outside Xen?
         jnz   1b                        # it really does happen!
                                         #  (e.g., DOM0 X server)
-        pushl XREGS_eip(%esp)
+        pushl %esp
         call  search_pre_exception_table
         addl  $4,%esp
         testl %eax,%eax                 # no fixup code for faulting EIP?
@@ -596,7 +590,7 @@ ENTRY(nmi)
         # Okay, its almost a normal NMI tick. We can only process it if:
         #  A. We are the outermost Xen activation (in which case we have
         #     the selectors safely saved on our stack)
-        #  B. DS-GS all contain sane Xen values.
+        #  B. DS and ES contain sane Xen values.
         # In all other cases we bail without touching DS-GS, as we have
         # interrupted an enclosing Xen activation in tricky prologue or
         # epilogue code.
@@ -644,11 +638,11 @@ nmi_parity_err:
         orb  $0x4,%al
         outb %al,$0x61
         cmpb $'i',%ss:SYMBOL_NAME(opt_nmi) # nmi=ignore
-        je   restore_all_xen
+        je   nmi_out
         bts  $0,%ss:SYMBOL_NAME(nmi_softirq_reason)
         bts  $NMI_SOFTIRQ,%ss:SYMBOL_NAME(irq_stat)
         cmpb $'d',%ss:SYMBOL_NAME(opt_nmi) # nmi=dom0
-        je   restore_all_xen
+        je   nmi_out
         movl $(__HYPERVISOR_DS),%edx       # nmi=fatal
         movl %edx,%ds
         movl %edx,%es
@@ -656,7 +650,15 @@ nmi_parity_err:
         push %edx
         call SYMBOL_NAME(mem_parity_error)
         addl $4,%esp
-        jmp  ret_from_intr
+nmi_out:movl  %ss:XREGS_eflags(%esp),%eax
+        movb  %ss:XREGS_cs(%esp),%al
+        testl $(3|X86_EFLAGS_VM),%eax
+	jz    restore_all_xen
+        movl  $(__HYPERVISOR_DS),%edx
+        movl  %edx,%ds
+        movl  %edx,%es
+        GET_CURRENT(%ebx)
+        jmp   test_all_events
                 
 nmi_io_err: 
         # Clear and disable the I/O-error line
@@ -664,11 +666,11 @@ nmi_io_err:
         orb  $0x8,%al
         outb %al,$0x61
         cmpb $'i',%ss:SYMBOL_NAME(opt_nmi) # nmi=ignore
-        je   restore_all_xen
+        je   nmi_out
         bts  $1,%ss:SYMBOL_NAME(nmi_softirq_reason)
         bts  $NMI_SOFTIRQ,%ss:SYMBOL_NAME(irq_stat)
         cmpb $'d',%ss:SYMBOL_NAME(opt_nmi) # nmi=dom0
-        je   restore_all_xen
+        je   nmi_out
         movl $(__HYPERVISOR_DS),%edx       # nmi=fatal
         movl %edx,%ds
         movl %edx,%es
@@ -676,7 +678,7 @@ nmi_io_err:
         push %edx
         call SYMBOL_NAME(io_check_error)                        
         addl $4,%esp
-        jmp  ret_from_intr
+        jmp  nmi_out
 
 
 ENTRY(setup_vm86_frame)

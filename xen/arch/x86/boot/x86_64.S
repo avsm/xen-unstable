@@ -75,6 +75,7 @@ __start:
         cpuid
         bt      $29,%edx            # Long mode feature?
         jnc     bad_cpu
+        mov     %edx,%edi
 skip_boot_checks:
 
         /* Set up FPU. */
@@ -91,9 +92,12 @@ skip_boot_checks:
         /* Set up EFER (Extended Feature Enable Register). */
         movl    $MSR_EFER, %ecx
         rdmsr
-        /* Long Mode, SYSCALL/SYSRET, No-Execute */
-        movl    $(EFER_LME|EFER_SCE|EFER_NX),%eax
-        wrmsr
+        btsl    $_EFER_LME,%eax /* Long Mode      */
+        btsl    $_EFER_SCE,%eax /* SYSCALL/SYSRET */
+        btl     $20,%edi        /* CPUID 0x80000001, EDX[20] */
+        jnc     1f
+        btsl    $_EFER_NX,%eax  /* No-Execute     */
+1:      wrmsr
 
         mov     $0x80050033,%eax /* hi-to-lo: PG,AM,WP,NE,ET,MP,PE */
         mov     %eax,%cr0
@@ -193,8 +197,8 @@ ENTRY(gdt_table)
         .quad 0x00af9a000000ffff     /* 0x0810 ring 0 code, 64-bit mode   */
         .quad 0x00cf92000000ffff     /* 0x0818 ring 0 data                */
         .quad 0x00cffa000000ffff     /* 0x0823 ring 3 code, compatibility */
-        .quad 0x00affa000000ffff     /* 0x082b ring 3 code, 64-bit mode   */
-        .quad 0x00cff2000000ffff     /* 0x0833 ring 3 data                */
+        .quad 0x00cff2000000ffff     /* 0x082b ring 3 data                */
+        .quad 0x00affa000000ffff     /* 0x0833 ring 3 code, 64-bit mode   */
         .quad 0x0000000000000000     /* unused                            */
         .fill 4*NR_CPUS,8,0          /* space for TSS and LDT per CPU     */
 
@@ -243,8 +247,8 @@ ENTRY(idle_pg_table_l2)
         identmap /* Too orangey for crows :-) */
 
         .org 0x4000
-ENTRY(cpu0_stack)    # Initial stack is 8kB
+ENTRY(cpu0_stack)
 
-        .org 0x6000
+        .org 0x4000 + STACK_SIZE
 ENTRY(stext)
 ENTRY(_stext)

@@ -855,7 +855,7 @@ class XendDomainInfo:
                       + " -f %s" % device_config
                       + " -d %d" % self.dom
                       + " -p %d" % device_channel['port1']
-                      + " -m %s &" % memory)
+                      + " -m %s" % memory)
         return deferred
 
     def device_create(self, dev_config):
@@ -1337,6 +1337,7 @@ add_config_handler('memory',     vm_field_ignore)
 add_config_handler('cpu',        vm_field_ignore)
 add_config_handler('cpu_weight', vm_field_ignore)
 add_config_handler('console',    vm_field_ignore)
+add_config_handler('restart',    vm_field_ignore)
 add_config_handler('image',      vm_field_ignore)
 add_config_handler('device',     vm_field_ignore)
 add_config_handler('backend',    vm_field_ignore)

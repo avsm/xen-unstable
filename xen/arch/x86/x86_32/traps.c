@@ -7,6 +7,10 @@
 #include <xen/console.h>
 #include <xen/mm.h>
 #include <xen/irq.h>
+#include <asm/flushtlb.h>
+
+/* All CPUs have their own IDT to allow set_fast_trap(). */
+idt_entry_t *idt_tables[NR_CPUS] = { 0 };
 
 static int kstack_depth_to_print = 8*20;
 
@@ -87,7 +91,7 @@ void show_registers(struct xen_regs *regs)
     unsigned long esp;
     unsigned short ss, ds, es, fs, gs;
 
-    if ( GUEST_FAULT(regs) )
+    if ( GUEST_MODE(regs) )
     {
         esp = regs->esp;
         ss  = regs->ss & 0xffff;
@@ -114,6 +118,7 @@ void show_registers(struct xen_regs *regs)
            regs->esi, regs->edi, regs->ebp, esp);
     printk("ds: %04x   es: %04x   fs: %04x   gs: %04x   ss: %04x\n",
            ds, es, fs, gs, ss);
+    printk("cr3: %08lx\n", read_cr3());
 
     show_stack((unsigned long *)&regs->esp);
 } 
@@ -175,8 +180,29 @@ asmlinkage void do_double_fault(void)
         __asm__ __volatile__ ( "hlt" );
 }
 
-void __init doublefault_init(void)
+BUILD_SMP_INTERRUPT(deferred_nmi, TRAP_deferred_nmi)
+asmlinkage void smp_deferred_nmi(struct xen_regs regs)
 {
+    asmlinkage void do_nmi(struct xen_regs *, unsigned long);
+    ack_APIC_irq();
+    do_nmi(&regs, 0);
+}
+
+void __init percpu_traps_init(void)
+{
+    asmlinkage int hypercall(void);
+
+    if ( smp_processor_id() != 0 )
+        return;
+
+    /* CPU0 uses the master IDT. */
+    idt_tables[0] = idt_table;
+
+    /* The hypercall entry vector is only accessible from ring 1. */
+    _set_gate(idt_table+HYPERCALL_VECTOR, 14, 1, &hypercall);
+
+    set_intr_gate(TRAP_deferred_nmi, &deferred_nmi);
+
     /*
      * Make a separate task for double faults. This will get us debug output if
      * we blow the kernel stack.
@@ -197,10 +223,6 @@ void __init doublefault_init(void)
                      (unsigned long)tss, 235, 9);
 
     set_task_gate(TRAP_double_fault, __DOUBLEFAULT_TSS_ENTRY<<3);
-}
-
-void __init percpu_traps_init(void)
-{
 }
 
 long set_fast_trap(struct exec_domain *p, int idx)
@@ -251,4 +273,22 @@ long set_fast_trap(struct exec_domain *p, int idx)
 long do_set_fast_trap(int idx)
 {
     return set_fast_trap(current, idx);
+}
+
+long do_set_callbacks(unsigned long event_selector,
+                      unsigned long event_address,
+                      unsigned long failsafe_selector,
+                      unsigned long failsafe_address)
+{
+    struct exec_domain *d = current;
+
+    if ( !VALID_CODESEL(event_selector) || !VALID_CODESEL(failsafe_selector) )
+        return -EPERM;
+
+    d->arch.event_selector    = event_selector;
+    d->arch.event_address     = event_address;
+    d->arch.failsafe_selector = failsafe_selector;
+    d->arch.failsafe_address  = failsafe_address;
+
+    return 0;
 }

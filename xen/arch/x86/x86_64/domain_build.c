@@ -1,4 +1,4 @@
-/* -*-  Mode:C; c-basic-offset:4; tab-width:4; indent-tabs-mode:nil -*- */
+/* -*-  Modes:C; c-basic-offset:4; tab-width:4; indent-tabs-mode:nil -*- */
 /******************************************************************************
  * domain_build.c
  * 
@@ -15,6 +15,7 @@
 #include <asm/system.h>
 #include <asm/io.h>
 #include <asm/processor.h>
+#include <asm/shadow.h>
 #include <asm/desc.h>
 #include <asm/i387.h>
 #include <xen/event.h>
@@ -23,9 +24,9 @@
 
 /* Allow ring-3 access in long mode as guest cannot use ring 1. */
 #define L1_PROT (_PAGE_PRESENT|_PAGE_RW|_PAGE_ACCESSED|_PAGE_USER)
-#define L2_PROT (_PAGE_PRESENT|_PAGE_RW|_PAGE_ACCESSED|_PAGE_DIRTY|_PAGE_USER)
-#define L3_PROT (_PAGE_PRESENT|_PAGE_RW|_PAGE_ACCESSED|_PAGE_DIRTY|_PAGE_USER)
-#define L4_PROT (_PAGE_PRESENT|_PAGE_RW|_PAGE_ACCESSED|_PAGE_DIRTY|_PAGE_USER)
+#define L2_PROT (_PAGE_PRESENT|_PAGE_RW|_PAGE_ACCESSED|_PAGE_USER)
+#define L3_PROT (_PAGE_PRESENT|_PAGE_RW|_PAGE_ACCESSED|_PAGE_USER)
+#define L4_PROT (_PAGE_PRESENT|_PAGE_RW|_PAGE_ACCESSED|_PAGE_USER)
 
 #define round_pgup(_p)    (((_p)+(PAGE_SIZE-1))&PAGE_MASK)
 #define round_pgdown(_p)  ((_p)&PAGE_MASK)
@@ -119,7 +120,7 @@ int construct_dom0(struct domain *d,
     vinitrd_start    = round_pgup(dsi.v_kernend);
     vinitrd_end      = vinitrd_start + initrd_len;
     vphysmap_start   = round_pgup(vinitrd_end);
-    vphysmap_end     = vphysmap_start + (nr_pages * sizeof(unsigned long));
+    vphysmap_end     = vphysmap_start + (nr_pages * sizeof(u32));
     vpt_start        = round_pgup(vphysmap_end);
     for ( nr_pt_pages = 2; ; nr_pt_pages++ )
     {
@@ -225,11 +226,11 @@ int construct_dom0(struct domain *d,
      * We're basically forcing default RPLs to 1, so that our "what privilege
      * level are we returning to?" logic works.
      */
-    ed->arch.failsafe_selector = FLAT_GUESTOS_CS;
-    ed->arch.event_selector    = FLAT_GUESTOS_CS;
-    ed->arch.guestos_ss = FLAT_GUESTOS_SS;
+    ed->arch.failsafe_selector = FLAT_KERNEL_CS;
+    ed->arch.event_selector    = FLAT_KERNEL_CS;
+    ed->arch.kernel_ss = FLAT_KERNEL_SS;
     for ( i = 0; i < 256; i++ ) 
-        ed->arch.traps[i].cs = FLAT_GUESTOS_CS;
+        ed->arch.traps[i].cs = FLAT_KERNEL_CS;
 
     /* WARNING: The new domain must have its 'processor' field filled in! */
     phys_to_page(mpt_alloc)->u.inuse.type_info = PGT_l4_page_table;
@@ -238,8 +239,8 @@ int construct_dom0(struct domain *d,
     l4tab[l4_table_offset(LINEAR_PT_VIRT_START)] =
         mk_l4_pgentry(__pa(l4start) | __PAGE_HYPERVISOR);
     l4tab[l4_table_offset(PERDOMAIN_VIRT_START)] =
-        mk_l4_pgentry(__pa(d->arch.mm_perdomain_pt) | __PAGE_HYPERVISOR);
-    ed->arch.pagetable = mk_pagetable(__pa(l4start));
+        mk_l4_pgentry(__pa(d->arch.mm_perdomain_l3) | __PAGE_HYPERVISOR);
+    ed->arch.guest_table = mk_pagetable(__pa(l4start));
 
     l4tab += l4_table_offset(dsi.v_start);
     mfn = alloc_start >> PAGE_SHIFT;
@@ -294,7 +295,7 @@ int construct_dom0(struct domain *d,
     for ( count = 0; count < nr_pt_pages; count++ ) 
     {
         *l1tab = mk_l1_pgentry(l1_pgentry_val(*l1tab) & ~_PAGE_RW);
-        page = &frame_table[l1_pgentry_to_pagenr(*l1tab)];
+        page = &frame_table[l1_pgentry_to_pfn(*l1tab)];
 
         /* Read-only mapping + PGC_allocated + page-table page. */
         page->count_info         = PGC_allocated | 3;
@@ -328,6 +329,9 @@ int construct_dom0(struct domain *d,
         d->shared_info->vcpu_data[i].evtchn_upcall_mask = 1;
     d->shared_info->n_vcpu = smp_num_cpus;
 
+    /* Set up shadow and monitor tables. */
+    update_pagetables(ed);
+
     /* Install the new page tables. */
     __cli();
     write_ptbase(ed);
@@ -358,7 +362,7 @@ int construct_dom0(struct domain *d,
         if ( pfn > REVERSE_START )
             mfn = (alloc_end>>PAGE_SHIFT) - (pfn - REVERSE_START);
 #endif
-        ((unsigned long *)vphysmap_start)[pfn] = mfn;
+        ((u32 *)vphysmap_start)[pfn] = mfn;
         machine_to_phys_mapping[mfn] = pfn;
     }
 

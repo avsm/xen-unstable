@@ -20,6 +20,7 @@
 #include <xen/keyhandler.h>
 #include <asm/uaccess.h>
 #include <asm/mm.h>
+#include <asm/debugger.h>
 
 /* opt_console: comma-separated list of console outputs. */
 static unsigned char opt_console[30] = OPT_CONSOLE_STR;
@@ -49,7 +50,6 @@ static int sercon_handle = -1;
 static int vgacon_enabled = 0;
 
 spinlock_t console_lock = SPIN_LOCK_UNLOCKED;
-
 
 /*
  * *******************************************************
@@ -253,9 +253,11 @@ static void switch_serial_input(void)
     static char *input_str[2] = { "DOM0", "Xen" };
     xen_rx = !xen_rx;
     if ( SWITCH_CODE != 0 )
+    {
         printk("*** Serial input -> %s "
                "(type 'CTRL-%c' three times to switch input to %s).\n",
                input_str[xen_rx], opt_conswitch[0], input_str[!xen_rx]);
+    }
 }
 
 static void __serial_rx(unsigned char c, struct xen_regs *regs)
@@ -352,7 +354,9 @@ long do_console_io(int cmd, int count, char *buffer)
 static inline void __putstr(const char *str)
 {
     int c;
+
     serial_puts(sercon_handle, str);
+
     while ( (c = *str++) != '\0' )
     {
         putchar_console(c);
@@ -462,20 +466,101 @@ void console_force_lock(void)
     spin_lock(&console_lock);
 }
 
-void console_putc(char c)
+
+
+/*
+ * **************************************************************
+ * *************** Serial console ring buffer *******************
+ * **************************************************************
+ */
+
+#ifndef NDEBUG
+
+static unsigned char *debugtrace_buf; /* Debug-trace buffer */
+static unsigned int   debugtrace_prd; /* Producer index     */
+static unsigned int   debugtrace_kilobytes = 128, debugtrace_bytes;
+integer_param("debugtrace", debugtrace_kilobytes);
+#define DEBUGTRACE_MASK(_p) ((_p) & (debugtrace_bytes-1))
+
+void debugtrace_reset(void)
 {
-    serial_putc(sercon_handle, c);
+    if ( debugtrace_bytes != 0 )
+        memset(debugtrace_buf, '\0', debugtrace_bytes);
 }
 
-int console_getc(void)
+void debugtrace_dump(void)
 {
-    return serial_getc(sercon_handle);
+    int _watchdog_on = watchdog_on;
+
+    if ( debugtrace_bytes == 0 )
+        return;
+
+    /* Watchdog can trigger if we print a really large buffer. */
+    watchdog_on = 0;
+
+    /* Print oldest portion of the ring. */
+    serial_puts(sercon_handle,
+                &debugtrace_buf[DEBUGTRACE_MASK(debugtrace_prd)]);
+
+    /* Print youngest portion of the ring. */
+    debugtrace_buf[DEBUGTRACE_MASK(debugtrace_prd)] = '\0';
+    serial_puts(sercon_handle,
+                &debugtrace_buf[0]);
+
+    debugtrace_reset();
+
+    watchdog_on = _watchdog_on;
 }
 
-int irq_console_getc(void)
+void debugtrace_printk(const char *fmt, ...)
 {
-    return irq_serial_getc(sercon_handle);
+    static spinlock_t _lock = SPIN_LOCK_UNLOCKED;
+    static char       buf[1024];
+
+    va_list       args;
+    unsigned char *p;
+    unsigned long  flags;
+
+    if ( debugtrace_bytes == 0 )
+        return;
+
+    spin_lock_irqsave(&_lock, flags);
+
+    va_start(args, fmt);
+    (void)vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);        
+
+    for ( p = buf; *p != '\0'; p++ )
+        debugtrace_buf[DEBUGTRACE_MASK(debugtrace_prd++)] = *p;
+
+    spin_unlock_irqrestore(&_lock, flags);
 }
+
+static int __init debugtrace_init(void)
+{
+    int order;
+    unsigned int kbytes;
+
+    /* Round size down to next power of two. */
+    while ( (kbytes = (debugtrace_kilobytes & (debugtrace_kilobytes-1))) != 0 )
+        debugtrace_kilobytes = kbytes;
+
+    debugtrace_bytes = debugtrace_kilobytes << 10;
+    if ( debugtrace_bytes == 0 )
+        return 0;
+
+    order = get_order(debugtrace_bytes);
+    debugtrace_buf = (unsigned char *)alloc_xenheap_pages(order);
+    ASSERT(debugtrace_buf != NULL);
+
+    memset(debugtrace_buf, '\0', debugtrace_bytes);
+
+    return 0;
+}
+__initcall(debugtrace_init);
+
+#endif /* !NDEBUG */
+
 
 
 /*
@@ -483,6 +568,8 @@ int irq_console_getc(void)
  * *************** Debugging/tracing/error-report ***************
  * **************************************************************
  */
+
+extern void trap_to_xendbg(void);
 
 void panic(const char *fmt, ...)
 {
@@ -494,7 +581,9 @@ void panic(const char *fmt, ...)
     va_start(args, fmt);
     (void)vsnprintf(buf, sizeof(buf), fmt, args);
     va_end(args);
-    
+
+    debugger_trap_immediate();
+
     /* Spit out multiline message in one go. */
     spin_lock_irqsave(&console_lock, flags);
     __putstr("\n****************************************\n");
@@ -507,7 +596,8 @@ void panic(const char *fmt, ...)
     __putstr("Reboot in five seconds...\n");
     spin_unlock_irqrestore(&console_lock, flags);
 
-    watchdog_on = 0;
+    debugtrace_dump();
+
     mdelay(5000);
     machine_restart(0);
 }

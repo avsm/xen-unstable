@@ -21,6 +21,8 @@
 
 #include <public/xen.h>
 #include <asm/e820.h>
+#include <asm/vmx_virpit.h>
+#include <asm/vmx_intercept.h>
 
 #define MAX_OPERAND_NUM 3
 #define I_NAME_LEN  16
@@ -79,10 +81,12 @@ struct mi_per_cpu_info
 struct virutal_platform_def {
     unsigned long          *real_mode_data; /* E820, etc. */
     unsigned long          shared_page_va;
+    struct vmx_virpit_t    vmx_pit;
+    struct vmx_handler_t   vmx_handler;
     struct mi_per_cpu_info mpci;            /* MMIO */
 };
 
-extern void handle_mmio(unsigned long, unsigned long, unsigned long);
+extern void handle_mmio(unsigned long, unsigned long);
 extern int vmx_setup_platform(struct exec_domain *, execution_context_t *);
 
 static inline int mmio_space(unsigned long gpa)

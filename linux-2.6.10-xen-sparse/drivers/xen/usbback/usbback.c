@@ -190,7 +190,7 @@ static void fast_flush_area(int idx, int nr_pages)
     for ( i = 0; i < nr_pages; i++ )
     {
         mcl[i].op = __HYPERVISOR_update_va_mapping;
-        mcl[i].args[0] = MMAP_VADDR(idx, i) >> PAGE_SHIFT;
+        mcl[i].args[0] = MMAP_VADDR(idx, i);
         mcl[i].args[1] = 0;
         mcl[i].args[2] = 0;
     }
@@ -652,7 +652,7 @@ static void dispatch_usb_io(usbif_priv_t *up, usbif_request_t *req)
           i++, offset += PAGE_SIZE )
     {
 	mcl[i].op = __HYPERVISOR_update_va_mapping_otherdomain;
-	mcl[i].args[0] = MMAP_VADDR(pending_idx, i) >> PAGE_SHIFT;
+	mcl[i].args[0] = MMAP_VADDR(pending_idx, i);
         mcl[i].args[1] = ((buffer_mach & PAGE_MASK) + offset) | remap_prot;
         mcl[i].args[2] = 0;
         mcl[i].args[3] = up->domid;
@@ -668,7 +668,7 @@ static void dispatch_usb_io(usbif_priv_t *up, usbif_request_t *req)
     {
         /* Map in ISO schedule, if necessary. */
         mcl[i].op = __HYPERVISOR_update_va_mapping_otherdomain;
-        mcl[i].args[0] = MMAP_VADDR(pending_idx, i) >> PAGE_SHIFT;
+        mcl[i].args[0] = MMAP_VADDR(pending_idx, i);
         mcl[i].args[1] = (req->iso_schedule & PAGE_MASK) | remap_prot;
         mcl[i].args[2] = 0;
         mcl[i].args[3] = up->domid;

@@ -67,7 +67,7 @@ extern void ac_timer_init(void);
 extern void initialize_keytable();
 extern int do_timer_lists_from_pit;
 
-char ignore_irq13;		/* set if exception 16 works */
+char ignore_irq13; /* set if exception 16 works */
 struct cpuinfo_x86 boot_cpu_data = { 0, 0, 0, 0, -1 };
 
 #if defined(__x86_64__)
@@ -81,7 +81,7 @@ unsigned long wait_init_idle;
 
 struct exec_domain *idle_task[NR_CPUS] = { &idle0_exec_domain };
 
-#ifdef	CONFIG_ACPI_INTERPRETER
+#ifdef CONFIG_ACPI_INTERPRETER
 int acpi_disabled = 0;
 #else
 int acpi_disabled = 1;
@@ -298,7 +298,6 @@ void __init identify_cpu(struct cpuinfo_x86 *c)
 unsigned long cpu_initialized;
 void __init cpu_init(void)
 {
-    extern void percpu_traps_init(void);
     int nr = smp_processor_id();
     struct tss_struct *t = &init_tss[nr];
 
@@ -306,11 +305,9 @@ void __init cpu_init(void)
         panic("CPU#%d already initialized!!!\n", nr);
     printk("Initializing CPU#%d\n", nr);
 
-    /* Set up GDT and IDT. */
     SET_GDT_ENTRIES(current, DEFAULT_GDT_ENTRIES);
     SET_GDT_ADDRESS(current, DEFAULT_GDT_ADDRESS);
     __asm__ __volatile__ ( "lgdt %0" : "=m" (*current->arch.gdt) );
-    __asm__ __volatile__ ( "lidt %0" : "=m" (idt_descr) );
 
     /* No nested task. */
     __asm__ __volatile__ ( "pushf ; andw $0xbfff,(%"__OP"sp) ; popf" );
@@ -323,9 +320,9 @@ void __init cpu_init(void)
     memset(t->io_bitmap, ~0, sizeof(t->io_bitmap));
 #if defined(__i386__)
     t->ss0  = __HYPERVISOR_DS;
-    t->esp0 = get_stack_top();
+    t->esp0 = get_stack_bottom();
 #elif defined(__x86_64__)
-    t->rsp0 = get_stack_top();
+    t->rsp0 = get_stack_bottom();
 #endif
     set_tss_desc(nr,t);
     load_TR(nr);
@@ -335,8 +332,6 @@ void __init cpu_init(void)
 #define CD(register) __asm__ ( "mov %0,%%db" #register : : "r" (0UL) );
     CD(0); CD(1); CD(2); CD(3); /* no db4 and db5 */; CD(6); CD(7);
 #undef CD
-
-    percpu_traps_init();
 
     /* Install correct page table. */
     write_ptbase(current);
@@ -410,7 +405,7 @@ static void __init start_of_day(void)
     APIC_init_uniprocessor();
 #else
     if ( opt_nosmp )
-	APIC_init_uniprocessor();
+        APIC_init_uniprocessor();
     else
     	smp_boot_cpus(); 
     /*

@@ -345,7 +345,7 @@ static void __init probe_roms(void)
 shared_info_t *HYPERVISOR_shared_info = (shared_info_t *)empty_zero_page;
 EXPORT_SYMBOL(HYPERVISOR_shared_info);
 
-unsigned long *phys_to_machine_mapping, *pfn_to_mfn_frame_list;
+unsigned int *phys_to_machine_mapping, *pfn_to_mfn_frame_list;
 EXPORT_SYMBOL(phys_to_machine_mapping);
 
 DEFINE_PER_CPU(multicall_entry_t, multicall_list[8]);
@@ -1142,7 +1142,7 @@ static unsigned long __init setup_memory(void)
 	}
 #endif
 
-	phys_to_machine_mapping = (unsigned long *)xen_start_info.mfn_list;
+	phys_to_machine_mapping = (unsigned int *)xen_start_info.mfn_list;
 
 	return max_low_pfn;
 }
@@ -1360,7 +1360,10 @@ void __init setup_arch(char **cmdline_p)
 		efi_enabled = 1;
 #endif
 
- 	ROOT_DEV = MKDEV(RAMDISK_MAJOR,0); /*old_decode_dev(ORIG_ROOT_DEV);*/
+	/* This must be initialized to UNNAMED_MAJOR for ipconfig to work
+	   properly.  Setting ROOT_DEV to default to /dev/ram0 breaks initrd.
+	*/
+	ROOT_DEV = MKDEV(UNNAMED_MAJOR,0);
  	drive_info = DRIVE_INFO;
  	screen_info = SCREEN_INFO;
 	edid_info = EDID_INFO;

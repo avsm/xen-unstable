@@ -8,10 +8,11 @@ OBJS += $(patsubst %.c,%.o,$(wildcard mtrr/*.c))
 OBJS := $(subst $(TARGET_SUBARCH)/asm-offsets.o,,$(OBJS))
 
 ifneq ($(TARGET_SUBARCH),x86_32)
-OBJS := $(subst vmx.o,,$(OBJS))
-OBJS := $(subst vmx_io.o,,$(OBJS))
-OBJS := $(subst vmx_platform.o,,$(OBJS))
-OBJS := $(subst vmx_vmcs.o,,$(OBJS))
+OBJS := $(patsubst vmx%.o,,$(OBJS))
+endif
+
+ifneq ($(crash_debug),y)
+OBJS := $(patsubst cdb%.o,,$(OBJS))
 endif
 
 default: $(TARGET)
@@ -26,7 +27,7 @@ $(TARGET)-syms: boot/$(TARGET_SUBARCH).o $(ALL_OBJS) $(TARGET_SUBARCH)/xen.lds
 	$(LD) $(LDFLAGS) -T $(TARGET_SUBARCH)/xen.lds -N \
 	    boot/$(TARGET_SUBARCH).o $(ALL_OBJS) -o $@
 
-asm-offsets.s: $(TARGET_SUBARCH)/asm-offsets.c
+asm-offsets.s: $(TARGET_SUBARCH)/asm-offsets.c $(HDRS)
 	$(CC) $(CFLAGS) -S -o $@ $<
 
 boot/mkelf32: boot/mkelf32.c

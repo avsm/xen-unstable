@@ -348,13 +348,26 @@ void arch_getdomaininfo_ctxt(
     struct exec_domain *ed, full_execution_context_t *c)
 { 
     int i;
+#ifdef __i386__  /* Remove when x86_64 VMX is implemented */
+    unsigned long vmx_domain;
+    extern void save_vmx_execution_context(execution_context_t *);
+#endif
 
     c->flags = 0;
     memcpy(&c->cpu_ctxt, 
            &ed->arch.user_ctxt,
            sizeof(ed->arch.user_ctxt));
+
+#ifdef __i386__
+    vmx_domain = ed->arch.arch_vmx.flags;
+    if (vmx_domain)
+        save_vmx_execution_context(&c->cpu_ctxt);
+#endif
+
     if ( test_bit(EDF_DONEFPUINIT, &ed->ed_flags) )
         c->flags |= ECF_I387_VALID;
+    if ( KERNEL_MODE(ed, &ed->arch.user_ctxt) )
+        c->flags |= ECF_IN_KERNEL;
     memcpy(&c->fpu_ctxt,
            &ed->arch.i387,
            sizeof(ed->arch.i387));
@@ -376,13 +389,13 @@ void arch_getdomaininfo_ctxt(
     {
         for ( i = 0; i < 16; i++ )
             c->gdt_frames[i] = 
-                l1_pgentry_to_pagenr(ed->arch.perdomain_ptes[i]);
+                l1_pgentry_to_pfn(ed->arch.perdomain_ptes[i]);
         c->gdt_ents = GET_GDT_ENTRIES(ed);
     }
-    c->guestos_ss  = ed->arch.guestos_ss;
-    c->guestos_esp = ed->arch.guestos_sp;
+    c->kernel_ss  = ed->arch.kernel_ss;
+    c->kernel_esp = ed->arch.kernel_sp;
     c->pt_base   = 
-        pagetable_val(ed->arch.pagetable);
+        pagetable_val(ed->arch.guest_table);
     memcpy(c->debugreg, 
            ed->arch.debugreg, 
            sizeof(ed->arch.debugreg));

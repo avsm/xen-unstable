@@ -18,6 +18,7 @@
 #include <asm/shadow.h>
 #include <public/dom0_ops.h>
 #include <asm/domain_page.h>
+#include <asm/debugger.h>
 
 /* Both these structures are protected by the domlist_lock. */
 rwlock_t domlist_lock = RW_LOCK_UNLOCKED;
@@ -39,14 +40,10 @@ struct domain *do_createdomain(domid_t dom_id, unsigned int cpu)
     atomic_set(&d->refcnt, 1);
     atomic_set(&ed->pausecnt, 0);
 
-    shadow_lock_init(d);
-
     d->id          = dom_id;
     ed->processor  = cpu;
     d->create_time = NOW();
  
-    memcpy(&ed->arch, &idle0_exec_domain.arch, sizeof(ed->arch));
-
     spin_lock_init(&d->time_lock);
 
     spin_lock_init(&d->big_lock);
@@ -163,6 +160,8 @@ void domain_crash(void)
     BUG();
 }
 
+extern void trap_to_xendbg(void);
+
 void domain_shutdown(u8 reason)
 {
     struct domain *d = current->domain;
@@ -171,6 +170,8 @@ void domain_shutdown(u8 reason)
     {
         extern void machine_restart(char *);
         extern void machine_halt(void);
+
+        debugger_trap_immediate();
 
         if ( reason == 0 ) 
         {
@@ -256,11 +257,11 @@ void domain_destruct(struct domain *d)
 
 
 /*
- * final_setup_guestos is used for final setup and launching of domains other
+ * final_setup_guest is used for final setup and launching of domains other
  * than domain 0. ie. the domains that are being built by the userspace dom0
  * domain builder.
  */
-int final_setup_guestos(struct domain *p, dom0_builddomain_t *builddomain)
+int final_setup_guest(struct domain *p, dom0_builddomain_t *builddomain)
 {
     int rc = 0;
     full_execution_context_t *c;
@@ -280,7 +281,7 @@ int final_setup_guestos(struct domain *p, dom0_builddomain_t *builddomain)
         goto out;
     }
     
-    if ( (rc = arch_final_setup_guestos(p->exec_domain[0],c)) != 0 )
+    if ( (rc = arch_final_setup_guest(p->exec_domain[0],c)) != 0 )
         goto out;
 
     /* Set up the shared info structure. */
@@ -295,7 +296,7 @@ int final_setup_guestos(struct domain *p, dom0_builddomain_t *builddomain)
 }
 
 /*
- * final_setup_guestos is used for final setup and launching of domains other
+ * final_setup_guest is used for final setup and launching of domains other
  * than domain 0. ie. the domains that are being built by the userspace dom0
  * domain builder.
  */
@@ -327,7 +328,6 @@ long do_boot_vcpu(unsigned long vcpu, full_execution_context_t *ctxt)
     ed = d->exec_domain[vcpu];
 
     atomic_set(&ed->pausecnt, 0);
-    shadow_lock_init(d);
 
     memcpy(&ed->arch, &idle0_exec_domain.arch, sizeof(ed->arch));
 
@@ -335,7 +335,7 @@ long do_boot_vcpu(unsigned long vcpu, full_execution_context_t *ctxt)
 
     sched_add_domain(ed);
 
-    if ( (rc = arch_final_setup_guestos(ed, c)) != 0 ) {
+    if ( (rc = arch_final_setup_guest(ed, c)) != 0 ) {
         sched_rem_domain(ed);
         goto out;
     }

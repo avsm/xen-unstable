@@ -99,10 +99,7 @@ extern void __out_of_line_bug(int line) __attribute__((noreturn));
 #define out_of_line_bug() __out_of_line_bug(__LINE__)
 #endif /* __ASSEMBLY__ */
 
-#define BUG() do {					\
-	printk("BUG at %s:%d\n", __FILE__, __LINE__);	\
-	__asm__ __volatile__("ud2");			\
-} while (0)
+#define FORCE_CRASH() __asm__ __volatile__ ( "ud2" )
 
 #if defined(__x86_64__)
 
@@ -111,10 +108,16 @@ extern void __out_of_line_bug(int line) __attribute__((noreturn));
 #define XENHEAP_DEFAULT_MB (16)
 
 #define PML4_ENTRY_BITS  39
+#ifndef __ASSEMBLY__
 #define PML4_ENTRY_BYTES (1UL << PML4_ENTRY_BITS)
 #define PML4_ADDR(_slot)                             \
     ((((_slot ## UL) >> 8) * 0xffff000000000000UL) | \
      (_slot ## UL << PML4_ENTRY_BITS))
+#else
+#define PML4_ENTRY_BYTES (1 << PML4_ENTRY_BITS)
+#define PML4_ADDR(_slot)                             \
+    (((_slot >> 8) * 0xffff000000000000) | (_slot << PML4_ENTRY_BITS))
+#endif
 
 /*
  * Memory layout:
@@ -150,6 +153,11 @@ extern void __out_of_line_bug(int line) __attribute__((noreturn));
  *    Guest-defined use.
  */
 
+
+#define ROOT_PAGETABLE_FIRST_XEN_SLOT 256
+#define ROOT_PAGETABLE_LAST_XEN_SLOT  271
+#define ROOT_PAGETABLE_XEN_SLOTS \
+    (ROOT_PAGETABLE_LAST_XEN_SLOT - ROOT_PAGETABLE_FIRST_XEN_SLOT + 1)
 
 /* Hypervisor reserves PML4 slots 256 to 271 inclusive. */
 #define HYPERVISOR_VIRT_START   (PML4_ADDR(256))
@@ -191,6 +199,12 @@ extern void __out_of_line_bug(int line) __attribute__((noreturn));
 #define __HYPERVISOR_DS32 0x0818
 #define __HYPERVISOR_DS   __HYPERVISOR_DS64
 
+#define __GUEST_CS64      0x0833
+#define __GUEST_CS32      0x0823
+#define __GUEST_CS        __GUEST_CS64
+#define __GUEST_DS        0x0000
+#define __GUEST_SS        0x082b
+
 /* For generic assembly code: use macros to define operation/operand sizes. */
 #define __OS "q"  /* Operation Suffix */
 #define __OP "r"  /* Operand Prefix */
@@ -205,6 +219,13 @@ extern void __out_of_line_bug(int line) __attribute__((noreturn));
 /* Hypervisor owns top 64MB of virtual address space. */
 #define __HYPERVISOR_VIRT_START  0xFC000000
 #define HYPERVISOR_VIRT_START   (0xFC000000UL)
+
+#define ROOT_PAGETABLE_FIRST_XEN_SLOT \
+    (HYPERVISOR_VIRT_START >> L2_PAGETABLE_SHIFT)
+#define ROOT_PAGETABLE_LAST_XEN_SLOT  \
+    (~0UL >> L2_PAGETABLE_SHIFT)
+#define ROOT_PAGETABLE_XEN_SLOTS \
+    (ROOT_PAGETABLE_LAST_XEN_SLOT - ROOT_PAGETABLE_FIRST_XEN_SLOT + 1)
 
 /*
  * First 4MB are mapped read-only for all. It's for the machine->physical
