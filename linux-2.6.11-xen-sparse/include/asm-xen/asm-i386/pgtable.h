@@ -422,7 +422,7 @@ extern void noexec_setup(const char *str);
 		if (__dirty) {						  \
 		        if ( likely((__vma)->vm_mm == current->mm) ) {    \
 			    xen_flush_page_update_queue();                \
-			    HYPERVISOR_update_va_mapping((__address)>>PAGE_SHIFT, (__entry), UVMF_INVLPG); \
+			    HYPERVISOR_update_va_mapping((__address), (__entry), UVMF_INVLPG); \
 			} else {                                          \
                             xen_l1_entry_update((__ptep), (__entry).pte_low); \
 			    flush_tlb_page((__vma), (__address));         \
@@ -441,7 +441,7 @@ do {				  					\
 do {				  					\
 	if (likely((__vma)->vm_mm == current->mm)) {			\
 		xen_flush_page_update_queue();				\
-		HYPERVISOR_update_va_mapping((__address)>>PAGE_SHIFT,	\
+		HYPERVISOR_update_va_mapping((__address),		\
 					     __entry, 0);		\
 	} else {							\
 		xen_l1_entry_update((__ptep), (__entry).pte_low);	\

@@ -598,17 +598,6 @@ void __init cpu_init (void)
 	}
 
 	/*
-	 * Initialize the per-CPU GDT with the boot GDT,
-	 * and set up the GDT descriptor:
-	 */
-	if (cpu) {
-		cpu_gdt_descr[cpu].size = GDT_SIZE;
-		cpu_gdt_descr[cpu].address = 0;	/* XXXcl alloc page */
-		BUG();		/* XXXcl SMP */
-		memcpy((void *)cpu_gdt_descr[cpu].address,
-		    (void *)cpu_gdt_descr[0].address, GDT_SIZE);
-	}
-	/*
 	 * Set up the per-thread TLS descriptor cache:
 	 */
 	memcpy(thread->tls_array, &get_cpu_gdt_table(cpu)[GDT_ENTRY_TLS_MIN],
@@ -652,4 +641,10 @@ void __init cpu_init (void)
 	current_thread_info()->status = 0;
 	clear_used_math();
 	mxcsr_feature_mask_init();
+}
+
+
+int get_smp_processor_id(void)
+{
+	return smp_processor_id();
 }
