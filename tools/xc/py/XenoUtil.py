@@ -128,3 +128,12 @@ def setup_vfr_rules_for_vif(dom,vif,addr):
               ' proto=any\n' )
     os.close( fd )
     return None
+
+def add_offset_to_ip( ip, off ):
+    l = string.split(ip,'.')
+    a = ( (string.atoi(l[0])<<24) | (string.atoi(l[1])<<16) | 
+	  (string.atoi(l[2])<<8)  | string.atoi(l[3]) ) + off
+    
+    return '%d.%d.%d.%d' % ( ((a>>24)&0xff), ((a>>16)&0xff),
+			     ((a>>8)&0xff), (a&0xff) )
+
