@@ -289,6 +289,9 @@ typedef struct {
     l1_pgentry_t *pl1e;
     /* Index in L2 page table where this L1 p.t. is always hooked. */
     unsigned int l2_idx; /* NB. Only used for PTWR_PT_ACTIVE. */
+    /* Info about last ptwr update batch. */
+    struct exec_domain *prev_exec_domain; /* domain making the update */
+    unsigned int        prev_nr_updates;  /* size of update batch */
 } ptwr_ptinfo_t;
 
 typedef struct {
@@ -343,7 +346,4 @@ int update_grant_va_mapping(unsigned long va,
                             unsigned long val,
                             struct domain *d,
                             struct exec_domain *ed);
-#define GNTUPDVA_prev_ro 1
-#define GNTUPDVA_prev_rw 2
-
 #endif /* __ASM_X86_MM_H__ */
