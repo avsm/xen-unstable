@@ -764,6 +764,14 @@
 41a216cayFe2FQroFuzvNPw1AvNiqQ tools/libxutil/util.c
 41a216ca7mgVSnCBHPCLkGOIqPS1CQ tools/libxutil/util.h
 3f776bd2Xd-dUcPKlPN2vG89VGtfvQ tools/misc/Makefile
+4225f56d7sa9aEARfjNeCVTMYDAmZA tools/misc/cpuperf/Makefile
+4225f56dS5TGdKojmuBnrV3PzbE6Rg tools/misc/cpuperf/README.txt
+4225f56dcodvBSPoWYS6kvwZCQhgzg tools/misc/cpuperf/cpuperf.c
+4225f56dMjZK14EWd8K0gq4v5Diwjg tools/misc/cpuperf/cpuperf_perfcntr.h
+4225f56d_XjSY1297IiH96qeqD4sCA tools/misc/cpuperf/cpuperf_xeno.h
+4225f56dqlGC_UZ681F95mCgLbOeHQ tools/misc/cpuperf/module/Makefile
+4225f56dnmms-VFr1MiDVG_dYoM7IQ tools/misc/cpuperf/module/perfcntr.c
+4225f56dYhIGQRD_kKVJ6xQrkqO0YQ tools/misc/cpuperf/p4perf.h
 40ab2cfawIw8tsYo0dQKtp83h4qfTQ tools/misc/fakei386xen
 4249273cDOw6_uLUPvvUwWU1ZrJxnQ tools/misc/mbootpack/GPL
 4249273cSmj2h8Fj3UpTg0g-k6CLsA tools/misc/mbootpack/Makefile
@@ -782,6 +790,7 @@
 40c9c469kT0H9COWzA4XzPBjWK0WsA tools/misc/netfix
 4022a73cEKvrYe_DVZW2JlAxobg9wg tools/misc/nsplitd/Makefile
 4022a73cKms4Oq030x2JBzUB426lAQ tools/misc/nsplitd/nsplitd.c
+42308df9dv_ZuP49nNPIROEMQ3F_LA tools/misc/xc_shadow.c
 3f5ef5a2ir1kVAthS14Dc5QIRCEFWg tools/misc/xen-clone
 3f5ef5a2dTZP0nnsFoeq2jRf3mWDDg tools/misc/xen-clone.README
 405eedf6_nnNhFQ1I85lhCkLK6jFGA tools/misc/xencons
@@ -1132,6 +1141,7 @@
 3ddb79bcBQF85CfLS4i1WGZ4oLLaCA xen/arch/x86/Rules.mk
 3e5636e5FAYZ5_vQnmgwFJfSdmO5Mw xen/arch/x86/acpi.c
 3ddb79bcsjinG9k1KcvbVBuas1R2dA xen/arch/x86/apic.c
+42360b3244-Q6BpEKhR_A1YtG1wPNQ xen/arch/x86/audit.c
 3ddb79c4yGZ7_22QAFFwPzqP4NSHwA xen/arch/x86/boot/mkelf32.c
 3ddb79bcSC_LvnmFlX-T5iTgaR0SKg xen/arch/x86/boot/x86_32.S
 40e42bdbNu4MjI750THP_8J1S-Sa0g xen/arch/x86/boot/x86_64.S
