@@ -199,7 +199,7 @@ class XendDomain:
         self.domain_db[info.id] = info.sxpr()
         self.domain_by_name[info.name] = info
         self.sync_domain(info.id)
-        if notify: eserver.inject('xend.domain.created', info.name)
+        if notify: eserver.inject('xend.domain.created', [info.name, info.id])
 
     def _delete_domain(self, id, notify=1):
         """Remove a domain from the tables.
@@ -209,7 +209,7 @@ class XendDomain:
         """
         if id in self.domain_by_id:
             info = self.domain_by_id[id]
-            if notify: eserver.inject('xend.domain.died', info.name)
+            if notify: eserver.inject('xend.domain.died', [info.name, info.id])
             if info.name in self.domain_by_name:
                 del self.domain_by_name[info.name]
             del self.domain_by_id[id]
@@ -239,6 +239,9 @@ class XendDomain:
                 reason = XendDomainInfo.shutdown_reason(d['shutdown_reason'])
                 log.debug('XendDomain>reap> shutdown id=%s reason=%s', id, reason)
                 if reason in ['suspend']:
+                    dominfo = self.domain_by_id.get(id)
+                    name = (dominfo and dominfo.name) or '??'
+                    eserver.inject('xend.domain.suspended', [name, id])
                     continue
                 if reason in ['poweroff', 'reboot']:
                     self.domain_restart_schedule(id, reason)
@@ -410,10 +413,7 @@ class XendDomain:
 
     def domain_exists(self, name):
         name = str(name)
-        if self.domain_by_name.get(name) or self.domain_by_id.get(name):
-            return 1
-        else:
-            return 0
+        return self.domain_by_name.get(name) or self.domain_by_id.get(name)
 
     def domain_unpause(self, id):
         """Unpause domain execution.
@@ -421,7 +421,7 @@ class XendDomain:
         @param id: domain id
         """
         dominfo = self.domain_lookup(id)
-        eserver.inject('xend.domain.unpause', dominfo.name)
+        eserver.inject('xend.domain.unpause', [dominfo.name, dominfo.id])
         try:
             return xc.domain_unpause(dom=dominfo.dom)
         except Exception, ex:
@@ -433,7 +433,7 @@ class XendDomain:
         @param id: domain id
         """
         dominfo = self.domain_lookup(id)
-        eserver.inject('xend.domain.pause', dominfo.name)
+        eserver.inject('xend.domain.pause', [dominfo.name, dominfo.id])
         try:
             return xc.domain_pause(dom=dominfo.dom)
         except Exception, ex:
@@ -455,7 +455,7 @@ class XendDomain:
             self.domain_restart_cancel(dominfo.id)
         else:
             self.domain_restart_schedule(dominfo.id, reason, force=1)
-        eserver.inject('xend.domain.shutdown', [dominfo.name, reason])
+        eserver.inject('xend.domain.shutdown', [dominfo.name, dominfo.id, reason])
         if reason == 'halt':
             reason = 'poweroff'
         val = xend.domain_shutdown(dominfo.id, reason)
@@ -535,7 +535,7 @@ class XendDomain:
         """
         dominfo = self.domain_lookup(id)
         log.info('Destroying domain: name=%s', dominfo.name)
-        eserver.inject('xend.domain.destroy', dominfo.name)
+        eserver.inject('xend.domain.destroy', [dominfo.name, dominfo.id])
         if dominfo:
             val = dominfo.destroy()
         else:
