@@ -1,4 +1,3 @@
-/* -*-  Mode:C; c-basic-offset:8; tab-width:8; indent-tabs-mode:t -*- */
 /*
  *	Low-Level PCI Support for PC
  *
@@ -1038,7 +1037,7 @@ struct irq_routing_table * __devinit pcibios_get_irq_routing_table(void)
 	if (ret & 0xff00)
 		printk(KERN_ERR "PCI: Error %02x when fetching IRQ routing table.\n", (ret >> 8) & 0xff);
 	else if (opt.size) {
-		rt = xmalloc(sizeof(struct irq_routing_table) + opt.size);
+		rt = xmalloc_bytes(sizeof(struct irq_routing_table) + opt.size);
 		if (rt) {
 			memset(rt, 0, sizeof(struct irq_routing_table));
 			rt->size = opt.size + sizeof(struct irq_routing_table);
@@ -1546,3 +1545,12 @@ int pcibios_enable_device(struct pci_dev *dev, int mask)
 
 	return 0;
 }
+
+/*
+ * Local variables:
+ * mode: C
+ * c-set-style: "BSD"
+ * c-basic-offset: 8
+ * tab-width: 8
+ * indent-tabs-mode: t
+ */
