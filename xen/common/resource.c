@@ -220,7 +220,7 @@ int allocate_resource(struct resource *root, struct resource *new,
  */
 struct resource * __request_region(struct resource *parent, unsigned long start, unsigned long n, const char *name)
 {
-	struct resource *res = xmalloc(sizeof(*res));
+	struct resource *res = xmalloc(struct resource);
 
 	if (res) {
 		memset(res, 0, sizeof(*res));
@@ -317,3 +317,13 @@ static int __init reserve_setup(char *str)
 
 __setup("reserve=", reserve_setup);
 #endif
+
+/*
+ * Local variables:
+ * mode: C
+ * c-set-style: "BSD"
+ * c-basic-offset: 8
+ * tab-width: 8
+ * indent-tabs-mode: t
+ * End:
+ */
