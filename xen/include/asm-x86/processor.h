@@ -174,7 +174,6 @@ struct cpuinfo_x86 {
  */
 
 extern struct cpuinfo_x86 boot_cpu_data;
-extern struct tss_struct init_tss[NR_CPUS];
 
 #ifdef CONFIG_SMP
 extern struct cpuinfo_x86 cpu_data[];
@@ -193,7 +192,7 @@ extern void dodgy_tsc(void);
 /*
  * Generic CPUID function
  */
-static inline void cpuid(int op, int *eax, int *ebx, int *ecx, int *edx)
+static inline void cpuid(int op, unsigned int *eax, unsigned int *ebx, unsigned int *ecx, unsigned int *edx)
 {
     __asm__("cpuid"
             : "=a" (*eax),
@@ -383,6 +382,8 @@ struct tss_struct {
 extern idt_entry_t idt_table[];
 extern idt_entry_t *idt_tables[];
 
+extern struct tss_struct init_tss[NR_CPUS];
+
 #ifdef ARCH_HAS_FAST_TRAP
 
 #define SET_DEFAULT_FAST_TRAP(_p) \
@@ -518,4 +519,5 @@ asmlinkage void fatal_trap(int trapnr, struct xen_regs *regs);
  * c-basic-offset: 4
  * tab-width: 4
  * indent-tabs-mode: nil
+ * End:
  */
