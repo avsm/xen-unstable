@@ -185,6 +185,18 @@ typedef struct dom0_settime_st
     u64 system_time;
 } dom0_settime_t;
 
+/*
+ * Read console content from Xen buffer ring.
+ */
+
+#define DOM0_READCONSOLE      19
+typedef struct dom0_readconsole_st
+{
+    unsigned long str;
+    unsigned int count;
+    unsigned int cmd;
+} dom0_readconsole_t;
+
 typedef struct dom0_op_st
 {
     unsigned long cmd;
@@ -205,6 +217,7 @@ typedef struct dom0_op_st
 	dom0_msr_t              msr;
 	dom0_debug_t            debug;
 	dom0_settime_t          settime;
+	dom0_readconsole_t	readconsole;
     } u;
 } dom0_op_t;
 
