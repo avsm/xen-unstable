@@ -19,6 +19,8 @@
 #include <getopt.h>
 #include <errno.h>
 #include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 #include <time.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -33,6 +35,7 @@
 #include "file_stream.h"
 #include "string_stream.h"
 #include "lzi_stream.h"
+#include "gzip_stream.h"
 #include "sys_net.h"
 #include "sys_string.h"
 
@@ -46,7 +49,7 @@
 #include "select.h"
 
 #define MODULE_NAME "XFRD"
-#define DEBUG 1
+#define DEBUG 0
 #include "debug.h"
 
 /*
@@ -97,6 +100,7 @@ Sxpr oxfr_migrate_ok;// (xfr.migrate.ok <value>)
 Sxpr oxfr_progress;  // (xfr.progress <percent> <rate: kb/s>)
 Sxpr oxfr_save;      // (xfr.save <vmid> <vmconfig> <file>)
 Sxpr oxfr_save_ok;   // (xfr.save.ok)
+Sxpr oxfr_vm_destroy;// (xfr.vm.destroy <vmid>)
 Sxpr oxfr_vm_suspend;// (xfr.vm.suspend <vmid>)
 Sxpr oxfr_xfr;       // (xfr.xfr <vmid>)
 Sxpr oxfr_xfr_ok;    // (xfr.xfr.ok <vmid>)
@@ -110,6 +114,7 @@ void xfr_init(void){
     oxfr_progress       = intern("xfr.progress");
     oxfr_save           = intern("xfr.save");
     oxfr_save_ok        = intern("xfr.save.ok");
+    oxfr_vm_destroy     = intern("xfr.vm.destroy");
     oxfr_vm_suspend     = intern("xfr.vm.suspend");
     oxfr_xfr            = intern("xfr.xfr");
     oxfr_xfr_ok         = intern("xfr.xfr.ok");
@@ -324,8 +329,7 @@ void set_defaults(Args *args){
 
 int stringof(Sxpr exp, char **s){
     int err = 0;
-    dprintf(">\n");
-    objprint(iostdout, exp, PRINT_TYPE); IOStream_print(iostdout, "\n");
+    //dprintf(">\n"); objprint(iostdout, exp, PRINT_TYPE); IOStream_print(iostdout, "\n");
     if(ATOMP(exp)){
         *s = atom_name(exp);
     } else if(STRINGP(exp)){
@@ -334,7 +338,7 @@ int stringof(Sxpr exp, char **s){
         err = -EINVAL;
         *s = NULL;
     }
-    dprintf("< err=%d s=%s\n", err, *s);
+    //dprintf("< err=%d s=%s\n", err, *s);
     return err;
 }
 
@@ -342,8 +346,7 @@ int intof(Sxpr exp, int *v){
     int err = 0;
     char *s;
     unsigned long l;
-    dprintf(">\n");
-    objprint(iostdout, exp, 0); IOStream_print(iostdout, "\n");
+    //dprintf(">\n"); objprint(iostdout, exp, 0); IOStream_print(iostdout, "\n");
     if(INTP(exp)){
         *v = OBJ_INT(exp);
     } else {
@@ -353,7 +356,7 @@ int intof(Sxpr exp, int *v){
         *v = (int)l;
     }
  exit:
-    dprintf("< err=%d v=%d\n", err, *v);
+    //dprintf("< err=%d v=%d\n", err, *v);
     return err;
 }
 
@@ -361,8 +364,7 @@ int addrof(Sxpr exp, uint32_t *v){
     char *h;
     unsigned long a;
     int err = 0;
-    dprintf(">\n");
-    objprint(iostdout, exp, 0); IOStream_print(iostdout, "\n");
+    //dprintf(">\n"); objprint(iostdout, exp, 0); IOStream_print(iostdout, "\n");
     err = stringof(exp, &h);
     if(err) goto exit;
     if(get_host_address(h, &a)){
@@ -371,15 +373,14 @@ int addrof(Sxpr exp, uint32_t *v){
     }
     *v = a;
   exit:
-    dprintf("< err=%d v=%x\n", err, *v);
+    //dprintf("< err=%d v=%x\n", err, *v);
     return err;
 }
 
 int portof(Sxpr exp, uint16_t *v){
     char *s;
     int err = 0;
-    dprintf(">\n");
-    objprint(iostdout, exp, 0); IOStream_print(iostdout, "\n");
+    //dprintf(">\n"); objprint(iostdout, exp, 0); IOStream_print(iostdout, "\n");
     if(INTP(exp)){
         *v = get_ul(exp);
         *v = htons(*v);
@@ -395,7 +396,7 @@ int portof(Sxpr exp, uint16_t *v){
         *v = p;
     }
   exit:
-    dprintf("< err=%d v=%u\n", err, *v);
+    //dprintf("< err=%d v=%u\n", err, *v);
     return err;
 }
 
@@ -468,7 +469,7 @@ int xfr_hello(Conn *conn){
     err = Conn_sxpr(conn, &sxpr);
     if(err) goto exit;
     if(!sxpr_elementp(sxpr, oxfr_hello)){
-        dprintf("> sxpr_elementp test failed\n");
+        wprintf("> sxpr_elementp test failed\n");
         err = -EINVAL;
         goto exit;
     }
@@ -507,7 +508,6 @@ int xfr_send_hello(Conn *conn){
                          XFR_PROTO_MINOR);
     if(err < 0) goto exit;
     IOStream_flush(conn->out);
-    dprintf("> xfr_response...\n");
     err = xfr_response(conn);
   exit:
     dprintf("< err=%d\n", err);
@@ -568,6 +568,28 @@ int xfr_vm_suspend(Conn *xend, uint32_t vmid){
     return err;
 }
 
+int xfr_send_destroy(Conn *conn, uint32_t vmid){
+    int err = 0;
+
+    err = IOStream_print(conn->out, "(%s %d)",
+                         atom_name(oxfr_vm_destroy), vmid);
+    return (err < 0 ? err : 0);
+}
+
+/** Destroy a vm on behalf of save/migrate.
+ */
+int xfr_vm_destroy(Conn *xend, uint32_t vmid){
+    int err = 0;
+    dprintf("> vmid=%u\n", vmid);
+    err = xfr_send_destroy(xend, vmid);
+    if(err) goto exit;
+    IOStream_flush(xend->out);
+    err = xfr_response(xend);
+  exit:
+    dprintf("< err=%d\n", err);
+    return err;
+}
+
 /** Get vm state. Send transfer message.
  *
  * @param peer connection
@@ -585,6 +607,10 @@ int xfr_send_state(XfrState *state, Conn *xend, Conn *peer){
     if(err) goto exit;
     err = xen_domain_snd(xend, peer->out,
                          state->vmid, state->vmconfig, state->vmconfig_n);
+    if(err) goto exit;
+    // Sending the domain suspends it, and there's no way back.
+    // So destroy it now. If anything goes wrong now it's too late.
+    err = xfr_vm_destroy(xend, state->vmid);
     if(err) goto exit;
     IOStream_flush(peer->out);
     // Read the response from the peer.
@@ -671,7 +697,6 @@ int xfr_send(Args *args, XfrState *state, Conn *xend, uint32_t addr, uint32_t po
     dprintf("> Xfr xfr_addr=%s:%d\n", inet_ntoa(xfr_addr), ntohs(xfr_port));
     err = Conn_connect(peer, flags, xfr_addr, xfr_port);
     if(err) goto exit;
-    printf("\n");
     XfrState_set_state(state, XFR_HELLO);
     // Send hello message.
     err = xfr_send_hello(peer);
@@ -685,10 +710,9 @@ int xfr_send(Args *args, XfrState *state, Conn *xend, uint32_t addr, uint32_t po
         int plain_bytes = lzi_stream_plain_bytes(zio);
         int comp_bytes = lzi_stream_comp_bytes(zio);
         float ratio = lzi_stream_ratio(zio);
-        dprintf("> Compression: plain %d bytes, compressed %d bytes, ratio %3.2f\n",
+        iprintf("> Compression: plain %d bytes, compressed %d bytes, ratio %3.2f\n",
                 plain_bytes, comp_bytes, ratio);
     }
-    printf("\n");
   exit:
     dprintf("> err=%d\n", err);
     if(err && !XfrState_get_err(state)){
@@ -697,7 +721,7 @@ int xfr_send(Args *args, XfrState *state, Conn *xend, uint32_t addr, uint32_t po
     Conn_close(peer);
     if(!err){
         t1 = time(NULL) - t0;
-        dprintf("> Transfer complete in %lu seconds\n", t1);
+        iprintf("> Transfer complete in %lu seconds\n", t1);
     }
     dprintf("> done err=%d, notifying xend...\n", err);
     xfr_send_done(state, xend);
@@ -709,13 +733,22 @@ int xfr_send(Args *args, XfrState *state, Conn *xend, uint32_t addr, uint32_t po
  */
 int xfr_save(Args *args, XfrState *state, Conn *xend, char *file){
     int err = 0;
+    int flags = (O_CREAT | O_EXCL | O_WRONLY);
+    int mode = 0644;
+    int fd;
     IOStream *io = NULL;
 
     dprintf("> file=%s\n", file);
-    io = file_stream_fopen(file, "wb");
-    if(!io){
-        dprintf("> Failed to open %s\n", file);
+    fd = open(file, flags, mode);
+    if(fd < 0) {
+        eprintf("> Failed to open %s\n", file);
         err = -EIO;
+        goto exit;
+    }
+    io = gzip_stream_fdopen(fd, "wb1");
+    if(!io){
+        eprintf("> Failed to allocate gzip state for %s\n", file);
+        err = -ENOMEM;
         goto exit;
     }
     err = xen_domain_snd(xend, io, state->vmid, state->vmconfig, state->vmconfig_n);
@@ -728,6 +761,9 @@ int xfr_save(Args *args, XfrState *state, Conn *xend, char *file){
     if(io){
         IOStream_close(io);
         IOStream_free(io);
+    }
+    if(err){
+        unlink(file);
     }
     dprintf("< err=%d\n", err);
     return err;
@@ -758,7 +794,7 @@ int xfr_recv(Args *args, XfrState *state, Conn *peer){
   exit:
     if(!err){
         t1 = time(NULL) - t0;
-        dprintf("> Transfer complete in %lu seconds\n", t1);
+        iprintf("> Transfer complete in %lu seconds\n", t1);
     }
     if(err){
         xfr_error(peer, err);
@@ -783,14 +819,14 @@ int xfrd_service(Args *args, int peersock, struct sockaddr_in peer_in){
     dprintf(">\n");
     err = Conn_init(conn, flags, peersock, peer_in);
     if(err) goto exit;
-    dprintf(">xfr_hello... \n");
+    //dprintf(">xfr_hello... \n");
     err = xfr_hello(conn);
     if(err) goto exit;
-    dprintf("> sxpr...\n");
+    //dprintf("> sxpr...\n");
     err = Conn_sxpr(conn, &sxpr);
     if(err) goto exit;
-    dprintf("> sxpr=\n");
-    objprint(iostdout, sxpr, PRINT_TYPE); IOStream_print(iostdout, "\n");
+    //dprintf("> sxpr=\n");
+    //objprint(iostdout, sxpr, PRINT_TYPE); IOStream_print(iostdout, "\n");
     if(sxpr_elementp(sxpr, oxfr_migrate)){
         // Migrate message from xend.
         uint32_t addr;
@@ -839,7 +875,7 @@ int xfrd_service(Args *args, int peersock, struct sockaddr_in peer_in){
     } else{
         // Anything else is invalid.
         err = -EINVAL;
-        dprintf("> Invalid message: ");
+        eprintf("> Invalid message: ");
         objprint(iostderr, sxpr, 0);
         IOStream_print(iostderr, "\n");
         xfr_error(conn, err);
@@ -1091,6 +1127,7 @@ int main(int argc, char *argv[]){
     int key = 0;
     int long_index = 0;
 
+    dprintf(">\n");
     set_defaults(args);
     while(1){
 	key = getopt_long(argc, argv, short_opts, long_opts, &long_index);

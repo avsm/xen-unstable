@@ -1,5 +1,6 @@
 import sys
 import struct
+import types
 
 from xen.lowlevel import xu
 
@@ -213,9 +214,6 @@ def packMsg(ty, params):
                 args['mac[%d]' % i] = v[i]
         else:
             args[k] = v
-    if DEBUG:
-        for (k, v) in args.items():
-            print 'packMsg>', k, v, type(v)
     msg = xu.message(major, minor, msgid, args)
     if DEBUG: print '<packMsg', msg.get_header()['id'], ty, params
     return msg
@@ -233,19 +231,22 @@ def unpackMsg(ty, msg):
     @rtype: dict
     """
     args = msg.get_payload()
-    mac = [0, 0, 0, 0, 0, 0]
-    macs = []
-    for (k, v) in args.items():
-        if k.startswith('mac['):
-            macs += k
-            i = int(k[4:5])
-            mac[i] = v
-        else:
-            pass
-    if macs:
-        args['mac'] = mac
-        for k in macs:
-            del args[k]
+    if isinstance(args, types.StringType):
+        args = { 'value': args }
+    else:
+        mac = [0, 0, 0, 0, 0, 0]
+        macs = []
+        for (k, v) in args.items():
+            if k.startswith('mac['):
+                macs += k
+                i = int(k[4:5])
+                mac[i] = v
+            else:
+                pass
+        if macs:
+            args['mac'] = mac
+            for k in macs:
+                del args[k]
     if DEBUG:
         msgid = msg.get_header()['id']
         print '<unpackMsg', msgid, ty, args
