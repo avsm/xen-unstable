@@ -1,3 +1,4 @@
+/* -*-  Mode:C; c-basic-offset:4; tab-width:4; indent-tabs-mode:nil -*- */
 /******************************************************************************
  * console.c
  * 
@@ -19,9 +20,10 @@
 #include <xen/keyhandler.h>
 #include <asm/uaccess.h>
 #include <asm/mm.h>
+#include <asm/debugger.h>
 
 /* opt_console: comma-separated list of console outputs. */
-static unsigned char opt_console[30] = "com1,vga";
+static unsigned char opt_console[30] = OPT_CONSOLE_STR;
 string_param("console", opt_console);
 
 /* opt_conswitch: a character pair controlling console switching. */
@@ -48,7 +50,6 @@ static int sercon_handle = -1;
 static int vgacon_enabled = 0;
 
 spinlock_t console_lock = SPIN_LOCK_UNLOCKED;
-
 
 /*
  * *******************************************************
@@ -252,9 +253,11 @@ static void switch_serial_input(void)
     static char *input_str[2] = { "DOM0", "Xen" };
     xen_rx = !xen_rx;
     if ( SWITCH_CODE != 0 )
+    {
         printk("*** Serial input -> %s "
                "(type 'CTRL-%c' three times to switch input to %s).\n",
                input_str[xen_rx], opt_conswitch[0], input_str[!xen_rx]);
+    }
 }
 
 static void __serial_rx(unsigned char c, struct xen_regs *regs)
@@ -267,7 +270,7 @@ static void __serial_rx(unsigned char c, struct xen_regs *regs)
     {
         serial_rx_ring[SERIAL_RX_MASK(serial_rx_prod)] = c;
         if ( serial_rx_prod++ == serial_rx_cons )
-            send_guest_virq(dom0, VIRQ_CONSOLE);
+            send_guest_virq(dom0->exec_domain[0], VIRQ_CONSOLE);
     }
 }
 
@@ -300,7 +303,7 @@ long do_console_io(int cmd, int count, char *buffer)
 
 #ifndef VERBOSE
     /* Only domain-0 may access the emergency console. */
-    if ( current->id != 0 )
+    if ( current->domain->id != 0 )
         return -EPERM;
 #endif
 
@@ -351,7 +354,9 @@ long do_console_io(int cmd, int count, char *buffer)
 static inline void __putstr(const char *str)
 {
     int c;
+
     serial_puts(sercon_handle, str);
+
     while ( (c = *str++) != '\0' )
     {
         putchar_console(c);
@@ -461,20 +466,110 @@ void console_force_lock(void)
     spin_lock(&console_lock);
 }
 
-void console_putc(char c)
+
+
+/*
+ * **************************************************************
+ * *************** Serial console ring buffer *******************
+ * **************************************************************
+ */
+
+#ifndef NDEBUG
+
+/* Send output direct to console, or buffer it? */
+int debugtrace_send_to_console;
+
+static unsigned char *debugtrace_buf; /* Debug-trace buffer */
+static unsigned int   debugtrace_prd; /* Producer index     */
+static unsigned int   debugtrace_kilobytes = 128, debugtrace_bytes;
+static spinlock_t debugtrace_lock = SPIN_LOCK_UNLOCKED;
+integer_param("debugtrace", debugtrace_kilobytes);
+
+void debugtrace_dump(void)
 {
-    serial_putc(sercon_handle, c);
+    int _watchdog_on = watchdog_on;
+    unsigned long flags;
+
+    if ( debugtrace_bytes == 0 )
+        return;
+
+    /* Watchdog can trigger if we print a really large buffer. */
+    watchdog_on = 0;
+
+    spin_lock_irqsave(&debugtrace_lock, flags);
+
+    /* Print oldest portion of the ring. */
+    serial_puts(sercon_handle, &debugtrace_buf[debugtrace_prd]);
+
+    /* Print youngest portion of the ring. */
+    debugtrace_buf[debugtrace_prd] = '\0';
+    serial_puts(sercon_handle, &debugtrace_buf[0]);
+
+    memset(debugtrace_buf, '\0', debugtrace_bytes);
+
+    spin_unlock_irqrestore(&debugtrace_lock, flags);
+
+    watchdog_on = _watchdog_on;
 }
 
-int console_getc(void)
+void debugtrace_printk(const char *fmt, ...)
 {
-    return serial_getc(sercon_handle);
+    static char    buf[1024];
+
+    va_list        args;
+    unsigned char *p;
+    unsigned long  flags;
+
+    if ( debugtrace_bytes == 0 )
+        return;
+
+    spin_lock_irqsave(&debugtrace_lock, flags);
+
+    va_start(args, fmt);
+    (void)vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+
+    if ( debugtrace_send_to_console )
+    {
+        serial_puts(sercon_handle, buf);
+    }
+    else
+    {
+        for ( p = buf; *p != '\0'; p++ )
+        {
+            debugtrace_buf[debugtrace_prd++] = *p;            
+            /* Always leave a nul byte at the end of the buffer. */
+            if ( debugtrace_prd == (debugtrace_bytes - 1) )
+                debugtrace_prd = 0;
+        }
+    }
+
+    spin_unlock_irqrestore(&debugtrace_lock, flags);
 }
 
-int irq_console_getc(void)
+static int __init debugtrace_init(void)
 {
-    return irq_serial_getc(sercon_handle);
+    int order;
+    unsigned int kbytes;
+
+    /* Round size down to next power of two. */
+    while ( (kbytes = (debugtrace_kilobytes & (debugtrace_kilobytes-1))) != 0 )
+        debugtrace_kilobytes = kbytes;
+
+    debugtrace_bytes = debugtrace_kilobytes << 10;
+    if ( debugtrace_bytes == 0 )
+        return 0;
+
+    order = get_order(debugtrace_bytes);
+    debugtrace_buf = (unsigned char *)alloc_xenheap_pages(order);
+    ASSERT(debugtrace_buf != NULL);
+
+    return 0;
 }
+__initcall(debugtrace_init);
+
+#endif /* !NDEBUG */
+
 
 
 /*
@@ -483,6 +578,8 @@ int irq_console_getc(void)
  * **************************************************************
  */
 
+extern void trap_to_xendbg(void);
+
 void panic(const char *fmt, ...)
 {
     va_list args;
@@ -490,10 +587,14 @@ void panic(const char *fmt, ...)
     unsigned long flags;
     extern void machine_restart(char *);
     
+    debugtrace_dump();
+
     va_start(args, fmt);
     (void)vsnprintf(buf, sizeof(buf), fmt, args);
     va_end(args);
-    
+
+    debugger_trap_immediate();
+
     /* Spit out multiline message in one go. */
     spin_lock_irqsave(&console_lock, flags);
     __putstr("\n****************************************\n");

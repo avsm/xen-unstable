@@ -41,53 +41,7 @@ loadelfsymtab(
     char *elfbase, int xch, u32 dom, unsigned long *parray,
     struct domain_setup_info *dsi);
 
-static long get_tot_pages(int xc_handle, u32 domid)
-{
-    dom0_op_t op;
-    op.cmd = DOM0_GETDOMAININFO;
-    op.u.getdomaininfo.domain = (domid_t)domid;
-    op.u.getdomaininfo.ctxt = NULL;
-    return (do_dom0_op(xc_handle, &op) < 0) ? 
-        -1 : op.u.getdomaininfo.tot_pages;
-}
-
-static int get_pfn_list(int xc_handle,
-                        u32 domid, 
-                        unsigned long *pfn_buf, 
-                        unsigned long max_pfns)
-{
-    dom0_op_t op;
-    int ret;
-    op.cmd = DOM0_GETMEMLIST;
-    op.u.getmemlist.domain   = (domid_t)domid;
-    op.u.getmemlist.max_pfns = max_pfns;
-    op.u.getmemlist.buffer   = pfn_buf;
-
-    if ( mlock(pfn_buf, max_pfns * sizeof(unsigned long)) != 0 )
-        return -1;
-
-    ret = do_dom0_op(xc_handle, &op);
-
-    (void)munlock(pfn_buf, max_pfns * sizeof(unsigned long));
-
-    return (ret < 0) ? -1 : op.u.getmemlist.num_pfns;
-}
-
-static int copy_to_domain_page(int xc_handle,
-                               u32 domid,
-                               unsigned long dst_pfn, 
-                               void *src_page)
-{
-    void *vaddr = xc_map_foreign_range(
-        xc_handle, domid, PAGE_SIZE, PROT_WRITE, dst_pfn);
-    if ( vaddr == NULL )
-        return -1;
-    memcpy(vaddr, src_page, PAGE_SIZE);
-    munmap(vaddr, PAGE_SIZE);
-    return 0;
-}
-
-static int setup_guestos(int xc_handle,
+static int setup_guest(int xc_handle,
                          u32 dom,
                          char *image, unsigned long image_size,
                          gzFile initrd_gfd, unsigned long initrd_len,
@@ -97,7 +51,8 @@ static int setup_guestos(int xc_handle,
                          const char *cmdline,
                          unsigned long shared_info_frame,
                          unsigned int control_evtchn,
-                         unsigned long flags)
+                         unsigned long flags,
+                         unsigned int vcpus)
 {
     l1_pgentry_t *vl1tab=NULL, *vl1e=NULL;
     l2_pgentry_t *vl2tab=NULL, *vl2e=NULL;
@@ -204,7 +159,7 @@ static int setup_guestos(int xc_handle,
         goto error_out;
     }
 
-    if ( get_pfn_list(xc_handle, dom, page_array, nr_pages) != nr_pages )
+    if ( xc_get_pfn_list(xc_handle, dom, page_array, nr_pages) != nr_pages )
     {
         PERROR("Could not get the page frame list");
         goto error_out;
@@ -227,7 +182,7 @@ static int setup_guestos(int xc_handle,
                 PERROR("Error reading initrd image, could not");
                 goto error_out;
             }
-            copy_to_domain_page(xc_handle, dom,
+            xc_copy_to_domain_page(xc_handle, dom,
                                 page_array[i>>PAGE_SHIFT], page);
         }
     }
@@ -335,6 +290,10 @@ static int setup_guestos(int xc_handle,
     /* Mask all upcalls... */
     for ( i = 0; i < MAX_VIRT_CPUS; i++ )
         shared_info->vcpu_data[i].evtchn_upcall_mask = 1;
+
+    shared_info->n_vcpu = vcpus;
+    printf(" VCPUS:         %d\n", shared_info->n_vcpu);
+
     munmap(shared_info, PAGE_SIZE);
 
     /* Send the page update requests down to the hypervisor. */
@@ -357,76 +316,14 @@ static int setup_guestos(int xc_handle,
     return -1;
 }
 
-static unsigned long get_filesz(int fd)
-{
-    u16 sig;
-    u32 _sz = 0;
-    unsigned long sz;
-
-    lseek(fd, 0, SEEK_SET);
-    read(fd, &sig, sizeof(sig));
-    sz = lseek(fd, 0, SEEK_END);
-    if ( sig == 0x8b1f ) /* GZIP signature? */
-    {
-        lseek(fd, -4, SEEK_END);
-        read(fd, &_sz, 4);
-        sz = _sz;
-    }
-    lseek(fd, 0, SEEK_SET);
-
-    return sz;
-}
-
-static char *read_kernel_image(const char *filename, unsigned long *size)
-{
-    int kernel_fd = -1;
-    gzFile kernel_gfd = NULL;
-    char *image = NULL;
-    unsigned int bytes;
-
-    if ( (kernel_fd = open(filename, O_RDONLY)) < 0 )
-    {
-        PERROR("Could not open kernel image");
-        goto out;
-    }
-
-    *size = get_filesz(kernel_fd);
-
-    if ( (kernel_gfd = gzdopen(kernel_fd, "rb")) == NULL )
-    {
-        PERROR("Could not allocate decompression state for state file");
-        goto out;
-    }
-
-    if ( (image = malloc(*size)) == NULL )
-    {
-        PERROR("Could not allocate memory for kernel image");
-        goto out;
-    }
-
-    if ( (bytes = gzread(kernel_gfd, image, *size)) != *size )
-    {
-        PERROR("Error reading kernel image, could not"
-               " read the whole image (%d != %ld).", bytes, *size);
-        free(image);
-        image = NULL;
-    }
-
- out:
-    if ( kernel_gfd != NULL )
-        gzclose(kernel_gfd);
-    else if ( kernel_fd >= 0 )
-        close(kernel_fd);
-    return image;
-}
-
 int xc_linux_build(int xc_handle,
                    u32 domid,
                    const char *image_name,
                    const char *ramdisk_name,
                    const char *cmdline,
                    unsigned int control_evtchn,
-                   unsigned long flags)
+                   unsigned long flags,
+                   unsigned int vcpus)
 {
     dom0_op_t launch_op, op;
     int initrd_fd = -1;
@@ -438,13 +335,13 @@ int xc_linux_build(int xc_handle,
     unsigned long image_size, initrd_size=0;
     unsigned long vstartinfo_start, vkern_entry;
 
-    if ( (nr_pages = get_tot_pages(xc_handle, domid)) < 0 )
+    if ( (nr_pages = xc_get_tot_pages(xc_handle, domid)) < 0 )
     {
         PERROR("Could not find total pages for domain");
         goto error_out;
     }
 
-    if ( (image = read_kernel_image(image_name, &image_size)) == NULL )
+    if ( (image = xc_read_kernel_image(image_name, &image_size)) == NULL )
         goto error_out;
 
     if ( (ramdisk_name != NULL) && (strlen(ramdisk_name) != 0) )
@@ -455,7 +352,7 @@ int xc_linux_build(int xc_handle,
             goto error_out;
         }
 
-        initrd_size = get_filesz(initrd_fd);
+        initrd_size = xc_get_filesz(initrd_fd);
 
         if ( (initrd_gfd = gzdopen(initrd_fd, "rb")) == NULL )
         {
@@ -472,6 +369,7 @@ int xc_linux_build(int xc_handle,
 
     op.cmd = DOM0_GETDOMAININFO;
     op.u.getdomaininfo.domain = (domid_t)domid;
+    op.u.getdomaininfo.exec_domain = 0;
     op.u.getdomaininfo.ctxt = ctxt;
     if ( (do_dom0_op(xc_handle, &op) < 0) || 
          ((u16)op.u.getdomaininfo.domain != domid) )
@@ -486,12 +384,12 @@ int xc_linux_build(int xc_handle,
         goto error_out;
     }
 
-    if ( setup_guestos(xc_handle, domid, image, image_size, 
+    if ( setup_guest(xc_handle, domid, image, image_size, 
                        initrd_gfd, initrd_size, nr_pages, 
                        &vstartinfo_start, &vkern_entry,
                        ctxt, cmdline,
                        op.u.getdomaininfo.shared_info_frame,
-                       control_evtchn, flags) < 0 )
+                       control_evtchn, flags, vcpus) < 0 )
     {
         ERROR("Error constructing guest OS");
         goto error_out;
@@ -508,19 +406,19 @@ int xc_linux_build(int xc_handle,
 
     /*
      * Initial register values:
-     *  DS,ES,FS,GS = FLAT_GUESTOS_DS
-     *       CS:EIP = FLAT_GUESTOS_CS:start_pc
-     *       SS:ESP = FLAT_GUESTOS_DS:start_stack
+     *  DS,ES,FS,GS = FLAT_KERNEL_DS
+     *       CS:EIP = FLAT_KERNEL_CS:start_pc
+     *       SS:ESP = FLAT_KERNEL_DS:start_stack
      *          ESI = start_info
      *  [EAX,EBX,ECX,EDX,EDI,EBP are zero]
      *       EFLAGS = IF | 2 (bit 1 is reserved and should always be 1)
      */
-    ctxt->cpu_ctxt.ds = FLAT_GUESTOS_DS;
-    ctxt->cpu_ctxt.es = FLAT_GUESTOS_DS;
-    ctxt->cpu_ctxt.fs = FLAT_GUESTOS_DS;
-    ctxt->cpu_ctxt.gs = FLAT_GUESTOS_DS;
-    ctxt->cpu_ctxt.ss = FLAT_GUESTOS_DS;
-    ctxt->cpu_ctxt.cs = FLAT_GUESTOS_CS;
+    ctxt->cpu_ctxt.ds = FLAT_KERNEL_DS;
+    ctxt->cpu_ctxt.es = FLAT_KERNEL_DS;
+    ctxt->cpu_ctxt.fs = FLAT_KERNEL_DS;
+    ctxt->cpu_ctxt.gs = FLAT_KERNEL_DS;
+    ctxt->cpu_ctxt.ss = FLAT_KERNEL_DS;
+    ctxt->cpu_ctxt.cs = FLAT_KERNEL_CS;
     ctxt->cpu_ctxt.eip = vkern_entry;
     ctxt->cpu_ctxt.esp = vstartinfo_start + 2*PAGE_SIZE;
     ctxt->cpu_ctxt.esi = vstartinfo_start;
@@ -533,7 +431,7 @@ int xc_linux_build(int xc_handle,
     for ( i = 0; i < 256; i++ )
     {
         ctxt->trap_ctxt[i].vector = i;
-        ctxt->trap_ctxt[i].cs     = FLAT_GUESTOS_CS;
+        ctxt->trap_ctxt[i].cs     = FLAT_KERNEL_CS;
     }
     ctxt->fast_trap_idx = 0;
 
@@ -544,16 +442,16 @@ int xc_linux_build(int xc_handle,
     ctxt->gdt_ents = 0;
 
     /* Ring 1 stack is the initial stack. */
-    ctxt->guestos_ss  = FLAT_GUESTOS_DS;
-    ctxt->guestos_esp = vstartinfo_start + 2*PAGE_SIZE;
+    ctxt->kernel_ss  = FLAT_KERNEL_DS;
+    ctxt->kernel_esp = vstartinfo_start + 2*PAGE_SIZE;
 
     /* No debugging. */
     memset(ctxt->debugreg, 0, sizeof(ctxt->debugreg));
 
     /* No callback handlers. */
-    ctxt->event_callback_cs     = FLAT_GUESTOS_CS;
+    ctxt->event_callback_cs     = FLAT_KERNEL_CS;
     ctxt->event_callback_eip    = 0;
-    ctxt->failsafe_callback_cs  = FLAT_GUESTOS_CS;
+    ctxt->failsafe_callback_cs  = FLAT_KERNEL_CS;
     ctxt->failsafe_callback_eip = 0;
 
     memset( &launch_op, 0, sizeof(launch_op) );
@@ -660,10 +558,10 @@ static int parseelfimage(char *elfbase,
         phdr = (Elf_Phdr *)(elfbase + ehdr->e_phoff + (h*ehdr->e_phentsize));
         if ( !is_loadable_phdr(phdr) )
             continue;
-        if ( phdr->p_vaddr < kernstart )
-            kernstart = phdr->p_vaddr;
-        if ( (phdr->p_vaddr + phdr->p_memsz) > kernend )
-            kernend = phdr->p_vaddr + phdr->p_memsz;
+        if ( phdr->p_paddr < kernstart )
+            kernstart = phdr->p_paddr;
+        if ( (phdr->p_paddr + phdr->p_memsz) > kernend )
+            kernend = phdr->p_paddr + phdr->p_memsz;
     }
 
     if ( (kernstart > kernend) || 
@@ -713,7 +611,7 @@ loadelfimage(
         
         for ( done = 0; done < phdr->p_filesz; done += chunksz )
         {
-            pa = (phdr->p_vaddr + done) - vstart;
+            pa = (phdr->p_paddr + done) - vstart;
             va = xc_map_foreign_range(
                 xch, dom, PAGE_SIZE, PROT_WRITE, parray[pa>>PAGE_SHIFT]);
             chunksz = phdr->p_filesz - done;
@@ -726,7 +624,7 @@ loadelfimage(
 
         for ( ; done < phdr->p_memsz; done += chunksz )
         {
-            pa = (phdr->p_vaddr + done) - vstart;
+            pa = (phdr->p_paddr + done) - vstart;
             va = xc_map_foreign_range(
                 xch, dom, PAGE_SIZE, PROT_WRITE, parray[pa>>PAGE_SHIFT]);
             chunksz = phdr->p_memsz - done;
@@ -738,27 +636,6 @@ loadelfimage(
     }
 
     return 0;
-}
-
-static void
-map_memcpy(
-    unsigned long dst, char *src, unsigned long size,
-    int xch, u32 dom, unsigned long *parray, unsigned long vstart)
-{
-    char *va;
-    unsigned long chunksz, done, pa;
-
-    for ( done = 0; done < size; done += chunksz )
-    {
-        pa = dst + done - vstart;
-        va = xc_map_foreign_range(
-            xch, dom, PAGE_SIZE, PROT_WRITE, parray[pa>>PAGE_SHIFT]);
-        chunksz = size - done;
-        if ( chunksz > (PAGE_SIZE - (pa & (PAGE_SIZE-1))) )
-            chunksz = PAGE_SIZE - (pa & (PAGE_SIZE-1));
-        memcpy(va + (pa & (PAGE_SIZE-1)), src + done, chunksz);
-        munmap(va, PAGE_SIZE);
-    }
 }
 
 #define ELFROUND (ELFSIZE / 8)
@@ -811,7 +688,7 @@ loadelfsymtab(
              (shdr[h].sh_type == SHT_SYMTAB) )
         {
             if ( parray != NULL )
-                map_memcpy(maxva, elfbase + shdr[h].sh_offset, shdr[h].sh_size,
+                xc_map_memcpy(maxva, elfbase + shdr[h].sh_offset, shdr[h].sh_size,
                            xch, dom, parray, dsi->v_start);
 
             /* Mangled to be based on ELF header location. */
@@ -843,7 +720,7 @@ loadelfsymtab(
         sym_ehdr->e_shstrndx = SHN_UNDEF;
 
         /* Copy total length, crafted ELF header and section header table */
-        map_memcpy(symva, p, sizeof(int) + sizeof(Elf_Ehdr) +
+        xc_map_memcpy(symva, p, sizeof(int) + sizeof(Elf_Ehdr) +
                    ehdr->e_shnum * sizeof(Elf_Shdr), xch, dom, parray,
                    dsi->v_start);
     }
