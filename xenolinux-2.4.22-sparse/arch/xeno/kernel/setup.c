@@ -155,8 +155,7 @@ static void __init parse_mem_cmdline (char ** cmdline_p)
 
 void __init setup_arch(char **cmdline_p)
 {
-    unsigned long start_pfn, max_pfn, max_low_pfn;
-    unsigned long bootmap_size;
+    unsigned long bootmap_size, start_pfn, max_low_pfn;
     unsigned long i;
 
     extern void hypervisor_callback(void);
@@ -1087,12 +1086,24 @@ static void stop_task(void *unused)
         pfn_to_mfn_frame_list[j++] = 
             virt_to_machine(&phys_to_machine_mapping[i]) >> PAGE_SHIFT;
 
+    /*
+     * NB. This is /not/ a full dev_close() as that loses route information!
+     * Instead we do essentialy the same as dev_close() but without notifying
+     * various registered subsystems about the NETDEV_DOWN event.
+     */
     rtnl_lock();
     for ( i = 0; i < 10; i++ )
     {
         sprintf(name, "eth%d", i);
-        if ( (dev = __dev_get_by_name(name)) != NULL )
-            dev_close(dev);
+        if ( ((dev = __dev_get_by_name(name)) != NULL) &&
+             (dev->flags & IFF_UP) )
+        {
+            dev_deactivate(dev);
+            clear_bit(__LINK_STATE_START, &dev->state);
+            if ( dev->stop != NULL )
+                dev->stop(dev);
+            dev->flags &= ~IFF_UP;
+        }
     }
     rtnl_unlock();
 
@@ -1117,12 +1128,28 @@ static void stop_task(void *unused)
 
     blkdev_resume();
 
+    /*
+     * We now do the opposite of the network suspend code. Basically it's
+     * dev_open() but without notifying anyone about NETDEV_UP.
+     */
     rtnl_lock();
     for ( i = 0; i < 10; i++ )
     {
         sprintf(name, "eth%d", i);
-        if ( (dev = __dev_get_by_name(name)) != NULL )
-            dev_open(dev);
+        if ( ((dev = __dev_get_by_name(name)) != NULL) &&
+             !(dev->flags & IFF_UP) )
+        {
+            set_bit(__LINK_STATE_START, &dev->state);
+            if ( (dev->open == NULL) || (dev->open(dev) == 0) )
+            {
+                dev->flags |= IFF_UP;
+                dev_activate(dev);
+            }
+            else
+            {
+                clear_bit(__LINK_STATE_START, &dev->state);
+            } 
+        }
     }
     rtnl_unlock();
 

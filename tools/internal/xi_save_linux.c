@@ -17,6 +17,13 @@ static unsigned long *pfn_to_mfn_table;
 /* A table mapping each current MFN to its canonical PFN. */
 static unsigned long *mfn_to_pfn_table;
 
+/* This may allow us to create a 'quiet' command-line option, if necessary. */
+#define verbose_printf(_f, _a...) \
+    do {                          \
+        printf( _f , ## _a );     \
+        fflush(stdout);           \
+    } while ( 0 )
+
 static int devmem_fd;
 
 static int init_pfn_mapper(void)
@@ -98,8 +105,9 @@ static int checked_write(int fd, const void *buf, size_t count)
 int main(int argc, char **argv)
 {
     dom0_op_t op;
-    int rc = 1, i;
+    int rc = 1, i, j;
     unsigned long mfn, dom;
+    unsigned int prev_pc, this_pc;
 
     /* Remember if we stopped the guest, so we can restart it on exit. */
     int we_stopped_it = 0;
@@ -148,7 +156,7 @@ int main(int argc, char **argv)
     }
 
     filename = argv[2];
-    if ( (fd = open(name, O_CREAT|O_EXCL|O_RDWR)) == -1 )
+    if ( (fd = open(filename, O_CREAT|O_EXCL|O_WRONLY, 0644)) == -1 )
     {
         PERROR("Could not open file for writing");
         return 1;
@@ -255,15 +263,14 @@ int main(int argc, char **argv)
             goto out;
         }
 
-        pfn_to_mfn_table[i] = mfn;
-
         /* Did we map this MFN already? That would be invalid! */
         if ( MFN_IS_IN_PSEUDOPHYS_MAP(mfn) )
         {
             ERROR("A machine frame appears twice in pseudophys space");
             goto out;
         }
-        
+
+        pfn_to_mfn_table[i] = mfn;
         mfn_to_pfn_table[mfn] = i;
 
         /* Query page type by MFN, but store it by PFN. */
@@ -320,9 +327,19 @@ int main(int argc, char **argv)
     }
     unmap_pfn(ppage);
 
+    verbose_printf("Saving memory pages:   0%%");
+
     /* Now write out each data page, canonicalising page tables as we go... */
+    prev_pc = 0;
     for ( i = 0; i < srec.nr_pfns; i++ )
     {
+        this_pc = (i * 100) / srec.nr_pfns;
+        if ( (this_pc - prev_pc) >= 5 )
+        {
+            verbose_printf("\b\b\b\b%3d%%", this_pc);
+            prev_pc = this_pc;
+        }
+
         mfn = pfn_to_mfn_table[i];
 
         ppage = map_pfn(mfn);
@@ -331,17 +348,20 @@ int main(int argc, char **argv)
 
         if ( (pfn_type[i] == L1TAB) || (pfn_type[i] == L2TAB) )
         {
-            for ( i = 0; i < 1024; i++ )
+            for ( j = 0; 
+                  j < ((pfn_type[i] == L2TAB) ? 
+                       (HYPERVISOR_VIRT_START >> L2_PAGETABLE_SHIFT) : 1024); 
+                  j++ )
             {
-                if ( !(page[i] & _PAGE_PRESENT) ) continue;
-                mfn = page[i] >> PAGE_SHIFT;
+                if ( !(page[j] & _PAGE_PRESENT) ) continue;
+                mfn = page[j] >> PAGE_SHIFT;
                 if ( !MFN_IS_IN_PSEUDOPHYS_MAP(mfn) )
                 {
                     ERROR("Frame number in pagetable page is invalid");
                     goto out;
                 }
-                page[i] &= PAGE_SIZE - 1;
-                page[i] |= mfn_to_pfn_table[mfn] << PAGE_SHIFT;
+                page[j] &= PAGE_SIZE - 1;
+                page[j] |= mfn_to_pfn_table[mfn] << PAGE_SHIFT;
             }
         }
 
@@ -351,6 +371,8 @@ int main(int argc, char **argv)
             goto out;
         }
     }
+
+    verbose_printf("\b\b\b\b100%%\nMemory saved.\n");
 
     /* Success! */
     rc = 0;

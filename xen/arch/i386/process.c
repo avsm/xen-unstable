@@ -248,7 +248,9 @@ void switch_to(struct task_struct *prev_p, struct task_struct *next_p)
      * then we'll #GP.
      */
     if ( (stack_ec->cs & 3) == 0 )
-        stack_ec->cs = 0;
+        stack_ec->cs = FLAT_RING1_CS;
+    if ( (stack_ec->ss & 3) == 0 )
+        stack_ec->ss = FLAT_RING1_DS;
 
     unlazy_fpu(prev_p);
 
