@@ -19,7 +19,7 @@
 
 {\Large Xen is Copyright (c) 2004, The Xen Team} \\[3mm]
 {\Large University of Cambridge, UK} \\[20mm]
-{\large Last updated on 30th July, 2004}
+{\large Last updated on 12th October, 2004}
 \end{tabular}
 \vfill
 \end{center}
@@ -96,7 +96,9 @@ isolation between the various OS instances and trying out multiple
 distros.
 
 The Windows XP port is only available to those who have signed the
-Microsoft Academic Source License.
+Microsoft Academic Source License.  Publically available XP support
+will not be available for the foreseeable future (this may change when
+Intel's Vanderpool Technology becomes available).
 
 Possible usage scenarios for Xen include:
 \begin{description}
@@ -277,8 +279,10 @@ for additional Xend logging functionality.
 
 \section{Install Bitkeeper (Optional)}
 
-To fetch a local copy, first download the BitKeeper tools at: \\ {\tt
-http://www.bitmover.com/download }
+To fetch a local copy, first download the BitKeeper tools.
+Download instructions must be obtained by filling out the provided
+form at: \\ {\tt
+http://www.bitmover.com/cgi-bin/download.cgi }
 
 The BitKeeper install program is designed to be run with X.  If X is
 not available, you can specify the install directory on the command
@@ -308,7 +312,7 @@ Once you have cloned the repository, you can update to the newest
 changes to the repository by running:
 \begin{verbatim}
 # cd xen-2.0.bk # to change into the local repository
-# bk pull        # to update the repository
+# bk pull       # to update the repository
 \end{verbatim}
 
 \subsection{Without Bitkeeper}
@@ -316,7 +320,7 @@ changes to the repository by running:
 The Xen source tree is also available in gzipped tarball form from the
 Xen downloads page:\\
 {\tt http://www.cl.cam.ac.uk/Research/SRG/netos/xen/downloads.html}.
-Prebuilt tarballs are also available but are very large.
+Prebuilt tarballs are also available from this page but are very large.
 
 \section{The distribution}
 
@@ -327,8 +331,8 @@ The Xen source code repository is structured as follows:
   control libraries
 \item[\path{xen/}] The Xen hypervisor itself.
 \item[\path{linux-2.4.27-xen/}] Linux 2.4 support for Xen
-\item[\path{linux-2.6.7-xen/}] Linux 2.6 support for Xen
-\item[\path{doc/}] various documentation files for users and developers
+\item[\path{linux-2.6.8.1-xen/}] Linux 2.6 support for Xen
+\item[\path{docs/}] various documentation files for users and developers
 \item[\path{extras/}] currently this contains the Mini OS, aimed at developers
 \end{description}
 
@@ -340,8 +344,7 @@ following:
 \begin{itemize}
 \item Build Xen
 \item Build the control tools, including Xend
-\item Download the ebtables patch for Linux 2.4
-\item Download (if necessary) and unpack the Linux 2.4 source code,
+\item Download (if necessary) and unpack the Linux 2.6 source code,
       and patch it for use with Xen
 \item Build a Linux kernel to use in domain 0 and a smaller
       unprivileged kernel, which can optionally be used for
@@ -354,7 +357,7 @@ more complicated. The makefile needs a `pristine' linux kernel tree
 which it will then add the Xen architecture files to. You can tell the
 makefile the location of the appropriate linux compressed tar file by
 setting the LINUX\_SRC environment variable, e.g. \\
-\verb!# LINUX_SRC=/tmp/linux-2.4.27.tar.gz make world! \\ or by
+\verb!# LINUX_SRC=/tmp/linux-2.6.8.1.tar.bz2 make world! \\ or by
 placing the tar file somewhere in the search path of {\tt LINUX\_SRC\_PATH}
 which defaults to ``{\tt .:..}". If the makefile can't find a suitable
 kernel tar file it attempts to download it from kernel.org (this won't
@@ -363,20 +366,33 @@ work if you're behind a firewall).
 After untaring the pristine kernel tree, the makefile uses the {\tt
 mkbuildtree} script to add the Xen patches the kernel. It then builds
 two different XenLinux images, one with a ``-xen0'' extension which
-contains hardware device drivers and is intended to be used in the
-first virtual machine (``domain 0''), and one with a ``-xenU''
-extension that just contains virtual-device drivers.
+contains hardware device drivers and drivers for Xen's virtual devices,
+and one with a ``-xenU'' extension that just contains the virtual ones.
 
-The procedure is similar to build the Linux 2.6 port: \\
-\verb!# LINUX_SRC=/path/to/linux2.6/source make linux26!
+The procedure is similar to build the Linux 2.4 port: \\
+\verb!# LINUX_SRC=/path/to/linux2.4/source make linux24!
 
 In both cases, if you have an SMP machine you may wish to give the
 {\tt '-j4'} argument to make to get a parallel build.
 
+XXX Insert details on customising the kernel to be built.
+i.e. merging config files
+
+If you have an existing kernel configuration that you would like to
+use for domain 0, you should copy it to
+install/boot/config-2.6.8.1-xen0.  During the first build, you may be
+asked about some Xen-specific options.
+
+\framebox{\parbox{5in}{
+{\bf Distro specific:} \\
+{\it Gentoo} --- if not using udev (most installations, currently), you'll need
+to enable devfs and devfs mount at boot time in the xen0 config.
+}}
+
 The files produced by the build process are stored under the
 \path{install/} directory.  To install them in their default
 locations, do: \\
-\verb_# make install_\\
+\verb_# make install_
 
 Alternatively, users with special installation requirements may wish
 to install them manually by copying file to their appropriate
@@ -385,8 +401,8 @@ destinations.
 Take a look at the files in \path{install/boot/}:
 \begin{itemize}
 \item \path{install/boot/xen.gz} The Xen 'kernel'
-\item \path{install/boot/vmlinuz-2.4.27-xen0}  Domain 0 XenLinux kernel
-\item \path{install/boot/vmlinuz-2.4.27-xenU}  Unprivileged XenLinux kernel
+\item \path{install/boot/vmlinuz-2.6.8.1-xen0}  Domain 0 XenLinux kernel
+\item \path{install/boot/vmlinuz-2.6.8.1-xenU}  Unprivileged XenLinux kernel
 \end{itemize}
 
 The difference between the two Linux kernels that are built is due to
@@ -414,21 +430,33 @@ This file is sometimes called \path{menu.lst}, depending on your
 distribution.  The entry should look something like the following:
 
 \begin{verbatim}
-title Xen 2.0 / XenLinux 2.4.27
+title Xen 2.0 / XenLinux 2.6.8.1
   kernel /boot/xen.gz dom0_mem=131072 com1=115200,8n1
-  module /boot/vmlinuz-2.4.27-xen0 root=/dev/sda4 ro console=tty0 console=ttyS0
+  module /boot/vmlinuz-2.6.8.1-xen0 root=/dev/sda4 ro console=tty0 console=ttyS0
 \end{verbatim}
 
 The first line of the configuration (kernel...) tells GRUB where to
-find Xen itself and what boot parameters should be passed to it.  The
-second line of the configuration describes the location of the
+find Xen itself and what boot parameters should be passed to it (in
+this case, setting domain 0's memory allocation and the settings for
+the serial port).
+
+The second line of the configuration describes the location of the
 XenLinux kernel that Xen should start and the parameters that should
-be passed to it.
+be passed to it (these are standard Linux parameters, identifying the
+root device and specifying it be initially mounted read only and
+instructing that console output be sent both to the screen and to the
+serial port).
 
 As always when installing a new kernel, it is recommended that you do
-not remove the original contents of \path{grub.conf} --- you may want
+not remove the original contents of \path{menu.lst} --- you may want
 to boot up with your old Linux kernel in future, particularly if you
 have problems.
+
+\framebox{\parbox{5in}{
+{\bf Distro specific:} \\
+{\it SuSE} --- Omit the {\tt ro} option from the XenLinux kernel
+command line, since the partition won't be remounted rw during boot.
+}}
 
 \subsection{Serial Console}
 
@@ -438,6 +466,22 @@ designed to make this procedure the same as configuring a normal
 serial console.  Add the line:
 
 {\tt c:2345:respawn:/sbin/mingetty ttyS0}
+
+XXX insert distro specific stuff in here (maybe)
+Suse 9.1: different boot scheme (/etc/init.d/)
+
+\subsection{TLS Libraries}
+
+Users of the XenLinux 2.6 kernel should disable Thread Local Storage
+(e.g. by doing a {\tt mv /lib/tls /lib/tls.disabled}) before
+attempting to run with a XenLinux kernel.  You can always reenable it
+my restoring the directory to its original location (i.e. {\tt mv
+  /lib/tls.disabled /lib/tls}).
+
+The TLS implementation uses segmentation in a way that is not
+permissable under Xen.  If TLS is not disabled, an emulation mode is
+used within Xen which reduces performance substantially and is not
+guaranteed to work perfectly.
 
 \section{Test the new install}
 
@@ -523,7 +567,7 @@ receive its IP address from a DHCP server. [i.e. {\tt dhcp=''dhcp''}]
 
 You may also want to edit the {\bf vif} variable in order to choose
 the MAC address of the virtual ethernet interface yourself.  For
-example: \\ \verb_vif = [`mac=00:06:AA:F6:BB:B3']_\\ If you do not set
+example: \\ \verb_vif = ['mac=00:06:AA:F6:BB:B3']_\\ If you do not set
 this variable, Xend will automatically generate a random MAC address
 from an unused range.
 
@@ -542,6 +586,38 @@ after creation.  The {\tt vmid=1} sets the {\tt vmid} variable used in
 the {\tt xmdefconfig} file.  The tool uses the
 \path{/etc/xen/xmdefconfig} file, since no custom configuration file
 was specified on the command line.
+
+\section{Starting / Stopping domains automatically}
+
+It is possible to have certain domains start automatically at boot
+time and to have dom0 wait for all running domains to shutdown before
+it shuts down the system.
+
+To specify a domain is to start at boot-time, place its
+configuration file (or a link to it) under /etc/xen/auto/.
+
+A Sys-V style init script for RedHat and LSB-compliant systems is
+provided and will be automatically copied to /etc/init.d/ during
+install.  You can then enable it in the appriate way for your
+distribution.
+
+For instance, on RedHat:
+
+\verb_# chkconfig --add xendomains_
+
+By default, this will start the boot-time domains in runlevels 3, 4
+and 5.
+
+You can also use the "service" command to run this script manually, e.g:
+
+\verb_# service xendomains start_
+
+Starts all the domains with config files under /etc/xen/auto/.
+
+\verb_# service xendomains stop_
+
+Shuts down ALL running Xen domains.
+
 
 \chapter{Domain management tasks}
 
@@ -609,14 +685,14 @@ For example, to create a 2GB sparse file-backed virtual block device
 
 \verb_# dd if=/dev/zero of=vm1disk bs=1k seek=2048k count=1_
 
-Choose a free loop back device, and attach file: \\
-\verb_# losetup /dev/loop0 vm1disk_ \\
-Make a file system on the loop back device: \\
-\verb_# mkfs -t ext3 /dev/loop0_
+Make a file system in the disk file: \\
+\verb_# mkfs -t ext3 vm1disk_
+
+(when the tool asks for confirmation, answer `y')
 
 Populate the file system e.g. by copying from the current root:
 \begin{verbatim}
-# mount /dev/loop0 /mnt
+# mount vm1disk /mnt -o loop
 # cp -ax / /mnt
 \end{verbatim}
 Tailor the file system by editing \path{/etc/fstab},
@@ -626,19 +702,15 @@ would edit \path{/mnt/etc/fstab} instead of \path{/etc/fstab} ).  For
 this example put \path{/dev/sda1} to root in fstab.
 
 Now unmount (this is important!):\\
-\verb_# umount /dev/loop0_
+\verb_# umount /mnt_
+
+And detach the file from its loop device:
 
 In the configuration file set:\\
-\verb_disk = [`phy:loop0,sda1,w']_
+\verb_disk = ['file:/full/path/to/vm1disk,sda1,w']_
 
 As the virtual machine writes to its `disk', the sparse file will be
 filled in and consume more space up to the original 2GB.
-
-{\em NB.} You will need to use {\tt losetup} to bind the file to
-\path{/dev/loop0} (or whatever loopback device you chose) each time
-you reboot domain 0.  In the near future, Xend will track which loop
-devices are currently free and do binding itself, making this manual
-effort unnecessary.
 
 \section{LVM-backed virtual block devices}
 
@@ -1111,13 +1183,13 @@ events within Xen for collection by control
 software.  For more information see the chapter on debugging,
 in the Xen Interface Manual.
 
-\chapter{Xen boot options}
+\chapter{Boot options}
+
+\section{Xen boot options}
 
 These options are used to configure Xen's behaviour at runtime.  They
 should be appended to Xen's command line, either manually or by
 editing \path{grub.conf}.
-
-\section{List of options}
 
 {\bf ignorebiostables }\\
  Disable parsing of BIOS-supplied tables. This may help with some
@@ -1218,6 +1290,16 @@ domain).  Device IDs should be given in hex format.  Bridge devices do
 not need to be hidden --- they are hidden implicitly, since guest OSes
 do not need to configure them.
 
+\section{XenLinux Options}
+
+{\bf xencons=xxx}
+Specify the device node to
+which the Xen virtual console driver is attached: \\
+ 'xencons=off': disable virtual console \\
+ 'xencons=tty': attach console to /dev/tty1 (tty0 at boot-time) \\
+ 'xencons=ttyS': attach console to /dev/ttyS0\\
+The default is ttyS for dom0 and tty for all other domains.
+
 \chapter{Further Support}
 
 If you have questions that are not answered by this manual, the
@@ -1255,11 +1337,166 @@ discussions and requests for help.  Subscribe at: \\
 \item[xen-announce@lists.sourceforge.net] Used for announcements only.
 Subscribe at: \\
 {\tt http://lists.sourceforge.net/mailman/listinfo/xen-announce}
+\item[xen-changelog@lists.sourceforge.net]  Changelog feed
+from the unstable and 2.0 trees - developer oriented.  Subscribe at: \\
+{\tt http://lists.sourceforge.net/mailman/listinfo/xen-changelog}
 \end{description}
 
 Although there is no specific user support list, the developers try to
 assist users who post on xen-devel.  As the bulk of traffic on this
 list increases, a dedicated user support list may be introduced.
+
+\appendix
+
+\chapter{Installing Debian}
+
+The Debian project provides a tool called {\tt debootstrap} which
+allows a base Debian system to be installed into a filesystem without
+requiring the host system to have any Debian-specific software (such
+as {\tt apt}).
+
+Here's some info how to install Debian 3.1 (Sarge) for an unprivileged
+Xen domain:
+
+\begin{enumerate}
+\item Set up Xen 2.0 and test that it's working, as described earlier in
+      this manual.
+
+\item Create disk images for root-fs and swap (alternatively, you might create
+      dedicated partitions, LVM logical volumes, etc. if that suits your setup).
+\begin{verbatim}  
+dd if=/dev/zero of=/path/diskimage bs=1024k count=size_in_mbytes
+dd if=/dev/zero of=/path/swapimage bs=1024k count=size_in_mbytes
+\end{verbatim}
+      If you're going to use this filesystem / diskimage only as a `template' for
+      other vm diskimages, something like 300 MB should be enough.. (of course it 
+      depends what kind of packages you are planning to install to the template)
+
+\item Create filesystem and swap to the images
+\begin{verbatim}
+mkfs.ext3 /path/diskimage
+mkswap /path/swapimage
+\end{verbatim}
+
+\item Mount the diskimage for installation
+\begin{verbatim}
+mount -o loop /path/diskimage /mnt/disk
+\end{verbatim}
+
+\item Install {\tt debootstrap}
+
+Make sure you have debootstrap installed on the host. If you are
+running Debian sarge (3.1 / testing) or unstable you can install it by
+running {\tt apt-get install debootstrap}.  Otherwise, it can be
+downloaded from the Debian project website.
+
+\item Install debian base to the diskimage:
+\begin{verbatim}
+debootstrap --arch i386 sarge /mnt/disk  \
+            http://ftp.<countrycode>.debian.org/debian
+\end{verbatim}
+
+You can use any other Debian http/ftp mirror you want.
+
+\item When debootstrap completes successfully, modify settings:
+\begin{verbatim}
+chroot /mnt/disk /bin/bash
+\end{verbatim}
+
+Edit the following files using vi or nano and make needed settings:
+\begin{verbatim}
+/etc/hostname
+/etc/hosts
+/etc/resolv.conf
+/etc/network/interfaces
+/etc/networks
+\end{verbatim}
+
+Set up access to the services, edit:
+\begin{verbatim}
+/etc/hosts.deny
+/etc/hosts.allow
+/etc/inetd.conf
+\end{verbatim}
+
+Add Debian mirror to:   
+\begin{verbatim}
+/etc/apt/sources.list
+\end{verbatim}
+
+And create fstab like this:
+\begin{verbatim}
+/dev/sda1       /       ext3    errors=remount-ro       0       1
+/dev/sda2       none    swap    sw                      0       0
+proc            /proc   proc    defaults                0       0
+\end{verbatim}
+
+Logout
+
+\item      Umount the diskimage
+\begin{verbatim}
+umount /mnt/disk
+\end{verbatim}
+
+\item      Create Xen 2.0 configuration file for the new domain. You can use the
+        example-configurations coming with xen as a template.
+
+        Make sure you have the following set up:
+\begin{verbatim}
+disk = [ 'file:/path/diskimage,sda1,w', 'file:/path/swapimage,sda2,w' ]
+root = "/dev/sda1 ro"
+\end{verbatim}
+
+\item Start the new domain
+\begin{verbatim}
+xm create -f domain_config_file
+\end{verbatim}
+
+Check that the new domain is running:
+\begin{verbatim}
+xm list
+\end{verbatim}
+
+\item   Attach to the console of the new domain.
+        You should see something like this when starting the new domain:
+
+\begin{verbatim}
+Started domain testdomain2, console on port 9626
+\end{verbatim}
+        
+        There you can see the ID of the console: 26. You can also
+        list the consoles with {\tt xm consoles"}. (ID is the last two digits of
+        the portnumber.)
+
+        Attach to the console:
+
+\begin{verbatim}
+xm console 26
+\end{verbatim}
+
+        or by telnetting to the port 9626 of localhost (the xm console progam works better).
+
+\item   Log in and run base-config
+
+        As a default there's no password for the root.
+
+        Check that everything looks OK, and the system started without
+        errors. Check that the swap is active, and the network settings are
+        correct.
+
+        Run {\tt /usr/sbin/base-config} to set up the Debian settings.
+
+        Set up the password for root using passwd.
+
+\item     Done. You can exit the console by pressing {\tt Ctrl + ]}
+
+\end{enumerate}
+
+If you need to create new domains, you can just copy the contents of
+the `template'-image to the new disk images, either by mounting the
+template and the new image, and using {\tt cp -a} or {\tt tar} or by
+simply copying the image file.  Once this is done, modify the
+image-specific settings (hostname, network settings, etc).
 
 \end{document}
 
