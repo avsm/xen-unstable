@@ -52,6 +52,10 @@ union xen_start_info_union
 extern union xen_start_info_union xen_start_info_union;
 #define xen_start_info (xen_start_info_union.xen_start_info)
 
+/* arch/xen/kernel/evtchn.c */
+/* Force a proper event-channel callback from Xen. */
+void force_evtchn_callback(void);
+
 /* arch/xen/kernel/process.c */
 void xen_cpu_idle (void);
 
@@ -66,8 +70,6 @@ void lgdt_finish(void);
  * NB. ptr values should be PHYSICAL, not MACHINE. 'vals' should be already
  * be MACHINE addresses.
  */
-
-extern unsigned int mmu_update_queue_idx;
 
 void queue_l1_entry_update(pte_t *ptr, unsigned long val);
 void queue_l2_entry_update(pmd_t *ptr, pmd_t val);
@@ -93,14 +95,28 @@ void xen_set_ldt(unsigned long ptr, unsigned long bytes);
 void xen_machphys_update(unsigned long mfn, unsigned long pfn);
 
 void _flush_page_update_queue(void);
-static inline int flush_page_update_queue(void)
-{
-    unsigned int idx = mmu_update_queue_idx;
-    if ( idx != 0 ) _flush_page_update_queue();
-    return idx;
-}
-#define xen_flush_page_update_queue() (_flush_page_update_queue())
-#define XEN_flush_page_update_queue() (_flush_page_update_queue())
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,0)
+/* 
+** XXX SMH: 2.4 doesn't have percpu.h (or support SMP guests) so just 
+** include sufficient #defines to allow the below to build. 
+*/
+#define DEFINE_PER_CPU(type, name) \
+    __typeof__(type) per_cpu__##name
+
+#define per_cpu(var, cpu)           (*((void)cpu, &per_cpu__##var))
+#define __get_cpu_var(var)          per_cpu__##var
+#define DECLARE_PER_CPU(type, name) extern __typeof__(type) per_cpu__##name
+
+#define EXPORT_PER_CPU_SYMBOL(var) EXPORT_SYMBOL(per_cpu__##var)
+#define EXPORT_PER_CPU_SYMBOL_GPL(var) EXPORT_SYMBOL_GPL(per_cpu__##var)
+#endif /* linux < 2.6.0 */
+
+#define flush_page_update_queue() do {				\
+    DECLARE_PER_CPU(unsigned int, mmu_update_queue_idx);	\
+    if (per_cpu(mmu_update_queue_idx, smp_processor_id()))	\
+	_flush_page_update_queue();				\
+} while (0)
 void MULTICALL_flush_page_update_queue(void);
 
 #ifdef CONFIG_XEN_PHYSDEV_ACCESS
@@ -198,12 +214,16 @@ HYPERVISOR_set_callbacks(
 
 static inline int
 HYPERVISOR_fpu_taskswitch(
-    void)
+    int set)
 {
     int ret;
+    unsigned long ign;
+
     __asm__ __volatile__ (
         TRAP_INSTR
-        : "=a" (ret) : "0" (__HYPERVISOR_fpu_taskswitch) : "memory" );
+        : "=a" (ret), "=b" (ign)
+        : "0" (__HYPERVISOR_fpu_taskswitch), "1" (set)
+        : "memory" );
 
     return ret;
 }
@@ -440,7 +460,7 @@ HYPERVISOR_multicall(
 
 static inline int
 HYPERVISOR_update_va_mapping(
-    unsigned long page_nr, pte_t new_val, unsigned long flags)
+    unsigned long va, pte_t new_val, unsigned long flags)
 {
     int ret;
     unsigned long ign1, ign2, ign3;
@@ -449,13 +469,13 @@ HYPERVISOR_update_va_mapping(
         TRAP_INSTR
         : "=a" (ret), "=b" (ign1), "=c" (ign2), "=d" (ign3)
 	: "0" (__HYPERVISOR_update_va_mapping), 
-          "1" (page_nr), "2" ((new_val).pte_low), "3" (flags)
+          "1" (va), "2" ((new_val).pte_low), "3" (flags)
 	: "memory" );
 
     if ( unlikely(ret < 0) )
     {
         printk(KERN_ALERT "Failed update VA mapping: %08lx, %08lx, %08lx\n",
-               page_nr, (new_val).pte_low, flags);
+               va, (new_val).pte_low, flags);
         BUG();
     }
 
@@ -534,7 +554,7 @@ HYPERVISOR_grant_table_op(
     __asm__ __volatile__ (
         TRAP_INSTR
         : "=a" (ret), "=b" (ign1), "=c" (ign2), "=d" (ign3)
-	: "0" (__HYPERVISOR_grant_table_op), "1" (cmd), "2" (count), "3" (uop)
+	: "0" (__HYPERVISOR_grant_table_op), "1" (cmd), "2" (uop), "3" (count)
 	: "memory" );
 
     return ret;
@@ -542,7 +562,7 @@ HYPERVISOR_grant_table_op(
 
 static inline int
 HYPERVISOR_update_va_mapping_otherdomain(
-    unsigned long page_nr, pte_t new_val, unsigned long flags, domid_t domid)
+    unsigned long va, pte_t new_val, unsigned long flags, domid_t domid)
 {
     int ret;
     unsigned long ign1, ign2, ign3, ign4;
@@ -551,7 +571,7 @@ HYPERVISOR_update_va_mapping_otherdomain(
         TRAP_INSTR
         : "=a" (ret), "=b" (ign1), "=c" (ign2), "=d" (ign3), "=S" (ign4)
 	: "0" (__HYPERVISOR_update_va_mapping_otherdomain),
-          "1" (page_nr), "2" ((new_val).pte_low), "3" (flags), "4" (domid) :
+          "1" (va), "2" ((new_val).pte_low), "3" (flags), "4" (domid) :
         "memory" );
     
     return ret;
@@ -569,6 +589,22 @@ HYPERVISOR_vm_assist(
         : "=a" (ret), "=b" (ign1), "=c" (ign2)
 	: "0" (__HYPERVISOR_vm_assist), "1" (cmd), "2" (type)
 	: "memory" );
+
+    return ret;
+}
+
+static inline int
+HYPERVISOR_boot_vcpu(
+    unsigned long vcpu, full_execution_context_t *ctxt)
+{
+    int ret;
+    unsigned long ign1, ign2;
+
+    __asm__ __volatile__ (
+        TRAP_INSTR
+        : "=a" (ret), "=b" (ign1), "=c" (ign2)
+	: "0" (__HYPERVISOR_boot_vcpu), "1" (vcpu), "2" (ctxt)
+	: "memory");
 
     return ret;
 }

@@ -47,6 +47,7 @@ pristine-%: %.tar.bz2
 	tar -C tmp-$(@F) -jxf $<
 	mv tmp-$(@F)/* $@
 	touch $@ # update timestamp to avoid rebuild
+	touch $@/.bk_skip
 	@rm -rf tmp-$(@F)
 	[ -d patches/$* ] && \
 	  for i in patches/$*/*.patch ; do ( cd $@ ; patch -p1 <../$$i ) ; done || \
@@ -60,6 +61,9 @@ pristine-%: %.tar.bz2
 
 %-clean:
 	$(MAKE) -f buildconfigs/mk.$* clean
+
+%-config:
+	$(MAKE) -f buildconfigs/mk.$* config
 
 %-xen.patch: pristine-%
 	rm -rf tmp-$@
