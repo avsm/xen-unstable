@@ -156,6 +156,7 @@ for opt in opts:
     if opt[0] == '-r': ramdisk = opt[1]
     if opt[0] == '-b': builder_fn = opt[1]  
     if opt[0] == '-m': mem_size = int(opt[1])
+    if opt[0] == '-C': cpu = int(opt[1])
     if opt[0] == '-N': domain_name = opt[1]
     if opt[0] == '-a': auto_restart = answer(opt[1])
     if opt[0] == '-e': vbd_expert = answer(opt[1])
@@ -219,7 +220,7 @@ def make_domain():
     """
 
     # set up access to the global variables declared above
-    global image, ramdisk, mem_size, domain_name, vfr_ipaddr, netmask
+    global image, ramdisk, mem_size, cpu, domain_name, vfr_ipaddr, netmask
     global vbd_list, cmdline, xc, vbd_expert, builder_fn
     	
     if not os.path.isfile( image ):
@@ -230,7 +231,7 @@ def make_domain():
         print "Ramdisk file '" + ramdisk + "' does not exist"
         sys.exit()
 
-    id = xc.domain_create( mem_kb=mem_size*1024, name=domain_name )
+    id = xc.domain_create( mem_kb=mem_size*1024, name=domain_name, cpu=cpu )
     if id <= 0:
 	print "Error creating domain"
 	sys.exit()
@@ -347,6 +348,18 @@ def make_domain():
             else:
                 print "Enabled PCI access (%d:%d:%d)." % \
                       (pci_bus,pci_dev,pci_func)
+		
+    if restore:
+	# send an unsolicited ARP reply for all non link-local IPs
+	gw=xenctl.utils.get_current_ipgw()
+	if gw == '': gw='255.255.255.255'
+	nlb=open('/proc/sys/net/ipv4/ip_nonlocal_bind','r').read()[0]=='1'
+	if not nlb: print >>open('/proc/sys/net/ipv4/ip_nonlocal_bind','w'), '1'
+	for ip in vfr_ipaddr:
+	    if not xenctl.utils.check_subnet(ip,'169.254.0.0','255.255.0.0'):
+		print     '/usr/sbin/arping -A -b -I eth0 -c 1 -s %s %s' % (ip,gw)
+		os.system('/usr/sbin/arping -A -b -I eth0 -c 1 -s %s %s' % (ip,gw))
+	if not nlb: print >>open('/proc/sys/net/ipv4/ip_nonlocal_bind','w'), '0'
 
     if xc.domain_start( dom=id ) < 0:
         print "Error starting domain"
