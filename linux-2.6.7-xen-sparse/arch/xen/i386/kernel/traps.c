@@ -89,7 +89,7 @@ asmlinkage void page_fault(void);
 asmlinkage void coprocessor_error(void);
 asmlinkage void simd_coprocessor_error(void);
 asmlinkage void alignment_check(void);
-asmlinkage void spurious_interrupt_bug(void);
+asmlinkage void fixup_4gb_segment(void);
 asmlinkage void machine_check(void);
 
 static int kstack_depth_to_print = 24;
@@ -722,8 +722,8 @@ void math_error(void *eip)
 		default:
 			break;
 		case 0x001: /* Invalid Op */
-		case 0x040: /* Stack Fault XXX? */
-		case 0x240: /* Stack Fault | Direction XXX? */
+		case 0x041: /* Stack Fault */
+		case 0x241: /* Stack Fault | Direction */
 			info.si_code = FPE_FLTINV;
 			/* Should we clear the SF or let user space do it ???? */
 			break;
@@ -820,15 +820,6 @@ asmlinkage void do_simd_coprocessor_error(struct pt_regs * regs,
 		current->thread.error_code = error_code;
 		force_sig(SIGSEGV, current);
 	}
-}
-
-asmlinkage void do_spurious_interrupt_bug(struct pt_regs * regs,
-					  long error_code)
-{
-#if 0
-	/* No need to warn about this any longer. */
-	printk("Ignoring P6 Local APIC Spurious Interrupt Bug...\n");
-#endif
 }
 
 /*
@@ -953,7 +944,7 @@ static trap_info_t trap_table[] = {
 	{ 12, 0, __KERNEL_CS, (unsigned long)stack_segment		},
 	{ 13, 0, __KERNEL_CS, (unsigned long)general_protection		},
 	{ 14, 0, __KERNEL_CS, (unsigned long)page_fault			},
-	{ 15, 0, __KERNEL_CS, (unsigned long)spurious_interrupt_bug	},
+	{ 15, 0, __KERNEL_CS, (unsigned long)fixup_4gb_segment		},
 	{ 16, 0, __KERNEL_CS, (unsigned long)coprocessor_error		},
 	{ 17, 0, __KERNEL_CS, (unsigned long)alignment_check		},
 #ifdef CONFIG_X86_MCE

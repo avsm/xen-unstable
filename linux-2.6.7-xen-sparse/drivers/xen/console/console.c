@@ -26,8 +26,8 @@
 #include <asm/io.h>
 #include <asm/irq.h>
 #include <asm/uaccess.h>
-#include <asm/hypervisor.h>
 #include <asm/hypervisor-ifs/event_channel.h>
+#include <asm-xen/hypervisor.h>
 #include <asm-xen/evtchn.h>
 #include <asm-xen/ctrl_if.h>
 
@@ -45,6 +45,10 @@ static enum { XC_OFF, XC_DEFAULT, XC_TTY, XC_SERIAL } xc_mode = XC_DEFAULT;
 
 static int __init xencons_setup(char *str)
 {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,0)
+    if (str[0] == '=')
+	str++;
+#endif
     if ( !strcmp(str, "tty") )
         xc_mode = XC_TTY;
     else if ( !strcmp(str, "ttyS") )
@@ -80,8 +84,6 @@ static struct tty_driver xencons_driver;
 static struct tq_struct xencons_tx_flush_task = {
     routine: xencons_tx_flush_task_routine
 };
-#define irqreturn_t void
-#define IRQ_HANDLED
 #endif
 
 
@@ -588,6 +590,44 @@ static struct tty_operations xencons_ops = {
     .unthrottle = xencons_unthrottle,
     .wait_until_sent = xencons_wait_until_sent,
 };
+
+#ifdef CONFIG_XEN_PRIVILEGED_GUEST
+static const char *xennullcon_startup(void)
+{
+    return NULL;
+}
+
+static int xennullcon_dummy(void)
+{
+    return 0;
+}
+
+#define DUMMY	(void *)xennullcon_dummy
+
+/*
+ *  The console `switch' structure for the dummy console
+ *
+ *  Most of the operations are dummies.
+ */
+
+const struct consw xennull_con = {
+    .owner =		THIS_MODULE,
+    .con_startup =	xennullcon_startup,
+    .con_init =		DUMMY,
+    .con_deinit =	DUMMY,
+    .con_clear =	DUMMY,
+    .con_putc =		DUMMY,
+    .con_putcs =	DUMMY,
+    .con_cursor =	DUMMY,
+    .con_scroll =	DUMMY,
+    .con_bmove =	DUMMY,
+    .con_switch =	DUMMY,
+    .con_blank =	DUMMY,
+    .con_font_op =	DUMMY,
+    .con_set_palette =	DUMMY,
+    .con_scrolldelta =	DUMMY,
+};
+#endif
 #endif
 
 static int __init xencons_init(void)

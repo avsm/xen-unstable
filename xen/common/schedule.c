@@ -165,11 +165,11 @@ void domain_sleep(struct domain *d)
 {
     unsigned long flags;
 
-    /* sleep and wake protected by domain's state_lock */
-    spin_lock_irqsave(&d->state_lock, flags);
+    /* sleep and wake protected by domain's sleep_lock */
+    spin_lock_irqsave(&d->sleep_lock, flags);
     if ( likely(!domain_runnable(d)) )
         SCHED_OP(sleep, d);
-    spin_unlock_irqrestore(&d->state_lock, flags);
+    spin_unlock_irqrestore(&d->sleep_lock, flags);
  
     /* Synchronous. */
     while ( test_bit(DF_RUNNING, &d->flags) && !domain_runnable(d) )
@@ -183,7 +183,7 @@ void domain_wake(struct domain *d)
 {
     unsigned long       flags;
 
-    spin_lock_irqsave(&d->state_lock, flags);
+    spin_lock_irqsave(&d->sleep_lock, flags);
     
     if ( likely(domain_runnable(d)) )
     {
@@ -193,8 +193,10 @@ void domain_wake(struct domain *d)
         d->wokenup = NOW();
 #endif
     }
-
-    spin_unlock_irqrestore(&d->state_lock, flags);
+    
+    clear_bit(DF_MIGRATED, &d->flags);
+    
+    spin_unlock_irqrestore(&d->sleep_lock, flags);
 }
 
 /* Block the currently-executing domain until a pertinent event occurs. */
@@ -369,6 +371,22 @@ void __enter_scheduler(void)
     if ( unlikely(prev == next) )
         return;
     
+    cleanup_writable_pagetable(PTWR_CLEANUP_ACTIVE | PTWR_CLEANUP_INACTIVE);
+
+#ifdef PTWR_TRACK_DOMAIN
+    {
+        extern domid_t ptwr_domain[];
+        int cpu = smp_processor_id();
+        if (ptwr_domain[cpu] != prev->domain)
+            printk("switch_to domain mismatch %d != %d\n",
+                   ptwr_domain[cpu], prev->domain);
+        ptwr_domain[cpu] = next->domain;
+        if (ptwr_disconnected[cpu] != ENTRIES_PER_L2_PAGETABLE ||
+            ptwr_writable_idx[cpu])
+            printk("switch_to ptwr dirty!!!\n");
+    }
+#endif
+
     perfc_incrc(sched_ctx);
 
 #if defined(WAKE_HISTO)
@@ -442,8 +460,10 @@ static void t_timer_fn(unsigned long unused)
 
     TRACE_0D(TRC_SCHED_T_TIMER_FN);
 
-    if ( !is_idle_task(p) )
+    if ( !is_idle_task(p) ) {
+        update_dom_time(p->shared_info);
         send_guest_virq(p, VIRQ_TIMER);
+    }
 
     t_timer[p->processor].expires = NOW() + MILLISECS(10);
     add_ac_timer(&t_timer[p->processor]);
@@ -454,6 +474,7 @@ static void dom_timer_fn(unsigned long data)
 {
     struct domain *p = (struct domain *)data;
     TRACE_0D(TRC_SCHED_DOM_TIMER_FN);
+    update_dom_time(p->shared_info);
     send_guest_virq(p, VIRQ_TIMER);
 }
 

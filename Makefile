@@ -30,6 +30,8 @@ dist: all
 LINUX_RELEASE    ?= 2.4
 LINUX_VER        ?= $(shell ( /bin/ls -ld linux-$(LINUX_RELEASE).*-xen-sparse ) 2>/dev/null | \
 		      sed -e 's!^.*linux-\(.\+\)-xen-sparse!\1!' )
+LINUX26_VER      ?= $(shell ( /bin/ls -ld linux-2.6.*-xen-sparse ) 2>/dev/null | \
+		      sed -e 's!^.*linux-\(.\+\)-xen-sparse!\1!' )
 LINUX_CONFIG_DIR ?= $(INSTALL_DIR)/boot
 LINUX_SRC_PATH   ?= .:..
 LINUX_SRC        ?= $(firstword $(foreach dir,$(subst :, ,$(LINUX_SRC_PATH)),\
@@ -117,6 +119,8 @@ linux26:
 	$(MAKE) LINUX_RELEASE=2.6 mk-linux-trees
 	$(MAKE) LINUX_RELEASE=2.6 config-xenU
 	$(MAKE) LINUX_RELEASE=2.6 linux-xenU
+	$(MAKE) LINUX_RELEASE=2.6 config-xen0
+	$(MAKE) LINUX_RELEASE=2.6 linux-xen0
 
 
 clean: delete-symlinks
@@ -129,7 +133,7 @@ mrproper: clean
 	rm -rf install/* patches $(LINUX_TREES) linux-$(LINUX_VER).tar.*
 
 make-symlinks: delete-symlinks
-	ln -sf linux-$(LINUX_VER)-xen-sparse linux-xen-sparse
+	ln -sf linux-$(LINUX26_VER)-xen-sparse linux-xen-sparse
 
 delete-symlinks:
 	$(RM) linux-xen-sparse
@@ -143,7 +147,7 @@ install-twisted:
 install-logging: LOGGING=logging-0.4.9.2
 install-logging:
 	[ -f $(LOGGING).tar.gz ] || wget http://www.red-dove.com/$(LOGGING).tar.gz
-	tar -xfz $(LOGGING).tar.gz
+	tar -zxf $(LOGGING).tar.gz
 	( cd $(LOGGING) && python setup.py install )
 
 # handy target to upgrade iptables (use rpm or apt-get in preference)

@@ -48,7 +48,7 @@
 #include <asm/io_apic.h>
 #include <asm/ist.h>
 #include <asm/std_resources.h>
-#include <asm/hypervisor.h>
+#include <asm-xen/hypervisor.h>
 #include "setup_arch_pre.h"
 
 int disable_pse __initdata = 0;
@@ -137,8 +137,10 @@ static struct resource data_resource = { "Kernel data", 0, 0 };
  * page as soon as fixmap is up and running.
  */
 shared_info_t *HYPERVISOR_shared_info = (shared_info_t *)empty_zero_page;
+EXPORT_SYMBOL(HYPERVISOR_shared_info);
 
 unsigned long *phys_to_machine_mapping;
+EXPORT_SYMBOL(phys_to_machine_mapping);
 
 multicall_entry_t multicall_list[8];
 int nr_multicall_ents = 0;
@@ -924,7 +926,7 @@ legacy_init_iomem_resources(struct resource *code_resource, struct resource *dat
 {
 	int i;
 
-#ifdef CONFIG_XEN_PHYSDEV_ACCESS
+#ifdef CONFIG_XEN_PRIVILEGED_GUEST
 	probe_roms();
 #endif
 	for (i = 0; i < e820.nr_map; i++) {
@@ -1096,6 +1098,13 @@ void __init setup_arch(char **cmdline_p)
 {
 	unsigned long max_low_pfn;
 
+	HYPERVISOR_vm_assist(VMASST_CMD_enable,
+			     VMASST_TYPE_4gb_segments);
+#if 0
+	HYPERVISOR_vm_assist(VMASST_CMD_enable,
+			     VMASST_TYPE_writeable_pagetables);
+#endif
+
 	memcpy(&boot_cpu_data, &new_cpu_data, sizeof(new_cpu_data));
 	early_cpu_init();
 
@@ -1208,15 +1217,6 @@ void __init setup_arch(char **cmdline_p)
 
 	register_memory(max_low_pfn);
 
-#ifdef CONFIG_VT
-#if defined(CONFIG_VGA_CONSOLE)
-	if (!efi_enabled || (efi_mem_type(0xa0000) != EFI_CONVENTIONAL_MEMORY))
-		conswitchp = &vga_con;
-#elif defined(CONFIG_DUMMY_CONSOLE)
-	conswitchp = &dummy_con;
-#endif
-#endif
-
 	/* If we are a privileged guest OS then we should request IO privs. */
 	if (start_info.flags & SIF_PRIVILEGED) {
 		dom0_op_t op;
@@ -1226,6 +1226,33 @@ void __init setup_arch(char **cmdline_p)
 		if (HYPERVISOR_dom0_op(&op) != 0)
 			panic("Unable to obtain IOPL, despite SIF_PRIVILEGED");
 		current->thread.io_pl = 1;
+	}
+
+	if (start_info.flags & SIF_INITDOMAIN) {
+		if (!(start_info.flags & SIF_PRIVILEGED))
+			panic("Xen granted us console access "
+			      "but not privileged status");
+
+#ifdef CONFIG_VT
+#if defined(CONFIG_VGA_CONSOLE)
+		if (!efi_enabled ||
+		    (efi_mem_type(0xa0000) != EFI_CONVENTIONAL_MEMORY))
+			conswitchp = &vga_con;
+#elif defined(CONFIG_DUMMY_CONSOLE)
+		conswitchp = &dummy_con;
+#endif
+#endif
+	} else {
+#ifdef CONFIG_XEN_PRIVILEGED_GUEST
+		extern const struct consw xennull_con;
+		extern int console_use_vt;
+#if defined(CONFIG_VGA_CONSOLE)
+		/* disable VGA driver */
+		ORIG_VIDEO_ISVGA = VIDEO_TYPE_VLFB;
+#endif
+		conswitchp = &xennull_con;
+		console_use_vt = 0;
+#endif
 	}
 }
 

@@ -44,6 +44,7 @@
 #define __HYPERVISOR_console_io           18
 #define __HYPERVISOR_physdev_op           19
 #define __HYPERVISOR_update_va_mapping_otherdomain 20
+#define __HYPERVISOR_vm_assist            21
 
 /*
  * MULTICALLS
@@ -65,7 +66,9 @@
 #define VIRQ_DEBUG      2  /* Request guest to dump debug info.           */
 #define VIRQ_CONSOLE    3  /* (DOM0) bytes received on emergency console. */
 #define VIRQ_DOM_EXC    4  /* (DOM0) Exceptional event for some domain.   */
-#define NR_VIRQS        5
+#define VIRQ_PARITY_ERR 5  /* (DOM0) NMI parity error.                    */
+#define VIRQ_IO_ERR     6  /* (DOM0) NMI I/O error.                       */
+#define NR_VIRQS        7
 
 /*
  * MMU-UPDATE REQUESTS
@@ -178,6 +181,15 @@
  */
 #define MEMOP_increase_reservation 0
 #define MEMOP_decrease_reservation 1
+
+/*
+ * Commands to HYPERVISOR_vm_assist().
+ */
+#define VMASST_CMD_enable                0
+#define VMASST_CMD_disable               1
+#define VMASST_TYPE_4gb_segments         0
+#define VMASST_TYPE_4gb_segments_notify  1
+#define VMASST_TYPE_writeable_pagetables 2
 
 #ifndef __ASSEMBLY__
 
