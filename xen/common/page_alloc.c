@@ -49,8 +49,9 @@ static unsigned long  bitmap_size; /* in bytes */
 static unsigned long *alloc_bitmap;
 #define PAGES_PER_MAPWORD (sizeof(unsigned long) * 8)
 
-#define allocated_in_map(_pn) \
-(alloc_bitmap[(_pn)/PAGES_PER_MAPWORD] & (1<<((_pn)&(PAGES_PER_MAPWORD-1))))
+#define allocated_in_map(_pn)                 \
+( !! (alloc_bitmap[(_pn)/PAGES_PER_MAPWORD] & \
+     (1UL<<((_pn)&(PAGES_PER_MAPWORD-1)))) )
 
 /*
  * Hint regarding bitwise arithmetic in map_{alloc,free}:
@@ -79,13 +80,13 @@ static void map_alloc(unsigned long first_page, unsigned long nr_pages)
 
     if ( curr_idx == end_idx )
     {
-        alloc_bitmap[curr_idx] |= ((1<<end_off)-1) & -(1<<start_off);
+        alloc_bitmap[curr_idx] |= ((1UL<<end_off)-1) & -(1UL<<start_off);
     }
     else 
     {
-        alloc_bitmap[curr_idx] |= -(1<<start_off);
-        while ( ++curr_idx < end_idx ) alloc_bitmap[curr_idx] = ~0L;
-        alloc_bitmap[curr_idx] |= (1<<end_off)-1;
+        alloc_bitmap[curr_idx] |= -(1UL<<start_off);
+        while ( ++curr_idx < end_idx ) alloc_bitmap[curr_idx] = ~0UL;
+        alloc_bitmap[curr_idx] |= (1UL<<end_off)-1;
     }
 }
 
@@ -108,13 +109,13 @@ static void map_free(unsigned long first_page, unsigned long nr_pages)
 
     if ( curr_idx == end_idx )
     {
-        alloc_bitmap[curr_idx] &= -(1<<end_off) | ((1<<start_off)-1);
+        alloc_bitmap[curr_idx] &= -(1UL<<end_off) | ((1UL<<start_off)-1);
     }
     else 
     {
-        alloc_bitmap[curr_idx] &= (1<<start_off)-1;
+        alloc_bitmap[curr_idx] &= (1UL<<start_off)-1;
         while ( ++curr_idx != end_idx ) alloc_bitmap[curr_idx] = 0;
-        alloc_bitmap[curr_idx] &= -(1<<end_off);
+        alloc_bitmap[curr_idx] &= -(1UL<<end_off);
     }
 }
 
@@ -483,11 +484,11 @@ struct pfn_info *alloc_domheap_pages(struct domain *d, unsigned int order)
             pfn_stamp = pg[i].tlbflush_timestamp;
             for ( j = 0; (mask != 0) && (j < smp_num_cpus); j++ )
             {
-                if ( mask & (1<<j) )
+                if ( mask & (1UL<<j) )
                 {
                     cpu_stamp = tlbflush_time[j];
                     if ( !NEED_FLUSH(cpu_stamp, pfn_stamp) )
-                        mask &= ~(1<<j);
+                        mask &= ~(1UL<<j);
                 }
             }
             
@@ -509,13 +510,13 @@ struct pfn_info *alloc_domheap_pages(struct domain *d, unsigned int order)
 
     spin_lock(&d->page_alloc_lock);
 
-    if ( unlikely(test_bit(DF_DYING, &d->flags)) ||
+    if ( unlikely(test_bit(DF_DYING, &d->d_flags)) ||
          unlikely((d->tot_pages + (1 << order)) > d->max_pages) )
     {
         DPRINTK("Over-allocation for domain %u: %u > %u\n",
                 d->id, d->tot_pages + (1 << order), d->max_pages);
         DPRINTK("...or the domain is dying (%d)\n", 
-                !!test_bit(DF_DYING, &d->flags));
+                !!test_bit(DF_DYING, &d->d_flags));
         spin_unlock(&d->page_alloc_lock);
         free_heap_pages(MEMZONE_DOM, pg, order);
         return NULL;
@@ -544,7 +545,9 @@ void free_domheap_pages(struct pfn_info *pg, unsigned int order)
 {
     int            i, drop_dom_ref;
     struct domain *d = pg->u.inuse.domain;
+    struct exec_domain *ed;
     void          *p;
+    int cpu_mask = 0;
 
     ASSERT(!in_irq());
 
@@ -566,11 +569,14 @@ void free_domheap_pages(struct pfn_info *pg, unsigned int order)
         /* NB. May recursively lock from domain_relinquish_memory(). */
         spin_lock_recursive(&d->page_alloc_lock);
 
+        for_each_exec_domain(d, ed)
+            cpu_mask |= 1 << ed->processor;
+
         for ( i = 0; i < (1 << order); i++ )
         {
             ASSERT((pg[i].u.inuse.type_info & PGT_count_mask) == 0);
             pg[i].tlbflush_timestamp  = tlbflush_current_time();
-            pg[i].u.free.cpu_mask     = 1 << d->processor;
+            pg[i].u.free.cpu_mask     = cpu_mask;
             list_del(&pg[i].list);
 
             /*
@@ -578,7 +584,7 @@ void free_domheap_pages(struct pfn_info *pg, unsigned int order)
              * if it cares about the secrecy of their contents. However, after
              * a domain has died we assume responsibility for erasure.
              */
-            if ( unlikely(test_bit(DF_DYING, &d->flags)) )
+            if ( unlikely(test_bit(DF_DYING, &d->d_flags)) )
             {
                 p = map_domain_mem(page_to_phys(&pg[i]));
                 clear_page(p);
