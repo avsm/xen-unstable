@@ -26,6 +26,10 @@
 u64 lookup(int height, u64 root, u64 key);
 u64 update(int height, u64 root, u64 key, u64 val);
 u64 snapshot(u64 root);
+int collapse(int height, u64 proot, u64 croot);
 int isprivate(int height, u64 root, u64 key);
+
+
+void __rcache_init(void);
 
 #endif /* __RADIX_H__ */

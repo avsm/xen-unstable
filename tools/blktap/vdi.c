@@ -15,8 +15,8 @@
 #include "radix.h"
 #include "vdi.h"
                     
-#define VDI_REG_BLOCK   1LL
-#define VDI_RADIX_ROOT  writable(2)
+#define VDI_REG_BLOCK   2LL
+#define VDI_RADIX_ROOT  writable(3)
                                                             
 #if 1
 #define DPRINTF(_f, _a...) printf ( _f , ## _a )
@@ -158,6 +158,7 @@ void vdi_snapshot(vdi_t *vdi)
     
     rec.radix_root = vdi->radix_root;
     gettimeofday(&rec.timestamp, NULL);
+    rec.deleted = 0;
     
     vdi->radix_root = snapshot(vdi->radix_root);
     ret = snap_append(&vdi->snap, &rec, &vdi->snap);
@@ -170,6 +171,9 @@ void vdi_snapshot(vdi_t *vdi)
     
 int __init_vdi()
 {
+    /* sneak this in here for the moment. */
+    __rcache_init();
+    
     /* force the registry to be created if it doesn't exist. */
     vdi_registry_t *vdi_reg = get_vdi_registry();
     if (vdi_reg == NULL) {
@@ -177,6 +181,7 @@ int __init_vdi()
         return -1;
     }
     freeblock(vdi_reg);
+    
     
     return 0;
 }
