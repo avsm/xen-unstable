@@ -259,7 +259,6 @@ void __init setup_arch(char **cmdline_p)
         }
     }
     cur_pgd = init_mm.pgd = (pgd_t *)start_info.pt_base;
-    queue_pgd_pin(__pa(init_mm.pgd));
 
 #ifdef CONFIG_BLK_DEV_INITRD
     if (start_info.mod_start) {
@@ -954,7 +953,7 @@ void __init cpu_init (void)
         BUG();
     enter_lazy_tlb(&init_mm, current, nr);
 
-    HYPERVISOR_set_guest_stack(__KERNEL_DS, current->thread.esp0);
+    HYPERVISOR_stack_and_ldt_switch(__KERNEL_DS, current->thread.esp0, 0);
 
     /* Force FPU initialization. */
     current->flags &= ~PF_USEDFPU;
