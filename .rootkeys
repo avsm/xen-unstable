@@ -1,4 +1,5 @@
 3ddb6b0bKlMz_dz-M59a1mkUa1lASw BitKeeper/etc/config
+3eba336c4BUxP3H1DjQl8sInORf1Yw BitKeeper/etc/gone
 3ddb6b0buTaC5zg1_a8FoAR9FWi_mw BitKeeper/etc/ignore
 3ddb79c9_hgSp-gsQm8HqWM_9W3B_A BitKeeper/etc/logging_ok
 3eb788d6Kleck_Cut0ouGneviGzliQ Makefile
@@ -479,6 +480,7 @@
 3e5a4e686V0nioX2ZpFf056sgvdiQw xenolinux-2.4.21-pre4-sparse/include/linux/sunrpc/debug.h
 3e5a4e68W_hpMlM3u_-QOKMp3gzcwQ xenolinux-2.4.21-pre4-sparse/init/do_mounts.c
 3e5a4e68TJJavrunYwTAnLRSBxSYqQ xenolinux-2.4.21-pre4-sparse/kernel/panic.c
+3eba8f878XjouY21EkQBXwYBsPsipQ xenolinux-2.4.21-pre4-sparse/lndir-rel
 3e6e7c1efbQe93xCvOpOVCnXTMmQ5w xenolinux-2.4.21-pre4-sparse/mkbuildtree
 3e5a4e68GxCIaFH4sy01v1wjapetaA xenolinux-2.4.21-pre4-sparse/mm/memory.c
 3e5a4e681xMPdF9xCMwpyfuYMySU5g xenolinux-2.4.21-pre4-sparse/mm/mremap.c
