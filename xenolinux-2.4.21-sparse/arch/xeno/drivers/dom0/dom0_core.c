@@ -38,20 +38,14 @@ typedef struct proc_data {
     unsigned long map_size;
 } dom_procdata_t;
 
-typedef struct proc_mem_data {
-    unsigned long pfn;
-    int tot_pages;
-} proc_memdata_t;
-
-#define MAP_DISCONT     1
-
+/* XXX this certainly shouldn't be here. */
 extern struct file_operations dom0_phd_fops;
 
 struct proc_dir_entry *xeno_base;
 static struct proc_dir_entry *dom0_cmd_intf;
 static struct proc_dir_entry *dom_list_intf;
 
-unsigned long direct_mmap(unsigned long, unsigned long, pgprot_t, int, int);
+int direct_unmap(unsigned long, unsigned long);
 int direct_unmap(struct mm_struct *, unsigned long, unsigned long);
 
 static ssize_t dom_usage_read(struct file * file, char * buff, size_t size, loff_t * off)
@@ -112,7 +106,7 @@ static ssize_t dom_usage_read(struct file * file, char * buff, size_t size, loff
     return end + 1;
 }
 
-struct file_operations dom_usage_ops = {
+static struct file_operations dom_usage_ops = {
     read:    dom_usage_read
 };
 
@@ -160,7 +154,7 @@ static ssize_t dom_mem_write(struct file * file, const char * buff,
 
     copy_from_user(&mem_data, (dom_mem_t *)buff, sizeof(dom_mem_t));
     
-    if ( direct_unmap(current->mm, mem_data.vaddr, 
+    if ( direct_unmap(mem_data.vaddr, 
                       mem_data.tot_pages << PAGE_SHIFT) == 0 ) {
         return sizeof(sizeof(dom_mem_t));
     } else {
@@ -268,12 +262,9 @@ static int dom0_cmd_write(struct file *file, const char *buffer, size_t size,
 
     if ( op.cmd == MAP_DOM_MEM )
     {
-        ret = dom_map_mem(op.u.dommem.domain, op.u.dommem.start_pfn, 
-                          op.u.dommem.tot_pages); 
-      /* This is now an ioctl, and shouldn't be being written to
-	 the command file. */
-	//      printk("map_dom_mem dom0_cmd used!\n");
-	//      ret = -EOPNOTSUPP;
+        /* This is now an ioctl, and shouldn't be being written to the
+	   command file. */
+        ret = -EOPNOTSUPP;
     }
     else if ( op.cmd == DO_PGUPDATES )
     {
@@ -370,7 +361,7 @@ static int xeno_domains_show(struct seq_file *s, void *v)
     return 0;
 }
 
-struct seq_operations xeno_domains_op = {
+static struct seq_operations xeno_domains_op = {
     .start          = xeno_domains_start,
     .next           = xeno_domains_next,
     .stop           = xeno_domains_stop,
@@ -402,7 +393,8 @@ static int handle_dom0_cmd_createdomain(unsigned long data)
   op.cmd = DOM0_CREATEDOMAIN;
   op.u.newdomain.domain = -666;
   op.u.newdomain.memory_kb = argbuf.kb_mem;
-  op.u.newdomain.num_vifs = 0; /* Not used anymore, I hope... */
+  op.u.newdomain.num_vifs = 0; /* Not used anymore -- it's done in
+				  BUILDDOMAIN. */
   namelen = strnlen_user(argbuf.name, MAX_DOMAIN_NAME);
   if (copy_from_user(op.u.newdomain.name, argbuf.name, namelen + 1))
     return -EFAULT;
@@ -437,18 +429,12 @@ static unsigned long handle_dom0_cmd_mapdommem(unsigned long data)
     return -EFAULT;
   /* This seems to be assuming that the root of the page table is in
      the first frame of the new domain's physical memory? */
-  /* XXX do I really mean this? */
   /* XXX what happens if userspace forgets to do the unmap? */
-  printk("direct_maping w/ start pfn %x, tot_pages %x.\n",
-	 argbuf.start_pfn, argbuf.tot_pages);
 
   addr = direct_mmap(argbuf.start_pfn << PAGE_SHIFT,
 		     argbuf.tot_pages << PAGE_SHIFT,
 		     PAGE_SHARED,
-		     MAP_DISCONT,
 		     argbuf.tot_pages);
-
-  printk("Picked vaddr %x.\n", addr);
 
   return addr;
 }
@@ -460,8 +446,8 @@ static int handle_dom0_cmd_unmapdommem(unsigned long data)
   if (copy_from_user(&argbuf, (void *)data, sizeof(argbuf)))
     return -EFAULT;
 
-  return direct_disc_unmap(argbuf.vaddr, argbuf.start_pfn,
-			   argbuf.tot_pages);
+  return direct_unmap(current->mm, argbuf.vaddr,
+		      argbuf.tot_pages << PAGE_SIZE);
 }
 
 static int dom0_cmd_ioctl(struct inode *inode, struct file *file,

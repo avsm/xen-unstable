@@ -16,9 +16,6 @@
 
 #include "dom0_ops.h"
 
-#define MAP_CONT    0
-#define MAP_DISCONT 1
-
 extern struct list_head * find_direct(struct list_head *, unsigned long);
 
 /*
@@ -88,7 +85,7 @@ static inline int direct_remappmd_range(struct mm_struct *mm, pmd_t * pmd, unsig
 }
 
 /*  Note: this is only safe if the mm semaphore is held when called. */
-int direct_remap_page_range(unsigned long from, unsigned long phys_addr, unsigned long size, pgprot_t prot)
+static int direct_remap_page_range(unsigned long from, unsigned long phys_addr, unsigned long size, pgprot_t prot)
 {
     int error = 0;
     pgd_t * dir;
@@ -123,8 +120,8 @@ int direct_remap_page_range(unsigned long from, unsigned long phys_addr, unsigne
  * used for remapping discontiguous bits of domain's memory, pages to map are
  * found from frame table beginning at the given first_pg index
  */ 
-int direct_remap_disc_page_range(unsigned long from, 
-                                 unsigned long first_pg, int tot_pages, pgprot_t prot)
+static int direct_remap_disc_page_range(unsigned long from, 
+					unsigned long first_pg, int tot_pages, pgprot_t prot)
 {
     dom0_op_t dom0_op;
     unsigned long *pfns = (unsigned long *)get_free_page(GFP_KERNEL);
@@ -165,24 +162,20 @@ int direct_remap_disc_page_range(unsigned long from,
  */
 
 unsigned long direct_mmap(unsigned long phys_addr, unsigned long size, 
-                          pgprot_t prot, int flag, int tot_pages)
+			  pgprot_t prot, int tot_pages)
 {
     direct_mmap_node_t * dmmap;
     struct list_head * entry;
     unsigned long addr;
     int ret = 0;
     
-    if(!capable(CAP_SYS_ADMIN)){
-        ret = -EPERM;
-        goto out;
-    }
+    if(!capable(CAP_SYS_ADMIN))
+        return -EPERM;
 
     /* get unmapped area invokes xen specific arch_get_unmapped_area */
     addr = get_unmapped_area(NULL, 0, size, 0, 0);
-    if(addr & ~PAGE_MASK){
-        ret = -ENOMEM;
-        goto out;
-    }
+    if(addr & ~PAGE_MASK)
+        return -ENOMEM;
 
     /* add node on the list of directly mapped areas, make sure the
      * list remains sorted.
@@ -192,24 +185,21 @@ unsigned long direct_mmap(unsigned long phys_addr, unsigned long size,
     dmmap->vm_end = addr + size;
     entry = find_direct(&current->mm->context.direct_list, addr);
     if(entry != &current->mm->context.direct_list){
-        list_add_tail(&dmmap->list, entry);
+      list_add_tail(&dmmap->list, entry);
     } else {
-    	list_add_tail(&dmmap->list, &current->mm->context.direct_list);
+      list_add_tail(&dmmap->list, &current->mm->context.direct_list);
     }
+
+    /* XXX kfree(dmmap)? */
 
     /* and perform the mapping */
-    if(flag == MAP_DISCONT){
-        ret = direct_remap_disc_page_range(addr, phys_addr >> PAGE_SHIFT, 
-                                           tot_pages, prot);
-    } else {
-        ret = direct_remap_page_range(addr, phys_addr, size, prot);
-    }
+    ret = direct_remap_disc_page_range(addr, phys_addr >> PAGE_SHIFT, 
+				       tot_pages, prot);
 
     if(ret == 0)
-        ret = addr;
-
- out: 
-    return ret;
+        return addr;
+    else
+        return ret;
 }
 
 /* most of the checks, refcnt updates, cache stuff have been thrown out as they are not
@@ -275,7 +265,7 @@ static inline int direct_zap_pmd_range(mmu_gather_t *tlb, pgd_t * dir,
 /*
  * remove user pages in a given range.
  */
-void direct_zap_page_range(struct mm_struct *mm, unsigned long address, unsigned long size)
+static void direct_zap_page_range(struct mm_struct *mm, unsigned long address, unsigned long size)
 {
     mmu_gather_t *tlb;
     pgd_t * dir;
