@@ -12,7 +12,7 @@
 
 #include <xen/lib.h>
 #include <xen/sched.h>
-#include <asm/ptrace.h>
+#include <asm/regs.h>
 #include <xen/keyhandler.h> 
 #include <asm/apic.h>
 #include <asm/domain_page.h>                           /* [un]map_domain_mem */
@@ -99,7 +99,6 @@ pdb_process_query (char *ptr)
     {
 #ifdef PDB_PAST
         struct domain *p;
-        u_long flags;
 #endif /* PDB_PAST */
 
         int buf_idx = 0;
@@ -114,7 +113,7 @@ pdb_process_query (char *ptr)
 	{
 	    int count = 0;
 
-	    read_lock_irqsave (&tasklist_lock, flags);
+	    read_lock(&domlist_lock);
 
 	    pdb_out_buffer[buf_idx++] = 'm';
 	    for_each_domain ( p )
@@ -134,7 +133,7 @@ pdb_process_query (char *ptr)
 	    }
 	    pdb_out_buffer[buf_idx++] = 0;
 
-	    read_unlock_irqrestore(&tasklist_lock, flags);
+	    read_unlock(&domlist_lock);
 	    break;
 	}
 	case PDB_LVL_GUESTOS:                  /* return a list of processes */
@@ -197,9 +196,7 @@ pdb_process_query (char *ptr)
 	char message[16];
 	struct domain *p;
 
-	p = find_domain_by_id(pdb_ctx[pdb_level].info);
-	strncpy (message, p->name, 16);
-	put_domain(p);
+	strncpy (message, dom0->name, 16);
 
 	ptr += 16;
         if (hexToInt (&ptr, &thread))
@@ -234,7 +231,7 @@ pdb_process_query (char *ptr)
 }
 
 void
-pdb_x86_to_gdb_regs (char *buffer, struct pt_regs *regs)
+pdb_x86_to_gdb_regs (char *buffer, struct xen_regs *regs)
 {
     int idx = 0;
 
@@ -273,7 +270,7 @@ pdb_x86_to_gdb_regs (char *buffer, struct pt_regs *regs)
 
 /* at this point we allow any register to be changed, caveat emptor */
 void
-pdb_gdb_to_x86_regs (struct pt_regs *regs, char *buffer)
+pdb_gdb_to_x86_regs (struct xen_regs *regs, char *buffer)
 {
     hex2mem(buffer, (char *)&regs->eax, sizeof(regs->eax));
     buffer += sizeof(regs->eax) * 2;
@@ -309,7 +306,7 @@ pdb_gdb_to_x86_regs (struct pt_regs *regs, char *buffer)
 }
 
 int
-pdb_process_command (char *ptr, struct pt_regs *regs, unsigned long cr3,
+pdb_process_command (char *ptr, struct xen_regs *regs, unsigned long cr3,
 		     int sigval)
 {
     int length;
@@ -914,11 +911,9 @@ int pdb_change_values_one_page(u_char *buffer, int length,
 	}
 	else
 	{
-	    struct domain *p = find_domain_by_id(0);
 	    printk ("pdb error: cr3: 0x%lx    dom0cr3:  0x%lx\n",  cr3,
-		    p->mm.shadow_mode ? pagetable_val(p->mm.shadow_table)
-		    : pagetable_val(p->mm.pagetable));
-	    put_domain(p);
+		    dom0->mm.shadow_mode ? pagetable_val(dom0->mm.shadow_table)
+		    : pagetable_val(dom0->mm.pagetable));
 	    printk ("pdb error: L2:0x%p (0x%lx)\n", 
 		    l2_table, l2_pgentry_val(*l2_table));
 	}
@@ -1081,7 +1076,7 @@ void pdb_get_packet(char *buffer)
  */
 
 int pdb_handle_exception(int exceptionVector,
-			 struct pt_regs *xen_regs)
+			 struct xen_regs *xen_regs)
 {
     int signal = 0;
     struct pdb_breakpoint* bkpt;
@@ -1215,7 +1210,7 @@ int pdb_handle_exception(int exceptionVector,
 
 void pdb_key_pressed(unsigned char key)
 {
-    struct pt_regs *regs = (struct pt_regs *)get_execution_context();
+    struct xen_regs *regs = (struct xen_regs *)get_execution_context();
     pdb_handle_exception(KEYPRESS_EXCEPTION, regs);
 }
 
