@@ -541,9 +541,9 @@ static inline void shadow_mk_pagetable( struct mm_struct *mm )
 
 
 #if SHADOW_DEBUG
-extern int check_pagetable( struct mm_struct *m, pagetable_t pt, char *s );
+extern int check_pagetable(struct mm_struct *m, pagetable_t pt, char *s);
 #else
-#define check_pagetable( m, pt, s )
+#define check_pagetable(m, pt, s) ((void)0)
 #endif
 
 

@@ -21,6 +21,7 @@ install: $(TARGET)
 	gzip -f -9 < $(TARGET) > $(TARGET).gz
 	mkdir -p $(prefix)/boot
 	install -m0644 $(TARGET).gz $(prefix)/boot
+	install -m0644 $(TARGET).dbg $(prefix)/boot
 
 dist: $(TARGET)
 	$(MAKE) prefix=`pwd`/../../install dist=yes install
@@ -36,7 +37,9 @@ clean: delete-links
 $(TARGET): delete-unfresh-files make-links $(GENERATED_FILES)
 	$(MAKE) -C tools
 	$(MAKE) -C common
-	$(MAKE) -C net
+	if [ "$(nodev)" != "y" ]; then \
+	$(MAKE) -C net ; \
+	fi
 	$(MAKE) -C drivers
 	$(MAKE) -C arch/$(TARGET_ARCH)
 
