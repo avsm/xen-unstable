@@ -54,7 +54,6 @@
 4083dc16KQus88a4U3uCV6qVCA6_8Q linux-2.4.26-xen-sparse/arch/xen/drivers/blkif/backend/Makefile
 4075806dI5kfeMD5RV-DA0PYoThx_w linux-2.4.26-xen-sparse/arch/xen/drivers/blkif/frontend/Makefile
 4075806d4-j7vN0Mn0bklI1cRUX1vQ linux-2.4.26-xen-sparse/arch/xen/drivers/blkif/frontend/common.h
-4075806d3fJqqDC1pYYPTZPc575iKg linux-2.4.26-xen-sparse/arch/xen/drivers/blkif/frontend/main.c
 4075806dibjCcfuXv6CINMhxWTw3jQ linux-2.4.26-xen-sparse/arch/xen/drivers/blkif/frontend/vbd.c
 3e5a4e65G3e2s0ghPMgiJ-gBTUJ0uQ linux-2.4.26-xen-sparse/arch/xen/drivers/console/Makefile
 3e5a4e656nfFISThfbyXQOA6HN6YHw linux-2.4.26-xen-sparse/arch/xen/drivers/dom0/Makefile
@@ -437,6 +436,7 @@
 40f552eariuUSB9TWqCPnDLz5zvxMw tools/python/xen/xm/destroy.py
 40e41cd2w0I4En6qrJn4em8HkK_oxQ tools/python/xen/xm/help.py
 40cf2937isyS250zyd0Q2GuEDoNXfQ tools/python/xen/xm/main.py
+411b2c1ehdEGO_CwG0tvn85Q-Tfh5g tools/python/xen/xm/migrate.py
 40cf2937PSslwBliN1g7ofDy2H_RhA tools/python/xen/xm/opts.py
 40cf2937Z8WCNOnO2FcWdubvEAF9QQ tools/python/xen/xm/shutdown.py
 40fcefb2K1xqVVT4D-p7nL2GzS4scg tools/sv/Main.rpy
@@ -477,6 +477,7 @@
 40e9808eZpbdn9q2KSSMGCNvY_ZgpQ tools/xfrd/enum.h
 40e9808easXCzzAZQodEfKAhgUXSPA tools/xfrd/hash_table.c
 40e9808e94BNXIVVKBFHC3rnkvwtJg tools/xfrd/hash_table.h
+411b5139tfKZfWs1LQHmwDR_wjKoxQ tools/xfrd/http.h
 40e9808epW9iHcLXuO3QfUfLzB7onw tools/xfrd/lexis.c
 40e9808egccMhCizayQRGtpBA3L5MQ tools/xfrd/lexis.h
 40e9808ePADCSKL1YgGCt2TbYPnYkw tools/xfrd/lzi_stream.c
