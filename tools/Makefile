@@ -8,6 +8,8 @@ all:
 	$(MAKE) -C xentrace
 	$(MAKE) -C python
 	$(MAKE) -C xfrd
+	$(MAKE) -C xcs
+	$(MAKE) -C ioemu
 
 install: 
 ifneq ($(dist),yes)
@@ -21,6 +23,8 @@ endif
 	$(MAKE) -C python install
 	$(MAKE) -C xfrd install
 	$(MAKE) -C sv install
+	$(MAKE) -C xcs install
+	$(MAKE) -C ioemu install
 
 dist: $(TARGET)
 	$(MAKE) prefix=`pwd`/../../install dist=yes install
@@ -34,4 +38,5 @@ clean:
 	$(MAKE) -C xentrace clean
 	$(MAKE) -C python clean
 	$(MAKE) -C xfrd clean
-
+	$(MAKE) -C xcs clean
+	$(MAKE) -C ioemu clean
