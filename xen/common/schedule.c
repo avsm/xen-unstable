@@ -71,8 +71,9 @@ schedule_data_t schedule_data[NR_CPUS];
  * TODO: It would be nice if the schedulers array could get populated
  * automagically without having to hack the code in here.
  */
-extern struct scheduler sched_bvt_def, sched_rrobin_def, sched_atropos_def;
+extern struct scheduler sched_bvt_def, sched_fbvt_def, sched_rrobin_def, sched_atropos_def;
 static struct scheduler *schedulers[] = { &sched_bvt_def,
+					  &sched_fbvt_def,
                                           &sched_rrobin_def,
                                           &sched_atropos_def,
                                           NULL};
@@ -223,6 +224,25 @@ void domain_wake(struct domain *d)
     }
 
     spin_unlock_irqrestore(&schedule_lock[cpu], flags);
+}
+
+/*
+ * Pausing a domain.
+ */
+void pause_domain(struct domain *domain)
+{
+	domain_sleep(domain);
+	SCHED_OP(pause, domain);	
+}
+
+
+/*
+ * Unpauseing a domain
+ */
+void unpause_domain(struct domain *domain)
+{
+	SCHED_OP(unpause, domain);
+	domain_wake(domain);
 }
 
 /* Block the currently-executing domain until a pertinent event occurs. */

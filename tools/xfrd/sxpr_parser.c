@@ -14,6 +14,7 @@
 #include "lexis.h"
 #include "sxpr_parser.h"
 #include "sys_string.h"
+#include "enum.h"
 
 /** @file
  * Sxpr parsing.
@@ -116,11 +117,13 @@ void ParserState_free(ParserState *z){
     deallocate(z);
 }
 
-int ParserState_new(ParserStateFn *fn, ParserState *parent, ParserState **val){
+int ParserState_new(ParserStateFn *fn, char *name,
+                    ParserState *parent, ParserState **val){
     int err = 0;
     ParserState *z;
     z = ALLOCATE(ParserState);
     if(z){
+        z->name = name;
         z->fn = fn;
         z->parent = parent;
         z->val = ONULL;
@@ -229,9 +232,9 @@ int Parser_input(Parser *p, char *buf, int buf_n){
     return err;
 }
 
-int Parser_push(Parser *p, ParserStateFn *fn){
+int Parser_push(Parser *p, ParserStateFn *fn, char *name){
     int err = 0;
-    err = ParserState_new(fn, p->state, &p->state);
+    err = ParserState_new(fn, name, p->state, &p->state);
     return err;
 }
         
@@ -347,9 +350,45 @@ int get_escape(char c, char *d){
     return err;
 }
 
+int Parser_ready(Parser *p){
+    return CONSP(p->val) || (p->start_state && CONSP(p->start_state->val));
+}
 
+Sxpr Parser_get_val(Parser *p){
+    Sxpr v = ONONE;
+    if(CONSP(p->val)){
+        v = CAR(p->val);
+        p->val = CDR(p->val);
+    } else if (CONSP(p->start_state->val)){
+        p->val = p->start_state->val;
+        p->val = nrev(p->val);
+        p->start_state->val = ONULL;
+        v = CAR(p->val);
+        p->val = CDR(p->val);
+    }        
+    return v;
+}
+
+Sxpr Parser_get_all(Parser *p){
+    Sxpr v = ONULL;
+    if(CONSP(p->val)){
+        v = p->val;
+        p->val = ONONE;
+    } else if(CONSP(p->start_state->val)){
+        v = p->start_state->val;
+        p->start_state->val = ONULL;
+        v = nrev(v);
+    }
+    return v;
+}
+    
 int begin_start(Parser *p, char c){
-    return Parser_push(p, state_start);
+    int err = 0;
+    err = Parser_push(p, state_start, "start");
+    if(err) goto exit;
+    p->start_state = p->state;
+  exit:
+    return err;
 }
 
 int state_start(Parser *p, char c){
@@ -387,7 +426,7 @@ int end_start(Parser *p){
 
 int begin_comment(Parser *p, char c){
     int err = 0;
-    err = Parser_push(p, state_comment);
+    err = Parser_push(p, state_comment, "comment");
     if(err) goto exit;
     err = inputchar(p, c);
   exit:
@@ -410,7 +449,7 @@ int end_comment(Parser *p){
 
 int begin_string(Parser *p, char c){
     int err = 0;
-    err = Parser_push(p, state_string);
+    err = Parser_push(p, state_string, "string");
     if(err) goto exit;
     newtoken(p);
     p->state->delim = c;
@@ -426,7 +465,7 @@ int state_string(Parser *p, char c){
     } else if(c == p->state->delim){
         err = end_string(p);
     } else if(c == '\\'){
-        err = Parser_push(p, state_escape);
+        err = Parser_push(p, state_escape, "escape");
     } else {
         err = savechar(p, c);
     }
@@ -564,7 +603,7 @@ int state_hex(Parser *p, char c){
 
 int begin_atom(Parser *p, char c){
     int err = 0;
-    err = Parser_push(p, state_atom);
+    err = Parser_push(p, state_atom, "atom");
     if(err) goto exit;
     newtoken(p);
     err = savechar(p, c);
@@ -614,7 +653,7 @@ int state_list(Parser *p, char c){
 }
 
 int begin_list(Parser *p, char c){
-    return Parser_push(p, state_list);
+    return Parser_push(p, state_list, "list");
 }
 
 int end_list(Parser *p){
@@ -628,7 +667,7 @@ int end_list(Parser *p){
 static void reset(Parser *z){
   IOStream *error_out = z->error_out;
   int flags = z->flags;
-  zero(z, sizeof(Parser));
+  memzero(z, sizeof(Parser));
   z->buf_n = sizeof(z->buf) - 1;
   z->buf_i = 0;
   z->line_no = 1;
@@ -769,6 +808,7 @@ int at_eof(Parser *p){
     return p->eof;
 }
 
+//#define SXPR_PARSER_MAIN
 #ifdef SXPR_PARSER_MAIN
 /* Stuff for standalone testing. */
 
@@ -874,23 +914,29 @@ int main(int argc, char *argv[]){
     int err = 0;
     char buf[1024];
     int k;
-    Sxpr obj, l, x;
+    Sxpr obj;
+    //Sxpr l, x;
+    int i = 0;
 
     pin = Parser_new();
     set_error_stream(pin, iostdout);
     dprintf("> parse...\n");
     while(1){
-        k = fread(buf, 1, 1024, stdin);
+        k = fread(buf, 1, 1, stdin);
         err = Parser_input(pin, buf, k);
-        dprintf("> Parser_input=%d\n", err);
+        while(Parser_ready(pin)){
+            obj = Parser_get_val(pin);
+            printf("obj %d\n", i++);
+            objprint(iostdout, obj, 0); printf("\n");
+        }
         if(k <= 0) break;
     }
-    obj = pin->val;
-    for(l = obj ; CONSP(l); l = CDR(l)){
-        x = CAR(l);
-        objprint(iostdout, x, 0); printf("\n");
-        eval(x);
-    }
+/*     obj = Parser_get_all(pin); */
+/*     for(l = obj ; CONSP(l); l = CDR(l)){ */
+/*         x = CAR(l); */
+/*         objprint(iostdout, x, 0); printf("\n"); */
+/*         eval(x); */
+/*     } */
     dprintf("> err=%d\n", err);
     return 0;
 }

@@ -9,14 +9,17 @@ Author: Mike Wray <mike.wray@hpl.hp.com>
 """
 
 import string
+import types
 import re
 import sys
 import os
 
 from twisted.internet import defer
+#defer.Deferred.debug = 1
 
 import xen.lowlevel.xc; xc = xen.lowlevel.xc.new()
 import xen.util.ip
+from xen.util.ip import _readline, _readlines
 
 import sxp
 
@@ -26,26 +29,34 @@ xendConsole = XendConsole.instance()
 import server.SrvDaemon
 xend = server.SrvDaemon.instance()
 
+"""Flag for a block device backend domain."""
 SIF_BLK_BE_DOMAIN = (1<<4)
+
+"""Flag for a net device backend domain."""
 SIF_NET_BE_DOMAIN = (1<<5)
 
-def readlines(fd):
-    """Version of readlines safe against EINTR.
+"""Shutdown code for poweroff."""
+DOMAIN_POWEROFF = 0
+"""Shutdown code for reboot."""
+DOMAIN_REBOOT   = 1
+"""Shutdown code for suspend."""
+DOMAIN_SUSPEND  = 2
+
+"""Map shutdown codes to strings."""
+shutdown_reasons = {
+    DOMAIN_POWEROFF: "poweroff",
+    DOMAIN_REBOOT  : "reboot",
+    DOMAIN_SUSPEND : "suspend" }
+
+def shutdown_reason(code):
+    """Get a shutdown reason from a code.
+
+    @param code: shutdown code
+    @type  code: int
+    @return: shutdown reason
+    @rtype:  string
     """
-    import errno
-    
-    lines = []
-    while 1:
-        try:
-            line = fd.readline()
-        except IOError, ex:
-            if ex.errno == errno.EINTR:
-                continue
-            else:
-                raise
-        if line == '': break
-        lines.append(line)
-    return lines
+    return shutdown_reasons.get(code, "?")
 
 class VmError(ValueError):
     """Vm construction error."""
@@ -78,12 +89,17 @@ def lookup_raw_partn(partition):
 
     if not re.match( '/dev/', partition ):
         partition = '/dev/' + partition
-
-    drive = re.split( '[0-9]', partition )[0]
+        
+    """Try and match non-standard scsi raid arraysa
+    """
+    if re.match( '/dev/cciss/c[0-9]+d[0-9]+p[0-9]+', partition ):
+        drive = re.split( 'p[0-9]+', partition )[0]
+    else:
+        drive = re.split( '[0-9]', partition )[0]
 
     if drive == partition:
         fd = os.popen( '/sbin/sfdisk -s ' + drive + ' 2>/dev/null' )
-        line = readline(fd)
+        line = _readline(fd)
         if line:
             return [ { 'device' : blkdev_name_to_number(drive),
                        'start_sector' : long(0),
@@ -95,7 +111,7 @@ def lookup_raw_partn(partition):
     fd = os.popen( '/sbin/sfdisk -d ' + drive + ' 2>/dev/null' )
 
     #['/dev/sda3 : start= 16948575, size=16836120, Id=83, bootable\012']
-    lines = readlines(fd)
+    lines = _readlines(fd)
     for line in lines:
         m = re.search( '^' + partition + '\s*: start=\s*([0-9]+), ' +
                        'size=\s*([0-9]+), Id=\s*(\S+).*$', line)
@@ -139,16 +155,6 @@ def make_disk(dom, uname, dev, mode, recreate=0):
     ctrl.addCallback(fn)
     return ctrl
         
-def make_vif(dom, vif, vmac, recreate=0):
-    """Create a virtual network device for a domain.
-
-    
-    @returns Deferred
-    """
-    xend.netif_create(dom, recreate=recreate)
-    d = xend.netif_dev_create(dom, vif, vmac, recreate=recreate)
-    return d
-
 def vif_up(iplist):
     """send an unsolicited ARP reply for all non link-local IP addresses.
 
@@ -283,7 +289,7 @@ def vm_restore(src, progress=0):
     d = restorefn(state_file=src, progress=progress)
     dom = int(d['dom'])
     if dom < 0:
-        raise VMError('restore failed')
+        raise VmError('restore failed')
     vmconfig = sxp.from_string(d['vmconfig'])
     vm.config = sxp.child_value(vmconfig, 'config')
     deferred = vm.dom_configure(dom)
@@ -305,28 +311,28 @@ def append_deferred(dlist, v):
 
 def _vm_configure1(val, vm):
     d = vm.create_devices()
-    print '_vm_configure1> made devices...'
+    #print '_vm_configure1> made devices...'
     def cbok(x):
-        print '_vm_configure1> cbok', x
+        #print '_vm_configure1> cbok', x
         return x
     d.addCallback(cbok)
     d.addCallback(_vm_configure2, vm)
-    print '_vm_configure1<'
+    #print '_vm_configure1<'
     return d
 
 def _vm_configure2(val, vm):
-    print '>callback _vm_configure2...'
+    #print '>callback _vm_configure2...'
     d = vm.configure_fields()
     def cbok(results):
-        print '_vm_configure2> cbok', results
+        #print '_vm_configure2> cbok', results
         return vm
     def cberr(err):
-        print '_vm_configure2> cberr', err
+        #print '_vm_configure2> cberr', err
         vm.destroy()
         return err
     d.addCallback(cbok)
     d.addErrback(cberr)
-    print '<_vm_configure2'
+    #print '<_vm_configure2'
     return d
 
 class XendDomainInfo:
@@ -356,6 +362,8 @@ class XendDomainInfo:
         self.state = self.STATE_OK
         #todo: set to migrate info if migrating
         self.migrate = None
+        #Whether to auto-restart
+        self.autorestart = 0
 
     def setdom(self, dom):
         self.dom = int(dom)
@@ -412,6 +420,8 @@ class XendDomainInfo:
         try:
             self.name = sxp.child_value(config, 'name')
             self.memory = int(sxp.child_value(config, 'memory', '128'))
+            if sxp.child(config, 'autorestart', None):
+                self.autorestart = 1
             self.configure_backends()
             image = sxp.child_value(config, 'image')
             image_name = sxp.name(image)
@@ -420,14 +430,18 @@ class XendDomainInfo:
                 raise VmError('unknown image type: ' + image_name)
             image_handler(self, image)
             deferred = self.configure()
+            def cbok(x):
+                print 'vm_create> cbok', x
+                return x
+            def cberr(err):
+                self.destroy()
+                return err
+            deferred.addCallback(cbok)
+            deferred.addErrback(cberr)
         except StandardError, ex:
             # Catch errors, cleanup and re-raise.
             self.destroy()
             raise
-        def cbok(x):
-            print 'vm_create> cbok', x
-            return x
-        deferred.addCallback(cbok)
         print 'vm_create<'
         return deferred
 
@@ -503,6 +517,9 @@ class XendDomainInfo:
         devices have been released.
         """
         if self.dom is None: return 0
+        chan = xend.getDomChannel(self.dom)
+        if chan:
+            chan.close()
         return xc.domain_destroy(dom=self.dom)
 
     def cleanup(self):
@@ -611,7 +628,7 @@ class XendDomainInfo:
             if not os.path.isfile(kernel):
                 raise VmError('Kernel image does not exist: %s' % kernel)
             if ramdisk and not os.path.isfile(ramdisk):
-                raise VMError('Kernel ramdisk does not exist: %s' % ramdisk)
+                raise VmError('Kernel ramdisk does not exist: %s' % ramdisk)
         print 'create-domain> init_domain...'
         self.init_domain()
         print 'create_domain>', 'dom=', self.dom
@@ -691,12 +708,16 @@ class XendDomainInfo:
         """
         d = dom_get(dom)
         if not d:
-            raise VMError("Domain not found: %d" % dom)
+            raise VmError("Domain not found: %d" % dom)
         try:
             self.setdom(dom)
             self.name = d['name']
             self.memory = d['memory']/1024
             deferred = self.configure()
+            def cberr(err):
+                self.destroy()
+                return err
+            deferred.addErrback(cberr)
         except StandardError, ex:
             self.destroy()
             raise
@@ -781,14 +802,11 @@ def vm_dev_vif(vm, val, index):
         raise VmError('vif: vif in netif backend domain')
     vif = index #todo
     vmac = sxp.child_value(val, "mac")
-    defer = make_vif(vm.dom, vif, vmac, vm.recreate)
+    xend.netif_create(vm.dom, recreate=vm.recreate)
+    defer = xend.netif_dev_create(vm.dom, vif, val, recreate=vm.recreate)
     def fn(id):
         dev = xend.netif_dev(vm.dom, vif)
-        devid = sxp.attribute(val, 'id')
-        if devid:
-            dev.setprop('id', devid)
-        bridge = sxp.child_value(val, "bridge")
-        dev.up(bridge)
+        dev.vifctl('up', vmname=vm.name)
         vm.add_device('vif', dev)
         print 'vm_dev_vif> created', dev
         return id
@@ -807,10 +825,10 @@ def vm_dev_vbd(vm, val, index):
     vdev = index
     uname = sxp.child_value(val, 'uname')
     if not uname:
-        raise VMError('vbd: Missing uname')
+        raise VmError('vbd: Missing uname')
     dev = sxp.child_value(val, 'dev')
     if not dev:
-        raise VMError('vbd: Missing dev')
+        raise VmError('vbd: Missing dev')
     mode = sxp.child_value(val, 'mode', 'r')
     defer = make_disk(vm.dom, uname, dev, mode, vm.recreate)
     def fn(vbd):
@@ -821,7 +839,7 @@ def vm_dev_vbd(vm, val, index):
     return defer
 
 def parse_pci(val):
-    if isinstance(val, StringType):
+    if isinstance(val, types.StringType):
         radix = 10
         if val.startswith('0x') or val.startswith('0X'):
             radix = 16
@@ -833,24 +851,24 @@ def parse_pci(val):
 def vm_dev_pci(vm, val, index):
     bus = sxp.child_value(val, 'bus')
     if not bus:
-        raise VMError('pci: Missing bus')
+        raise VmError('pci: Missing bus')
     dev = sxp.child_value(val, 'dev')
     if not dev:
-        raise VMError('pci: Missing dev')
+        raise VmError('pci: Missing dev')
     func = sxp.child_value(val, 'func')
     if not func:
-        raise VMError('pci: Missing func')
+        raise VmError('pci: Missing func')
     try:
         bus = parse_pci(bus)
         dev = parse_pci(dev)
         func = parse_pci(func)
     except:
-        raise VMError('pci: invalid parameter')
+        raise VmError('pci: invalid parameter')
     rc = xc.physdev_pci_access_modify(dom=vm.dom, bus=bus, dev=dev,
                                       func=func, enable=1)
     if rc < 0:
         #todo non-fatal
-        raise VMError('pci: Failed to configure device: bus=%s dev=%s func=%s' %
+        raise VmError('pci: Failed to configure device: bus=%s dev=%s func=%s' %
                       (bus, dev, func))
     return rc
     

@@ -1,6 +1,11 @@
 # Copyright (C) 2004 Mike Wray <mike.wray@hp.com>
 """Client API for the HTTP interface on xend.
 Callable as a script - see main().
+
+This API is the 'control-plane' for xend.
+The 'data-plane' is done separately. For example, consoles
+are accessed via sockets on xend, but the list of consoles
+is accessible via this API.
 """
 import sys
 import httplib
@@ -13,6 +18,9 @@ import sxp
 import PrettyPrint
 
 DEBUG = 0
+
+class XendError(RuntimeError):
+    pass
 
 class Foo(httplib.HTTPResponse):
 
@@ -27,6 +35,8 @@ class Foo(httplib.HTTPResponse):
 
 
 def sxprio(sxpr):
+    """Convert an sxpr to a string.
+    """
     io = StringIO()
     sxp.show(sxpr, out=io)
     print >> io
@@ -83,6 +93,12 @@ def dmesgurl(location, root, id=''):
     return urljoin(location, root, 'dmesg/', id)
 
 def xend_request(url, method, data=None):
+    """Make a request to xend.
+
+    url    xend request url
+    method http method: POST or GET
+    data   request argument data (dict)
+    """
     urlinfo = urlparse.urlparse(url)
     (uproto, ulocation, upath, uparam, uquery, ufrag) = urlinfo
     if DEBUG: print url, urlinfo
@@ -108,7 +124,7 @@ def xend_request(url, method, data=None):
     if resp.status in [204, 404]:
         return None
     if resp.status not in [200, 201, 202, 203]:
-        raise RuntimeError(resp.reason)
+        raise XendError(resp.reason)
     pin = sxp.Parser()
     data = resp.read()
     if DEBUG: print "***data" , data
@@ -125,20 +141,37 @@ def xend_request(url, method, data=None):
     return val
 
 def xend_get(url, args=None):
+    """Make a xend request using GET.
+    Requests using GET are 'safe' and may be repeated without
+    nasty side-effects.
+    """
     return xend_request(url, "GET", args)
 
 def xend_call(url, data):
+    """Make xend request using POST.
+    Requests using POST potentially cause side-effects and should
+    not be repeated unless it really is wanted to do the side
+    effect again.
+    """
     return xend_request(url, "POST", data)
 
 class Xend:
 
+    """Default location of the xend server."""
     SRV_DEFAULT = "localhost:8000"
+
+    """Default path to the xend root on the server."""
     ROOT_DEFAULT = "/xend/"
 
     def __init__(self, srv=None, root=None):
         self.bind(srv, root)
 
     def bind(self, srv=None, root=None):
+        """Bind to a given server.
+
+        srv  server location (host:port)
+        root server xend root path
+        """
         if srv is None: srv = self.SRV_DEFAULT
         if root is None: root = self.ROOT_DEFAULT
         if not root.endswith('/'): root += '/'
@@ -177,10 +210,15 @@ class Xend:
                          {'op'      : 'cpu_rrobin_slice_set',
                           'slice'   : slice })
     
-    def xend_node_cpu_bvt_slice_set(self, slice):
+    def xend_node_cpu_bvt_slice_set(self, ctx_allow):
         return xend_call(self.nodeurl(),
                          {'op'      : 'cpu_bvt_slice_set',
-                          'slice'   : slice })
+                          'ctx_allow'   : ctx_allow })
+    
+    def xend_node_cpu_fbvt_slice_set(self, ctx_allow):
+        return xend_call(self.nodeurl(),
+                         {'op'      : 'cpu_fbvt_slice_set',
+                          'ctx_allow'   : ctx_allow })
 
     def xend_domains(self):
         return xend_get(self.domainurl())
@@ -201,9 +239,10 @@ class Xend:
         return xend_call(self.domainurl(id),
                          {'op'      : 'pause'})
 
-    def xend_domain_shutdown(self, id):
+    def xend_domain_shutdown(self, id, reason):
         return xend_call(self.domainurl(id),
-                         {'op'      : 'shutdown'})
+                         {'op'      : 'shutdown',
+                          'reason'  : reason })
 
     def xend_domain_destroy(self, id):
         return xend_call(self.domainurl(id),
@@ -232,10 +271,19 @@ class Xend:
     def xend_domain_cpu_bvt_set(self, id, mcuadv, warp, warpl, warpu):
         return xend_call(self.domainurl(id),
                          {'op'      : 'cpu_bvt_set',
-                          'mcuadv'  : mvuadv,
+                          'mcuadv'  : mcuadv,
                           'warp'    : warp,
                           'warpl'   : warpl,
                           'warpu'   : warpu })
+    
+    def xend_domain_cpu_fbvt_set(self, id, mcuadv, warp, warpl, warpu):
+        return xend_call(self.domainurl(id),
+                         {'op'      : 'cpu_fbvt_set',
+                          'mcuadv'  : mcuadv,
+                          'warp'    : warp,
+                          'warpl'   : warpl,
+                          'warpu'   : warpu })
+
 
     def xend_domain_cpu_atropos_set(self, id, period, slice, latency, xtratime):
         return xend_call(self.domainurl(id),

@@ -380,7 +380,6 @@ static task_slice_t bvt_do_schedule(s_time_t now)
     next->min_slice = ctx_allow;
     ret.task = next;
     ret.time = r_time;
-
     return ret;
 }
 

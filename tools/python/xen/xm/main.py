@@ -5,10 +5,12 @@ import os
 import os.path
 import sys
 from getopt import getopt
+import socket
 
 from xen.xend import PrettyPrint
 from xen.xend import sxp
 from xen.xend.XendClient import server
+from xen.xend.XendClient import main as xend_client_main
 from xen.xm import create, shutdown
 
 class Prog:
@@ -65,6 +67,13 @@ class Xm:
         sys.exit(1)
 
     def main(self, args):
+        try:
+            self.main_call(args)
+        except socket.error, ex:
+            print >>sys.stderr, ex
+            self.err("Error connecting to xend, is xend running?")
+
+    def main_call(self, args):
         """Main entry point. Dispatches to the progs.
         """
         self.name = args[0]
@@ -347,18 +356,52 @@ xm.prog(ProgBvt)
 
 class ProgBvtslice(Prog):
     group = 'scheduler'
-    name = "bvtslice"
-    info = """Set the BVT scheduler slice."""
+    name = "bvt_ctxallow"
+    info = """Set the BVT scheduler context switch allowance."""
 
     def help(self, args):
-        print args[0], 'SLICE'
-        print '\nSet Borrowed Virtual Time scheduler slice.'
+        print args[0], 'CTX_ALLOW'
+        print '\nSet Borrowed Virtual Time scheduler context switch allowance.'
 
     def main(self, args):
-        if len(args) < 2: self.err('%s: Missing slice' % args[0])
+        if len(args) < 2: self.err('%s: Missing context switch allowance'
+                                                            % args[0])
         server.xend_node_cpu_bvt_slice_set(slice)
 
 xm.prog(ProgBvtslice)
+
+class ProgFbvt(Prog):
+    group = 'scheduler'
+    name = "fbvt"
+    info = """Set FBVT scheduler parameters."""
+    
+    def help(self, args):
+        print args[0], "DOM MCUADV WARP WARPL WARPU"
+        print '\nSet Fair Borrowed Virtual Time scheduler parameters.'
+
+    def main(self, args):
+        if len(args) != 6: self.err("%s: Invalid argument(s)" % args[0])
+        v = map(int, args[1:6])
+        server.xend_domain_cpu_fbvt_set(*v)
+
+xm.prog(ProgFbvt)
+
+class ProgFbvtslice(Prog):
+    group = 'scheduler'
+    name = "fbvt_ctxallow"
+    info = """Set the FBVT scheduler context switch allowance."""
+
+    def help(self, args):
+        print args[0], 'CTX_ALLOW'
+        print '\nSet Fair Borrowed Virtual Time scheduler context switch allowance.'
+
+    def main(self, args):
+        if len(args) < 2: self.err('%s: Missing context switch allowance.' 
+                                                                % args[0])
+        server.xend_node_cpu_fbvt_slice_set(slice)
+
+xm.prog(ProgFbvtslice)
+
 
 class ProgAtropos(Prog):
     group = 'scheduler'
@@ -443,6 +486,22 @@ class ProgConsole(Prog):
         console_client.connect("localhost", int(port))
 
 xm.prog(ProgConsole)
+
+class ProgCall(Prog):
+    name = "call"
+    info = "Call xend api functions."
+
+    def help (self, args):
+        print "call fn argss..."
+        print """
+        Call a xend HTTP API function. The leading 'xend_' on the function
+can be omitted. See xen.xend.XendClient for the API functions.
+"""
+
+    def main(self, args):
+        xend_client_main(args)
+
+xm.prog(ProgCall)
 
 class ProgDmesg(Prog):
     group = 'host'

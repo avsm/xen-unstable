@@ -27,7 +27,11 @@ class SrvDomain(SrvDir):
         return val
 
     def op_shutdown(self, op, req):
-        val = self.xd.domain_shutdown(self.dom.id)
+        #val = self.xd.domain_shutdown(self.dom.id)
+        fn = FormFn(self.xd.domain_shutdown,
+                    [['dom', 'int'],
+                     ['reason', 'str']])
+        val = fn(req.args, {'dom': self.dom.id})
         req.setResponseCode(202)
         req.setHeader("Location", "%s/.." % req.prePathURL())
         return val
@@ -63,6 +67,16 @@ class SrvDomain(SrvDir):
 
     def op_cpu_bvt_set(self, op, req):
         fn = FormFn(self.xd.domain_cpu_bvt_set,
+                    [['dom', 'int'],
+                     ['mcuadv', 'int'],
+                     ['warp', 'int'],
+                     ['warpl', 'int'],
+                     ['warpu', 'int']])
+        val = fn(req.args, {'dom': self.dom.id})
+        return val
+    
+    def op_cpu_fbvt_set(self, op, req):
+        fn = FormFn(self.xd.domain_cpu_fbvt_set,
                     [['dom', 'int'],
                      ['mcuadv', 'int'],
                      ['warp', 'int'],

@@ -14,8 +14,8 @@
  * Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
-#ifndef _XEN_LIB_SXPR_PARSER_H_
-#define _XEN_LIB_SXPR_PARSER_H_
+#ifndef _XUTIL_SXPR_PARSER_H_
+#define _XUTIL_SXPR_PARSER_H_
 
 #include "sxpr.h"
 #include "iostream.h"
@@ -39,6 +39,7 @@ typedef struct ParserState {
     int count;
     char delim;
     ParserStateFn *fn;
+    char *name;
 } ParserState;
 
 /** Structure representing an input source for the parser.
@@ -69,6 +70,7 @@ typedef struct Parser {
     /** Parsing flags. */
     int flags;
     ParserState *state;
+    ParserState *start_state;
 } Parser;
 
 /** Parser error codes. */
@@ -117,9 +119,15 @@ extern void Parser_free(Parser *z);
 extern Parser * Parser_new(void);
 extern int Parser_input(Parser *p, char *buf, int buf_n);
 extern int Parser_input_eof(Parser *p);
+extern int Parser_input_char(Parser *p, char c);
+extern void set_error_stream(Parser *z, IOStream *error_out);
 
 extern int parse_error_message(Parser *in, char *buf, int n);
 extern int has_error(Parser *in);
 extern int at_eof(Parser *in);
 
-#endif /* ! _XEN_LIB_SXPR_PARSER_H_ */
+int Parser_ready(Parser *p);
+Sxpr Parser_get_val(Parser *p);
+Sxpr Parser_get_all(Parser *p);
+
+#endif /* ! _XUTIL_SXPR_PARSER_H_ */

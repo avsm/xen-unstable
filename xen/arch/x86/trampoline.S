@@ -43,7 +43,11 @@ r_base = .
 	lmsw	%ax		# into protected mode
 	jmp	flush_instr
 flush_instr:
-	ljmpl	$__HYPERVISOR_CS, $0x100000 # 1MB
+#if defined(__x86_64__)
+	ljmpl	$__HYPERVISOR_CS32, $0x100000 # 1MB
+#else        
+	ljmpl	$__HYPERVISOR_CS,   $0x100000 # 1MB
+#endif
 
 idt_48:
 	.word	0			# idt limit = 0
@@ -51,8 +55,12 @@ idt_48:
 
 gdt_48:
 	.word	(LAST_RESERVED_GDT_ENTRY*8)+7
+#ifdef __i386__
 	.long	gdt_table-__PAGE_OFFSET
-
+#else
+	.long   0x100200 # gdt_table
+#endif
+        
 .globl SYMBOL_NAME(trampoline_end)
 SYMBOL_NAME_LABEL(trampoline_end)
 

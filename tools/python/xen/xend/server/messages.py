@@ -1,3 +1,4 @@
+import sys
 import struct
 
 from xen.lowlevel import xu
@@ -148,6 +149,9 @@ netif_formats = {
 msg_formats.update(netif_formats)
 
 #============================================================================
+# Domain shutdown message types.
+#============================================================================
+
 CMSG_SHUTDOWN = 6
 
 CMSG_SHUTDOWN_POWEROFF  = 0
@@ -176,8 +180,31 @@ msg_formats.update(shutdown_formats)
 class Msg:
     pass
 
+_next_msgid = 0
+
+def nextid():
+    """Generate the next message id.
+
+    @return: message id
+    @rtype: int
+    """
+    global _next_msgid
+    _next_msgid += 1
+    return _next_msgid
+
 def packMsg(ty, params):
-    if DEBUG: print '>packMsg', ty, params
+    """Pack a message.
+    Any I{mac} parameter is passed in as an int[6] array and converted.
+
+    @param ty: message type name
+    @type ty: string
+    @param params: message parameters
+    @type params: dicy
+    @return: message
+    @rtype: xu message
+    """
+    msgid = nextid()
+    if DEBUG: print '>packMsg', msgid, ty, params
     (major, minor) = msg_formats[ty]
     args = {}
     for (k, v) in params.items():
@@ -189,11 +216,22 @@ def packMsg(ty, params):
     if DEBUG:
         for (k, v) in args.items():
             print 'packMsg>', k, v, type(v)
-    msgid = 0
     msg = xu.message(major, minor, msgid, args)
+    if DEBUG: print '<packMsg', msg.get_header()['id'], ty, params
     return msg
 
 def unpackMsg(ty, msg):
+    """Unpack a message.
+    Any mac addresses in the message are converted to int[6] array
+    in the return dict.
+
+    @param ty:  message type
+    @type ty: string
+    @param msg: message
+    @type msg: xu message
+    @return: parameters
+    @rtype: dict
+    """
     args = msg.get_payload()
     mac = [0, 0, 0, 0, 0, 0]
     macs = []
@@ -208,12 +246,42 @@ def unpackMsg(ty, msg):
         args['mac'] = mac
         for k in macs:
             del args[k]
-    if DEBUG: print '<unpackMsg', ty, args
+    if DEBUG:
+        msgid = msg.get_header()['id']
+        print '<unpackMsg', msgid, ty, args
     return args
 
 def msgTypeName(ty, subty):
+    """Convert a message type, subtype pair to a message type name.
+
+    @param ty: message type
+    @type ty: int
+    @param subty: message subtype
+    @type ty: int
+    @return: message type name (or None)
+    @rtype: string or None
+    """
     for (name, info) in msg_formats.items():
         if info[0] == ty and info[1] == subty:
             return name
     return None
+
+def printMsg(msg, out=sys.stdout, all=0):
+    """Print a message.
+
+    @param msg: message
+    @type msg: xu message
+    @param out: where to print to
+    @type out: stream
+    @param all: print payload if true
+    @type all: bool
+    """
+    hdr = msg.get_header()
+    major = hdr['type']
+    minor = hdr['subtype']
+    msgid = hdr['id']
+    ty = msgTypeName(major, minor)
+    print >>out, 'message:', 'type=', ty, '%d:%d' % (major, minor), 'id=%d' % msgid
+    if all:
+        print >>out, 'payload=', unpackMsg(ty, msg)
 

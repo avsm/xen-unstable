@@ -4,6 +4,9 @@
 #include <xen/config.h>
 #include <xen/types.h>
 #include <xen/spinlock.h>
+#ifdef LINUX_2_6
+#include <linux/thread_info.h>
+#endif
 #include <asm/ptrace.h>
 #include <xen/smp.h>
 #include <asm/page.h>
@@ -15,6 +18,7 @@
 #include <xen/time.h>
 #include <xen/ac_timer.h>
 #include <xen/delay.h>
+#include <asm/atomic.h>
 
 #define STACK_SIZE (2*PAGE_SIZE)
 #include <asm/current.h>
@@ -89,10 +93,11 @@ struct domain
     char     name[MAX_DOMAIN_NAME];
     s_time_t create_time;
 
-    spinlock_t       page_list_lock;
-    struct list_head page_list;
-    unsigned int     tot_pages; /* number of pages currently possesed */
-    unsigned int     max_pages; /* max number of pages that can be possesed */
+    spinlock_t       page_alloc_lock; /* protects all the following fields  */
+    struct list_head page_list;       /* linked list, of size tot_pages     */
+    unsigned int     tot_pages;       /* number of pages currently possesed */
+    unsigned int     max_pages;       /* maximum value for tot_pages        */
+    unsigned int     xenheap_pages;   /* # pages allocated from Xen heap    */
 
     /* Scheduling. */
     struct list_head run_list;
@@ -147,17 +152,6 @@ struct domain
 
 #include <asm/uaccess.h> /* for KERNEL_DS */
 
-#define IDLE0_TASK(_t)           \
-{                                \
-    processor:   0,              \
-    domain:      IDLE_DOMAIN_ID, \
-    mm:          IDLE0_MM,       \
-    addr_limit:  KERNEL_DS,      \
-    thread:      INIT_THREAD,    \
-    flags:       1<<DF_IDLETASK, \
-    refcnt:      ATOMIC_INIT(1)  \
-}
-
 extern struct domain idle0_task;
 
 extern struct domain *idle_task[NR_CPUS];
@@ -194,7 +188,6 @@ extern void domain_destruct(struct domain *d);
 extern void domain_kill(struct domain *d);
 extern void domain_crash(void);
 extern void domain_shutdown(u8 reason);
-extern void domain_relinquish_memory(struct domain *d);
 
 void new_thread(struct domain *d,
                 unsigned long start_pc,
@@ -217,6 +210,8 @@ int  sched_id();
 void init_idle_task(void);
 void domain_wake(struct domain *d);
 void domain_sleep(struct domain *d);
+void pause_domain(struct domain *d);
+void unpause_domain(struct domain *d);
 
 void __enter_scheduler(void);
 
@@ -267,14 +262,14 @@ static inline void domain_pause(struct domain *d)
 {
     ASSERT(d != current);
     atomic_inc(&d->pausecnt);
-    domain_sleep(d);
+    pause_domain(d);
 }
 
 static inline void domain_unpause(struct domain *d)
 {
     ASSERT(d != current);
     if ( atomic_dec_and_test(&d->pausecnt) )
-        domain_wake(d);
+        unpause_domain(d);
 }
 
 static inline void domain_unblock(struct domain *d)
@@ -287,13 +282,13 @@ static inline void domain_pause_by_systemcontroller(struct domain *d)
 {
     ASSERT(d != current);
     if ( !test_and_set_bit(DF_CTRLPAUSE, &d->flags) )
-        domain_sleep(d);
+        pause_domain(d);
 }
 
 static inline void domain_unpause_by_systemcontroller(struct domain *d)
 {
     if ( test_and_clear_bit(DF_CTRLPAUSE, &d->flags) )
-        domain_wake(d);
+        unpause_domain(d);
 }
 
 
