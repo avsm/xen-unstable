@@ -50,7 +50,7 @@ long arch_do_dom0_op(dom0_op_t *op, dom0_op_t *u_dom0_op)
 {
     long ret = 0;
 
-    if ( !IS_PRIV(current) )
+    if ( !IS_PRIV(current->domain) )
         return -EPERM;
 
     switch ( op->cmd )
@@ -145,7 +145,7 @@ long arch_do_dom0_op(dom0_op_t *op, dom0_op_t *u_dom0_op)
     return ret;
 }
 
-void arch_getdomaininfo_ctxt(struct domain *d, full_execution_context_t *c)
+void arch_getdomaininfo_ctxt(struct exec_domain *d, full_execution_context_t *c)
 { 
     int i;
 
@@ -153,7 +153,7 @@ void arch_getdomaininfo_ctxt(struct domain *d, full_execution_context_t *c)
     memcpy(&c->cpu_ctxt, 
            &d->thread.user_ctxt,
            sizeof(d->thread.user_ctxt));
-    if ( test_bit(DF_DONEFPUINIT, &d->flags) )
+    if ( test_bit(EDF_DONEFPUINIT, &d->ed_flags) )
         c->flags |= ECF_I387_VALID;
     memcpy(&c->fpu_ctxt,
            &d->thread.i387,
@@ -172,11 +172,11 @@ void arch_getdomaininfo_ctxt(struct domain *d, full_execution_context_t *c)
     c->ldt_base = d->mm.ldt_base;
     c->ldt_ents = d->mm.ldt_ents;
     c->gdt_ents = 0;
-    if ( GET_GDT_ADDRESS(d) == GDT_VIRT_START )
+    if ( GET_GDT_ADDRESS(d) == GDT_VIRT_START(d) )
     {
         for ( i = 0; i < 16; i++ )
             c->gdt_frames[i] = 
-                l1_pgentry_to_pagenr(d->mm.perdomain_pt[i]);
+                l1_pgentry_to_pagenr(d->mm.perdomain_ptes[i]);
         c->gdt_ents = GET_GDT_ENTRIES(d);
     }
     c->guestos_ss  = d->thread.guestos_ss;
