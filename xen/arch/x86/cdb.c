@@ -38,9 +38,13 @@ dbg_copy_from_user(void *dest, const void *src, unsigned len)
 	__asm__ __volatile__(
 		"1:	rep; movsb\n"
 		"2:\n"
+		".section .fixup,\"ax\"\n"
+		"3:     addl $4, %%esp\n"
+		"       jmp 2b\n"
+		".previous\n"
 		".section __pre_ex_table,\"a\"\n"
 		"	.align 4\n"
-		"	.long 1b,2b\n"
+		"	.long 1b,3b\n"
 		".previous\n"
 		".section __ex_table,\"a\"\n"
 		"	.align 4\n"
@@ -215,7 +219,7 @@ handle_register_read_command(struct xen_regs *regs, struct xendbg_context *ctx)
 	char buf[121];
 
 	sprintf(buf,
-		"%.08x%.08x%.08x%.08x%.08x%.08x%.08x%.08x%.08x%.08x%.08x%.08x%.08x%.08x%.08x",
+		"%.08x%.08x%.08x%.08x%.08x%.08x%.08x%.08x%.08x%.08x%.08x%.08x%.08x%.08x%.08x%.08x",
 		bswab32(regs->eax),
 		bswab32(regs->ecx),
 		bswab32(regs->edx),
@@ -228,6 +232,7 @@ handle_register_read_command(struct xen_regs *regs, struct xendbg_context *ctx)
 		bswab32(regs->eflags),
 		bswab32(regs->cs),
 		bswab32(regs->ss),
+		bswab32(regs->ds),
 		bswab32(regs->es),
 		bswab32(regs->fs),
 		bswab32(regs->gs));
@@ -312,7 +317,7 @@ xdb_ctx = {
 	serhnd : -1
 };
 
-void
+int
 __trap_to_cdb(struct xen_regs *regs)
 {
 	int resume = 0;
@@ -324,7 +329,7 @@ __trap_to_cdb(struct xen_regs *regs)
 
 	if (xdb_ctx.serhnd < 0) {
 		dbg_printk("Debugger not ready yet.\n");
-		return;
+		return 0;
 	}
 
 	/* We rely on our caller to ensure we're only on one processor
@@ -342,7 +347,7 @@ __trap_to_cdb(struct xen_regs *regs)
 	if (!atomic_dec_and_test(&xendbg_running)) {
 		printk("WARNING WARNING WARNING: Avoiding recursive xendbg.\n");
 		atomic_inc(&xendbg_running);
-		return;
+		return 0;
 	}
 
 	smp_send_stop();
@@ -381,6 +386,7 @@ __trap_to_cdb(struct xen_regs *regs)
 	watchdog_on = old_watchdog;
 	atomic_inc(&xendbg_running);
 	local_irq_restore(flags);
+	return 0;
 }
 
 static int
