@@ -176,7 +176,7 @@
 #include <asm/uaccess.h>
 #include <asm/domain_page.h>
 
-#if 0
+#if 1
 #define MEM_LOG(_f, _a...) printk("DOM%d: (file=memory.c, line=%d) " _f "\n", current->domain, __LINE__, ## _a )
 #else
 #define MEM_LOG(_f, _a...) ((void)0)
@@ -227,16 +227,16 @@ void __init init_frametable(unsigned long nr_pages)
     max_page = nr_pages;
     frame_table_size = nr_pages * sizeof(struct pfn_info);
     frame_table_size = (frame_table_size + PAGE_SIZE - 1) & PAGE_MASK;
-    free_pfns = nr_pages - 
-        ((MAX_MONITOR_ADDRESS + frame_table_size) >> PAGE_SHIFT);
-
-    frame_table = phys_to_virt(MAX_MONITOR_ADDRESS);
+    frame_table = (frame_table_t *)FRAMETABLE_VIRT_START;
     memset(frame_table, 0, frame_table_size);
+
+    free_pfns = nr_pages - 
+        ((__pa(frame_table) + frame_table_size) >> PAGE_SHIFT);
 
     /* Put all domain-allocatable memory on a free list. */
     spin_lock_irqsave(&free_list_lock, flags);
     INIT_LIST_HEAD(&free_list);
-    for( page_index = (MAX_MONITOR_ADDRESS + frame_table_size) >> PAGE_SHIFT; 
+    for( page_index = (__pa(frame_table) + frame_table_size) >> PAGE_SHIFT; 
          page_index < nr_pages; 
          page_index++ )      
     {
@@ -274,6 +274,7 @@ static int inc_page_refcnt(unsigned long page_nr, unsigned int type)
                     flags & PG_type_mask, type, page_type_count(page));
             return -1;
         }
+
         page->flags |= type;
     }
 
@@ -337,7 +338,7 @@ static int get_l2_table(unsigned long page_nr)
 {
     l2_pgentry_t *p_l2_entry, l2_entry;
     int i, ret=0;
-    
+   
     ret = inc_page_refcnt(page_nr, PGT_l2_page_table);
     if ( ret != 0 ) return (ret < 0) ? ret : 0;
     
@@ -359,7 +360,7 @@ static int get_l2_table(unsigned long page_nr)
         if ( ret ) ret = get_twisted_l2_table(page_nr, l2_entry);
         if ( ret ) goto out;
     }
-
+    
     /* Now we simply slap in our high mapping. */
     memcpy(p_l2_entry, 
            idle_pg_table[smp_processor_id()] + DOMAIN_ENTRIES_PER_L2_PAGETABLE,
@@ -574,6 +575,7 @@ static int mod_l1_entry(unsigned long pa, l1_pgentry_t new_l1_entry)
         if ( (l1_pgentry_val(new_l1_entry) &
               (_PAGE_GLOBAL|_PAGE_PAT)) ) 
         {
+
             MEM_LOG("Bad L1 entry val %04lx",
                     l1_pgentry_val(new_l1_entry) & 
                     (_PAGE_GLOBAL|_PAGE_PAT));
@@ -593,8 +595,9 @@ static int mod_l1_entry(unsigned long pa, l1_pgentry_t new_l1_entry)
             }
             
             if ( get_page(l1_pgentry_to_pagenr(new_l1_entry),
-                          l1_pgentry_val(new_l1_entry) & _PAGE_RW) )
+                          l1_pgentry_val(new_l1_entry) & _PAGE_RW) ){
                 goto fail;
+            }
         } 
     }
     else if ( (l1_pgentry_val(old_l1_entry) & _PAGE_PRESENT) )
@@ -699,22 +702,21 @@ static int do_extended_command(unsigned long ptr, unsigned long val)
     return err;
 }
 
-/* Apply updates to page table @pagetable_id within the current domain. */
-int do_process_page_updates(page_update_request_t *updates, int count)
+int do_process_page_updates(page_update_request_t *ureqs, int count)
 {
-    page_update_request_t cur;
+    page_update_request_t req;
     unsigned long flags, pfn;
     struct pfn_info *page;
     int err = 0, i;
 
     for ( i = 0; i < count; i++ )
     {
-        if ( copy_from_user(&cur, updates, sizeof(cur)) )
+        if ( copy_from_user(&req, ureqs, sizeof(req)) )
         {
             kill_domain_with_errmsg("Cannot read page update request");
-        }
+        } 
 
-        pfn = cur.ptr >> PAGE_SHIFT;
+        pfn = req.ptr >> PAGE_SHIFT;
         if ( pfn >= max_page )
         {
             MEM_LOG("Page out of range (%08lx > %08lx)", pfn, max_page);
@@ -724,54 +726,48 @@ int do_process_page_updates(page_update_request_t *updates, int count)
         err = 1;
 
         /* Least significant bits of 'ptr' demux the operation type. */
-        switch ( cur.ptr & (sizeof(l1_pgentry_t)-1) )
+        switch ( req.ptr & (sizeof(l1_pgentry_t)-1) )
         {
-
             /*
              * PGREQ_NORMAL: Normal update to any level of page table.
              */
         case PGREQ_NORMAL:
             page = frame_table + pfn;
             flags = page->flags;
+            
             if ( DOMAIN_OKAY(flags) )
             {
                 switch ( (flags & PG_type_mask) )
                 {
                 case PGT_l1_page_table: 
-                    err = mod_l1_entry(cur.ptr, mk_l1_pgentry(cur.val)); 
+                    err = mod_l1_entry(req.ptr, mk_l1_pgentry(req.val)); 
                     break;
                 case PGT_l2_page_table: 
-                    err = mod_l2_entry(cur.ptr, mk_l2_pgentry(cur.val)); 
+                    err = mod_l2_entry(req.ptr, mk_l2_pgentry(req.val)); 
                     break;
                 default:
-                    MEM_LOG("Update to non-pt page %08lx", cur.ptr);
+                    MEM_LOG("Update to non-pt page %08lx", req.ptr);
                     break;
                 }
             }
+            else
+            {
+                MEM_LOG("Bad domain normal update (dom %d, pfn %ld)",
+                        current->domain, pfn);
+            }
             break;
 
-            /*
-             * PGREQ_UNCHECKED_UPDATE: Make an unchecked update to a
-             * bottom-level page-table entry.
-             * Restrictions apply:
-             *  1. Update only allowed by domain 0.
-             *  2. Update must be to a level-1 pte belonging to dom0.
-             */
-        case PGREQ_UNCHECKED_UPDATE:
-            cur.ptr &= ~(sizeof(l1_pgentry_t) - 1);
+        case PGREQ_MPT_UPDATE:
             page = frame_table + pfn;
-            flags = page->flags;
-            if ( (flags | current->domain) == PGT_l1_page_table )
+            if ( DOMAIN_OKAY(page->flags) )
             {
-                unsigned long *va = map_domain_mem(cur.ptr);
-                *va = cur.val;
-                unmap_domain_mem(va);
+                machine_to_phys_mapping[pfn] = req.val;
                 err = 0;
             }
             else
             {
-                MEM_LOG("UNCHECKED_UPDATE: Bad domain %d, or"
-                        " bad pte type %08lx", current->domain, flags);
+                MEM_LOG("Bad domain MPT update (dom %d, pfn %ld)",
+                        current->domain, pfn);
             }
             break;
 
@@ -780,12 +776,27 @@ int do_process_page_updates(page_update_request_t *updates, int count)
              * in the least-siginificant bits of the 'value' field.
              */
         case PGREQ_EXTENDED_COMMAND:
-            cur.ptr &= ~(sizeof(l1_pgentry_t) - 1);
-            err = do_extended_command(cur.ptr, cur.val);
+            req.ptr &= ~(sizeof(l1_pgentry_t) - 1);
+            err = do_extended_command(req.ptr, req.val);
             break;
 
+        case PGREQ_UNCHECKED_UPDATE:
+            req.ptr &= ~(sizeof(l1_pgentry_t) - 1);
+            if ( current->domain == 0 )
+            {
+                unsigned long *ptr = map_domain_mem(req.ptr);
+                *ptr = req.val;
+                unmap_domain_mem(ptr);
+                err = 0;
+            }
+            else
+            {
+                MEM_LOG("Bad unchecked update attempt");
+            }
+            break;
+            
         default:
-            MEM_LOG("Invalid page update command %08lx", cur.ptr);
+            MEM_LOG("Invalid page update command %08lx", req.ptr);
             break;
         }
 
@@ -794,13 +805,14 @@ int do_process_page_updates(page_update_request_t *updates, int count)
             kill_domain_with_errmsg("Illegal page update request");
         }
 
-        updates++;
+        ureqs++;
     }
 
     if ( tlb_flush[smp_processor_id()] )
     {
         tlb_flush[smp_processor_id()] = 0;
         __write_cr3_counted(pagetable_val(current->mm.pagetable));
+
     }
 
     return(0);
