@@ -1,5 +1,4 @@
-/* -*-  Mode:C; c-basic-offset:4; tab-width:4 -*-
- ****************************************************************************
+/****************************************************************************
  * (C) 2002-2003 - Rolf Neugebauer - Intel Research Cambridge
  * (C) 2002-2003 University of Cambridge
  ****************************************************************************
@@ -14,9 +13,7 @@
  *  Copyright (C) 1991, 1992, 1995  Linus Torvalds
  */
 
-#include <xen/config.h>
 #include <xen/errno.h>
-#include <xen/event.h>
 #include <xen/sched.h>
 #include <xen/lib.h>
 #include <xen/config.h>
@@ -52,7 +49,7 @@ static s_time_t        stime_irq;       /* System time at last 'time update' */
 static unsigned long   wc_sec, wc_usec; /* UTC time at last 'time update'.   */
 static rwlock_t        time_lock = RW_LOCK_UNLOCKED;
 
-static void timer_interrupt(int irq, void *dev_id, struct xen_regs *regs)
+void timer_interrupt(int irq, void *dev_id, struct xen_regs *regs)
 {
     write_lock_irq(&time_lock);
 
@@ -281,13 +278,10 @@ void update_dom_time(struct domain *d)
     shared_info_t *si = d->shared_info;
     unsigned long flags;
 
-    if ( d->last_propagated_timestamp == full_tsc_irq )
-        return;
-
     read_lock_irqsave(&time_lock, flags);
 
-    d->last_propagated_timestamp = full_tsc_irq;
-    
+    spin_lock(&d->time_lock);
+
     si->time_version1++;
     wmb();
 
@@ -300,9 +294,9 @@ void update_dom_time(struct domain *d)
     wmb();
     si->time_version2++;
 
-    read_unlock_irqrestore(&time_lock, flags);
+    spin_unlock(&d->time_lock);
 
-    send_guest_virq(d, VIRQ_TIMER);
+    read_unlock_irqrestore(&time_lock, flags);
 }
 
 
@@ -328,9 +322,7 @@ void do_settime(unsigned long secs, unsigned long usecs, u64 system_time_base)
 
     write_unlock_irq(&time_lock);
 
-    /* Others will pick up the change at the next tick. */
-    current->last_propagated_timestamp = 0; /* force propagation */
-    update_dom_time(current);
+    update_dom_time(current->domain);
 }
 
 
@@ -385,3 +377,13 @@ void __init time_init(void)
 
     setup_irq(0, &irq0);
 }
+
+/*
+ * Local variables:
+ * mode: C
+ * c-set-style: "BSD"
+ * c-basic-offset: 4
+ * tab-width: 4
+ * indent-tabs-mode: nil
+ * End:
+ */

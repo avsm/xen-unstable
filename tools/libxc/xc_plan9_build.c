@@ -58,33 +58,6 @@ memcpy_toguest(int xc_handle, u32 dom, void *v, int size,
 	return ret;
 }
 
-/* this is a function which can go away. It dumps a hunk of 
- * guest pages to a file (/tmp/dumpit); handy for debugging
- * your image builder. 
- * Xen guys, nuke this if you wish.
- */
-void
-dumpit(int xc_handle, u32 dom,
-       int start_page, int tot, unsigned long *page_array)
-{
-	int i, ofd;
-	unsigned char *vaddr;
-
-	ofd = open("/tmp/dumpit", O_RDWR);
-	for (i = start_page; i < tot; i++) {
-		vaddr = xc_map_foreign_range(xc_handle, dom, PAGE_SIZE,
-					     PROT_READ | PROT_WRITE,
-					     page_array[i]);
-		if (!vaddr) {
-			fprintf(stderr, "Page %d\n", i);
-			perror("shit");
-			read(0, &i, 1);
-			return;
-		}
-		write(ofd, vaddr, 4096);
-		munmap(vaddr, PAGE_SIZE);
-	}
-}
 int
 blah(char *b)
 {
@@ -108,14 +81,14 @@ void
 plan9header(Exec * header)
 {
 	/* header is big-endian */
-	swabby(&header->magic, "magic");
-	swabby(&header->text, "text");
-	swabby(&header->data, "data");
-	swabby(&header->bss, "bss");
-	swabby(&header->syms, "syms");
-	swabby(&header->entry, "entry");
-	swabby(&header->spsz, "spsz");
-	swabby(&header->pcsz, "pcsz");
+	swabby((unsigned long *)&header->magic, "magic");
+	swabby((unsigned long *)&header->text, "text");
+	swabby((unsigned long *)&header->data, "data");
+	swabby((unsigned long *)&header->bss, "bss");
+	swabby((unsigned long *)&header->syms, "syms");
+	swabby((unsigned long *)&header->entry, "entry");
+	swabby((unsigned long *)&header->spsz, "spsz");
+	swabby((unsigned long *)&header->pcsz, "pcsz");
 
 }
 
@@ -133,54 +106,8 @@ static int
 #define L1_PROT (_PAGE_PRESENT|_PAGE_RW|_PAGE_ACCESSED)
 #define L2_PROT (_PAGE_PRESENT|_PAGE_RW|_PAGE_ACCESSED|_PAGE_DIRTY|_PAGE_USER)
 
-static long
-get_tot_pages(int xc_handle, u32 domid)
-{
-	dom0_op_t op;
-	op.cmd = DOM0_GETDOMAININFO;
-	op.u.getdomaininfo.domain = (domid_t) domid;
-	op.u.getdomaininfo.ctxt = NULL;
-	return (do_dom0_op(xc_handle, &op) < 0) ?
-	    -1 : op.u.getdomaininfo.tot_pages;
-}
-
 static int
-get_pfn_list(int xc_handle,
-	     u32 domid, unsigned long *pfn_buf, unsigned long max_pfns)
-{
-	dom0_op_t op;
-	int ret;
-	op.cmd = DOM0_GETMEMLIST;
-	op.u.getmemlist.domain = (domid_t) domid;
-	op.u.getmemlist.max_pfns = max_pfns;
-	op.u.getmemlist.buffer = pfn_buf;
-
-	if (mlock(pfn_buf, max_pfns * sizeof (unsigned long)) != 0)
-		return -1;
-
-	ret = do_dom0_op(xc_handle, &op);
-
-	(void) munlock(pfn_buf, max_pfns * sizeof (unsigned long));
-
-#if 0
-#ifdef DEBUG
-	DPRINTF(("Ret for get_pfn_list is %d\n", ret));
-	if (ret >= 0) {
-		int i, j;
-		for (i = 0; i < op.u.getmemlist.num_pfns; i += 16) {
-			fprintf(stderr, "0x%x: ", i);
-			for (j = 0; j < 16; j++)
-				fprintf(stderr, "0x%lx ", pfn_buf[i + j]);
-			fprintf(stderr, "\n");
-		}
-	}
-#endif
-#endif
-	return (ret < 0) ? -1 : op.u.getmemlist.num_pfns;
-}
-
-static int
-setup_guestos(int xc_handle,
+setup_guest(int xc_handle,
 	      u32 dom,
 	      gzFile kernel_gfd,
 	      unsigned long tot_pages,
@@ -205,8 +132,8 @@ setup_guestos(int xc_handle,
 	unsigned long ksize;
 	mmu_t *mmu = NULL;
 	int i;
-	unsigned long first_page_after_kernel, 
-	  first_data_page, 
+	unsigned long first_page_after_kernel = 0, 
+	  first_data_page = 0, 
 	  page_array_page;
 	unsigned long cpu0pdb, cpu0pte, cpu0ptelast;
 	unsigned long /*last_pfn, */ tot_pte_pages;
@@ -217,7 +144,7 @@ setup_guestos(int xc_handle,
 		goto error_out;
 	}
 
-	if (get_pfn_list(xc_handle, dom, cpage_array, tot_pages) != tot_pages) {
+	if (xc_get_pfn_list(xc_handle, dom, cpage_array, tot_pages) != tot_pages) {
 		PERROR("Could not get the page frame list");
 		goto error_out;
 	}
@@ -431,7 +358,7 @@ setup_guestos(int xc_handle,
 	start_info->flags = 0;
 	DPRINTF((" control event channel is %d\n", control_evtchn));
 	start_info->domain_controller_evtchn = control_evtchn;
-	strncpy(start_info->cmd_line, cmdline, MAX_CMDLINE);
+	strncpy((char *)start_info->cmd_line, cmdline, MAX_CMDLINE);
 	start_info->cmd_line[MAX_CMDLINE - 1] = '\0';
 	munmap(start_info, PAGE_SIZE);
 
@@ -480,7 +407,7 @@ xc_plan9_build(int xc_handle,
 	       unsigned int control_evtchn, unsigned long flags)
 {
 	dom0_op_t launch_op, op;
-	unsigned long load_addr;
+	unsigned long load_addr = 0;
 	long tot_pages;
 	int kernel_fd = -1;
 	gzFile kernel_gfd = NULL;
@@ -488,11 +415,11 @@ xc_plan9_build(int xc_handle,
 	full_execution_context_t st_ctxt, *ctxt = &st_ctxt;
 	unsigned long virt_startinfo_addr;
 
-	if ((tot_pages = get_tot_pages(xc_handle, domid)) < 0) {
+	if ((tot_pages = xc_get_tot_pages(xc_handle, domid)) < 0) {
 		PERROR("Could not find total pages for domain");
 		return 1;
 	}
-	DPRINTF(("get_tot_pages returns %ld pages\n", tot_pages));
+	DPRINTF(("xc_get_tot_pages returns %ld pages\n", tot_pages));
 
 	kernel_fd = open(image_name, O_RDONLY);
 	if (kernel_fd < 0) {
@@ -506,7 +433,7 @@ xc_plan9_build(int xc_handle,
 		return 1;
 	}
 
-	DPRINTF(("get_tot_pages returns %ld pages\n", tot_pages));
+	DPRINTF(("xc_get_tot_pages returns %ld pages\n", tot_pages));
 	if (mlock(&st_ctxt, sizeof (st_ctxt))) {
 		PERROR("Unable to mlock ctxt");
 		return 1;
@@ -514,13 +441,14 @@ xc_plan9_build(int xc_handle,
 
 	op.cmd = DOM0_GETDOMAININFO;
 	op.u.getdomaininfo.domain = (domid_t) domid;
+        op.u.getdomaininfo.exec_domain = 0;
 	op.u.getdomaininfo.ctxt = ctxt;
 	if ((do_dom0_op(xc_handle, &op) < 0) ||
 	    ((u32) op.u.getdomaininfo.domain != domid)) {
 		PERROR("Could not get info on domain");
 		goto error_out;
 	}
-	DPRINTF(("get_tot_pages returns %ld pages\n", tot_pages));
+	DPRINTF(("xc_get_tot_pages returns %ld pages\n", tot_pages));
 
 	if (!(op.u.getdomaininfo.flags & DOMFLAGS_PAUSED)
 	    || (op.u.getdomaininfo.ctxt->pt_base != 0)) {
@@ -528,8 +456,8 @@ xc_plan9_build(int xc_handle,
 		goto error_out;
 	}
 
-	DPRINTF(("get_tot_pages returns %ld pages\n", tot_pages));
-	if (setup_guestos(xc_handle, domid, kernel_gfd, tot_pages,
+	DPRINTF(("xc_get_tot_pages returns %ld pages\n", tot_pages));
+	if (setup_guest(xc_handle, domid, kernel_gfd, tot_pages,
 			  &virt_startinfo_addr,
 			  &load_addr, &st_ctxt, cmdline,
 			  op.u.getdomaininfo.shared_info_frame,
@@ -548,19 +476,19 @@ xc_plan9_build(int xc_handle,
 
 	/*
 	 * Initial register values:
-	 *  DS,ES,FS,GS = FLAT_GUESTOS_DS
-	 *       CS:EIP = FLAT_GUESTOS_CS:start_pc
-	 *       SS:ESP = FLAT_GUESTOS_DS:start_stack
+	 *  DS,ES,FS,GS = FLAT_KERNEL_DS
+	 *       CS:EIP = FLAT_KERNEL_CS:start_pc
+	 *       SS:ESP = FLAT_KERNEL_DS:start_stack
 	 *          ESI = start_info
 	 *  [EAX,EBX,ECX,EDX,EDI,EBP are zero]
 	 *       EFLAGS = IF | 2 (bit 1 is reserved and should always be 1)
 	 */
-	ctxt->cpu_ctxt.ds = FLAT_GUESTOS_DS;
-	ctxt->cpu_ctxt.es = FLAT_GUESTOS_DS;
-	ctxt->cpu_ctxt.fs = FLAT_GUESTOS_DS;
-	ctxt->cpu_ctxt.gs = FLAT_GUESTOS_DS;
-	ctxt->cpu_ctxt.ss = FLAT_GUESTOS_DS;
-	ctxt->cpu_ctxt.cs = FLAT_GUESTOS_CS;
+	ctxt->cpu_ctxt.ds = FLAT_KERNEL_DS;
+	ctxt->cpu_ctxt.es = FLAT_KERNEL_DS;
+	ctxt->cpu_ctxt.fs = FLAT_KERNEL_DS;
+	ctxt->cpu_ctxt.gs = FLAT_KERNEL_DS;
+	ctxt->cpu_ctxt.ss = FLAT_KERNEL_DS;
+	ctxt->cpu_ctxt.cs = FLAT_KERNEL_CS;
 	ctxt->cpu_ctxt.eip = load_addr;
 	ctxt->cpu_ctxt.eip = 0x80100020;
 	/* put stack at top of second page */
@@ -576,9 +504,12 @@ xc_plan9_build(int xc_handle,
 	/* Virtual IDT is empty at start-of-day. */
 	for (i = 0; i < 256; i++) {
 		ctxt->trap_ctxt[i].vector = i;
-		ctxt->trap_ctxt[i].cs = FLAT_GUESTOS_CS;
+		ctxt->trap_ctxt[i].cs = FLAT_KERNEL_CS;
 	}
+
+#if defined(__i386__)
 	ctxt->fast_trap_idx = 0;
+#endif
 
 	/* No LDT. */
 	ctxt->ldt_ents = 0;
@@ -588,16 +519,16 @@ xc_plan9_build(int xc_handle,
 
 	/* Ring 1 stack is the initial stack. */
 	/* put stack at top of second page */
-	ctxt->guestos_ss = FLAT_GUESTOS_DS;
-	ctxt->guestos_esp = ctxt->cpu_ctxt.esp;
+	ctxt->kernel_ss = FLAT_KERNEL_DS;
+	ctxt->kernel_esp = ctxt->cpu_ctxt.esp;
 
 	/* No debugging. */
 	memset(ctxt->debugreg, 0, sizeof (ctxt->debugreg));
 
 	/* No callback handlers. */
-	ctxt->event_callback_cs = FLAT_GUESTOS_CS;
+	ctxt->event_callback_cs = FLAT_KERNEL_CS;
 	ctxt->event_callback_eip = 0;
-	ctxt->failsafe_callback_cs = FLAT_GUESTOS_CS;
+	ctxt->failsafe_callback_cs = FLAT_KERNEL_CS;
 	ctxt->failsafe_callback_eip = 0;
 
 	memset(&launch_op, 0, sizeof (launch_op));
