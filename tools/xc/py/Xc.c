@@ -29,7 +29,7 @@ static PyObject *pyxc_domain_create(PyObject *self,
 {
     XcObject *xc = (XcObject *)self;
 
-    unsigned int mem_kb = 65536;
+    unsigned int mem_kb = 0;
     char        *name   = "(anon)";
     u64          dom;
     int          ret;
@@ -157,14 +157,16 @@ static PyObject *pyxc_domain_getinfo(PyObject *self,
     {
         PyList_SetItem(
             list, i, 
-            Py_BuildValue("{s:L,s:i,s:i,s:i,s:l,s:L,s:s}",
+            Py_BuildValue("{s:L,s:i,s:i,s:i,s:l,s:L,s:s,s:l}",
                           "dom",      info[i].domid,
                           "cpu",      info[i].cpu,
                           "running",  info[i].has_cpu,
                           "stopped",  info[i].stopped,
                           "mem_kb",   info[i].nr_pages*4,
                           "cpu_time", info[i].cpu_time,
-                          "name",     info[i].name));
+                          "name",     info[i].name,
+                          "maxmem_kb",info[i].max_memkb
+		));
     }
 
     free(info);
@@ -205,16 +207,17 @@ static PyObject *pyxc_linux_restore(PyObject *self,
     int          progress = 1;
     u64          dom;
 
-    static char *kwd_list[] = { "state_file", "progress", NULL };
+    static char *kwd_list[] = { "dom", "state_file", "progress", NULL };
 
-    if ( !PyArg_ParseTupleAndKeywords(args, kwds, "s|i", kwd_list, 
-                                      &state_file, &progress) )
+    if ( !PyArg_ParseTupleAndKeywords(args, kwds, "Ls|i", kwd_list, 
+                                      &dom, &state_file, &progress) )
         return NULL;
 
-    if ( xc_linux_restore(xc->xc_handle, state_file, progress, &dom) != 0 )
+    if ( xc_linux_restore(xc->xc_handle, dom, state_file, progress, &dom) != 0 )
         return PyErr_SetFromErrno(xc_error);
 
-    return PyLong_FromUnsignedLongLong(dom);
+    Py_INCREF(zero);
+    return zero;
 }
 
 static PyObject *pyxc_linux_build(PyObject *self,
@@ -225,14 +228,18 @@ static PyObject *pyxc_linux_build(PyObject *self,
 
     u64   dom;
     char *image, *ramdisk = NULL, *cmdline = "";
+    int   control_evtchn;
 
-    static char *kwd_list[] = { "dom", "image", "ramdisk", "cmdline", NULL };
+    static char *kwd_list[] = { "dom", "control_evtchn", 
+                                "image", "ramdisk", "cmdline", NULL };
 
-    if ( !PyArg_ParseTupleAndKeywords(args, kwds, "Ls|ss", kwd_list, 
-                                      &dom, &image, &ramdisk, &cmdline) )
+    if ( !PyArg_ParseTupleAndKeywords(args, kwds, "Lis|ss", kwd_list, 
+                                      &dom, &control_evtchn, 
+                                      &image, &ramdisk, &cmdline) )
         return NULL;
 
-    if ( xc_linux_build(xc->xc_handle, dom, image, ramdisk, cmdline) != 0 )
+    if ( xc_linux_build(xc->xc_handle, dom, image, 
+                        ramdisk, cmdline, control_evtchn) != 0 )
         return PyErr_SetFromErrno(xc_error);
     
     Py_INCREF(zero);
@@ -247,14 +254,18 @@ static PyObject *pyxc_netbsd_build(PyObject *self,
 
     u64   dom;
     char *image, *ramdisk = NULL, *cmdline = "";
+    int   control_evtchn;
 
-    static char *kwd_list[] = { "dom", "image", "ramdisk", "cmdline", NULL };
+    static char *kwd_list[] = { "dom", "control_evtchn",
+                                "image", "ramdisk", "cmdline", NULL };
 
-    if ( !PyArg_ParseTupleAndKeywords(args, kwds, "Ls|ss", kwd_list, 
-                                      &dom, &image, &ramdisk, &cmdline) )
+    if ( !PyArg_ParseTupleAndKeywords(args, kwds, "Lis|ss", kwd_list, 
+                                      &dom, &control_evtchn,
+                                      &image, &ramdisk, &cmdline) )
         return NULL;
 
-    if ( xc_netbsd_build(xc->xc_handle, dom, image, cmdline) != 0 )
+    if ( xc_netbsd_build(xc->xc_handle, dom, image, 
+                         cmdline, control_evtchn) != 0 )
         return PyErr_SetFromErrno(xc_error);
     
     Py_INCREF(zero);
@@ -1021,7 +1032,50 @@ static PyObject *pyxc_rrobin_global_get(PyObject *self,
     if ( xc_rrobin_global_get(xc->xc_handle, &slice) != 0 )
         return PyErr_SetFromErrno(xc_error);
     
-    return Py_BuildValue("s:L", "slice", slice);
+    return Py_BuildValue("{s:L}", "slice", slice);
+}
+
+static PyObject *pyxc_domain_setname(PyObject *self,
+                                     PyObject *args,
+                                     PyObject *kwds)
+{
+    XcObject *xc = (XcObject *)self;
+    u64 dom;
+    char *name;
+
+    static char *kwd_list[] = { "dom", "name", NULL };
+
+    if ( !PyArg_ParseTupleAndKeywords(args, kwds, "Ls", kwd_list, 
+                                      &dom, &name) )
+        return NULL;
+
+    if ( xc_domain_setname(xc->xc_handle, dom, name) != 0 )
+        return PyErr_SetFromErrno(xc_error);
+    
+    Py_INCREF(zero);
+    return zero;
+}
+
+static PyObject *pyxc_domain_setmaxmem(PyObject *self,
+				       PyObject *args,
+				       PyObject *kwds)
+{
+    XcObject *xc = (XcObject *)self;
+
+    u64 dom;
+    unsigned long max_memkb;
+
+    static char *kwd_list[] = { "dom", "max_memkb", NULL };
+
+    if ( !PyArg_ParseTupleAndKeywords(args, kwds, "Li", kwd_list, 
+                                      &dom, &max_memkb) )
+        return NULL;
+
+    if ( xc_domain_setmaxmem(xc->xc_handle, dom, max_memkb) != 0 )
+        return PyErr_SetFromErrno(xc_error);
+    
+    Py_INCREF(zero);
+    return zero;
 }
 
 
@@ -1152,7 +1206,7 @@ static PyMethodDef pyxc_methods[] = {
       " domain [long]: Domain ID.\n"
       " mcuadv [long]: MCU Advance.\n"
       " warp   [long]: Warp.\n"
-      " warpu  [long]:\n"
+      " warpu  [long]: Unwarp requirement.\n"
       " warpl  [long]: Warp limit,\n"
     },
 
@@ -1371,6 +1425,21 @@ static PyMethodDef pyxc_methods[] = {
       " op [int, 0]: operation\n\n"
       "Returns: [int] 0 on success; -1 on error.\n" },
 
+    { "domain_setname", 
+      (PyCFunction)pyxc_domain_setname, 
+      METH_VARARGS | METH_KEYWORDS, "\n"
+      "Set domain informative textual name\n"
+      " dom [long]: Identifier of domain.\n"
+      " name [str]: Text string.\n\n"
+      "Returns: [int] 0 on success; -1 on error.\n" },
+
+    { "domain_setmaxmem", 
+      (PyCFunction)pyxc_domain_setname, 
+      METH_VARARGS | METH_KEYWORDS, "\n"
+      "Set a domain's memory limit\n"
+      " dom [long]: Identifier of domain.\n"
+      " max_memkb [long]: .\n"
+      "Returns: [int] 0 on success; -1 on error.\n" },
 
     { NULL, NULL, 0, NULL }
 };
@@ -1394,7 +1463,7 @@ static PyObject *PyXc_new(PyObject *self, PyObject *args)
     if ( (xc->xc_handle = xc_interface_open()) == -1 )
     {
         PyObject_Del((PyObject *)xc);
-        return NULL;
+	return PyErr_SetFromErrno(xc_error);
     }
 
     return (PyObject *)xc;

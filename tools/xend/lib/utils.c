@@ -21,7 +21,9 @@
 #include <errno.h>
 #include <signal.h>
 #include <xc.h>
-#include "control_if.h"
+
+#include <hypervisor-if.h>
+#include "domain_controller.h"
 
 /* Needed for Python versions earlier than 2.3. */
 #ifndef PyMODINIT_FUNC
@@ -671,6 +673,10 @@ static PyObject *xu_port_new(PyObject *self, PyObject *args)
         PyErr_SetString(port_error, "Could not open '/dev/mem'");
         goto fail1;
     }
+
+    /* Set the General-Purpose Subject whose page frame will be mapped. */
+    (void)ioctl(xup->mem_fd, _IO('M', 1), (unsigned long)(dom>> 0)); /* low  */
+    (void)ioctl(xup->mem_fd, _IO('M', 2), (unsigned long)(dom>>32)); /* high */
 
     if ( (xup->xc_handle = xc_interface_open()) == -1 )
     {

@@ -558,8 +558,6 @@ static void t_timer_fn(unsigned long unused)
 
     TRACE_0D(TRC_SCHED_T_TIMER_FN);
 
-    TRACE_0D(TRC_SCHED_T_TIMER_FN);
-
     if ( !is_idle_task(p) )
         send_guest_virq(p, VIRQ_TIMER);
 
@@ -659,13 +657,6 @@ void schedulers_start(void)
 
     fallback_timer_fn(0);
     smp_call_function((void *)fallback_timer_fn, NULL, 1, 1);
-}
-
-
-static void process_timeout(unsigned long __data)
-{
-    struct task_struct * p = (struct task_struct *) __data;
-    wake_up(p);
 }
 
 

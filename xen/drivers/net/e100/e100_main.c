@@ -192,9 +192,9 @@ struct notifier_block e100_notifier_reboot = {
         MODULE_PARM_DESC(X, S);
 
 /* ====================================================================== */
+#if 0
 static u8 e100_D101M_checksum(struct e100_private *, struct sk_buff *);
 static u8 e100_D102_check_checksum(rfd_t *);
-#if 0
 static int e100_ioctl(struct net_device *, struct ifreq *, int);
 #endif
 static int e100_open(struct net_device *);
@@ -243,7 +243,7 @@ static void e100_set_bool_option(struct e100_private *bdp, int, u32, int,
 				 char *);
 unsigned char e100_wait_exec_cmplx(struct e100_private *, u32, u8, u8);
 void e100_exec_cmplx(struct e100_private *, u32, u8);
-static unsigned char e100_asf_enabled(struct e100_private *bdp);
+/*static unsigned char e100_asf_enabled(struct e100_private *bdp);*/
 
 /**
  * e100_get_rx_struct - retrieve cell to hold skb buff from the pool
@@ -1092,6 +1092,7 @@ e100_xmit_frame(struct sk_buff *skb, struct net_device *dev)
 	struct e100_private *bdp = dev->priv;
 
 	if (!spin_trylock(&bdp->bd_non_tx_lock)) {
+		printk("Couldn't acqure lock in e100_xmit_frame\n");
 		notify_stop = true;
 		rc = 1;
 		goto exit2;
@@ -1099,6 +1100,10 @@ e100_xmit_frame(struct sk_buff *skb, struct net_device *dev)
 
 	if (!TCBS_AVAIL(bdp->tcb_pool) ||
 	    (bdp->non_tx_command_state != E100_NON_TX_IDLE)) {
+		printk("Bailing from e100_tx_frame %d, %d, %d\n",
+			TCBS_AVAIL(bdp->tcb_pool),
+			bdp->non_tx_command_state,
+			E100_NON_TX_IDLE);
 		notify_stop = true;
 		rc = 1;
 		goto exit1;
@@ -2941,6 +2946,7 @@ e100_rd_eaddr(struct e100_private *bdp)
 }
 
 /* Check the D102 RFD flags to see if the checksum passed */
+#if 0
 static unsigned char
 e100_D102_check_checksum(rfd_t *rfd)
 {
@@ -2955,6 +2961,7 @@ e100_D102_check_checksum(rfd_t *rfd)
 	}
 	return CHECKSUM_NONE;
 }
+#endif /* 0 */
 
 /**
  * e100_D101M_checksum
@@ -2966,6 +2973,7 @@ e100_D102_check_checksum(rfd_t *rfd)
  * in case the packet is ethernet II and the protocol is IP, all is need is to
  * assign this value to skb->csum.
  */
+#if 0
 static unsigned char
 e100_D101M_checksum(struct e100_private *bdp, struct sk_buff *skb)
 {
@@ -2978,6 +2986,7 @@ e100_D101M_checksum(struct e100_private *bdp, struct sk_buff *skb)
 	}
 	return CHECKSUM_NONE;
 }
+#endif /* 0 */
 
 /***************************************************************************/
 /***************************************************************************/
@@ -4211,7 +4220,6 @@ e100_resume(struct pci_dev *pcid)
 
 	return 0;
 }
-#endif /* CONFIG_PM */
 
 /**
  * e100_asf_enabled - checks if ASF is configured on the current adaper
@@ -4237,6 +4245,7 @@ e100_asf_enabled(struct e100_private *bdp)
 	}
 	return false;
 }
+#endif /* CONFIG_PM */
 
 #ifdef E100_CU_DEBUG
 unsigned char

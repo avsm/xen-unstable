@@ -32,6 +32,7 @@ typedef struct {
     u64           cpu_time;
 #define XC_DOMINFO_MAXNAME 16
     char          name[XC_DOMINFO_MAXNAME];
+    unsigned long max_memkb;
 } xc_dominfo_t;
 
 int xc_domain_create(int xc_handle, 
@@ -61,20 +62,25 @@ int xc_linux_save(int xc_handle,
                   u64 domid, 
                   const char *state_file, 
                   int verbose);
+
 int xc_linux_restore(int xc_handle,
+		     u64 domid,
                      const char *state_file, 
                      int verbose,
                      u64 *pdomid);
+
 int xc_linux_build(int xc_handle,
                    u64 domid,
                    const char *image_name,
                    const char *ramdisk_name,
-                   const char *cmdline);
+                   const char *cmdline,
+                   unsigned int control_evtchn);
 
 int xc_netbsd_build(int xc_handle,
                     u64 domid,
                     const char *image_name,
-                    const char *cmdline);
+                    const char *cmdline,
+                    unsigned int control_evtchn);
 
 int xc_bvtsched_global_set(int xc_handle,
                            unsigned long ctx_allow);
@@ -234,5 +240,23 @@ int xc_readconsolering(int xc_handle,
 
 int xc_physinfo(int xc_handle,
                 xc_physinfo_t *info);
+
+
+int xc_shadow_control(int xc_handle,
+                      u64 domid, 
+                      unsigned int sop);
+
+int xc_domain_setname(int xc_handle,
+                      u64 domid, 
+		      char *name);
+
+int xc_domain_setinitialmem(int xc_handle,
+			    u64 domid, 
+			    unsigned int initial_memkb);
+
+int xc_domain_setmaxmem(int xc_handle,
+			    u64 domid, 
+			    unsigned int max_memkb);
+
 
 #endif /* __XC_H__ */

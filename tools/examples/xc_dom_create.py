@@ -87,10 +87,10 @@ image=''; ramdisk=''; builder_fn=''; restore=0; state_file=''
 mem_size=0; domain_name=''; vfr_ipaddr=[];
 vbd_expert=0; auto_restart=False;
 vbd_list = []; cmdline_ip = ''; cmdline_root=''; cmdline_extra=''
-pci_device_list = []
+pci_device_list = []; console_port = -1
 auto_console = False
 
-##### Determine location of defautls file
+##### Determine location of defaults file
 #####
 
 try:
@@ -181,7 +181,7 @@ cmdline = cmdline_ip +' '+ cmdline_root +' '+ cmdline_extra
 
 syslog.openlog('xc_dom_create.py %s' % config_file, 0, syslog.LOG_DAEMON)
 
-##### Print some debug info just incase things don't work out...
+##### Print some debug info just in case things don't work out...
 ##### 
 
 output('VM image           : "%s"' % image)
@@ -221,36 +221,39 @@ def make_domain():
         print "Ramdisk file '" + ramdisk + "' does not exist"
         sys.exit()
 
+    id = xc.domain_create( mem_kb=mem_size*1024, name=domain_name )
+    if id <= 0:
+	print "Error creating domain"
+	sys.exit()
+
+    cmsg = 'new_control_interface(dom='+str(id)+', console_port='+str(console_port)+')'
+
+    xend_response = xenctl.utils.xend_control_message(cmsg)
+
+    if not xend_response['success']:
+	print "Error creating initial event channel"
+	print "Error type: " + xend_response['error_type']
+	if xend_response['error_type'] == 'exception':
+	    print "Exception type: " + xend_response['exception_type']
+	    print "Exception value: " + xend_response['exception_value']
+	xc.domain_destroy ( dom=id )
+	sys.exit()
+
     if restore:
-        ret = eval('xc.%s_restore ( state_file=state_file, progress=1 )' % builder_fn)
+        ret = eval('xc.%s_restore ( dom=id, state_file=state_file, progress=1 )' % builder_fn)
         if ret < 0:
             print "Error restoring domain"
+            print "Return code = " + str(ret)
+            xc.domain_destroy ( dom=id )
             sys.exit()
-        else:
-            id = ret
     else:
-        id = xc.domain_create( mem_kb=mem_size*1024, name=domain_name )
-        if id <= 0:
-            print "Error creating domain"
-            sys.exit()
-            
-        ret = eval('xc.%s_build ( dom=id, image=image, ramdisk=ramdisk, cmdline=cmdline )' % builder_fn)
+
+        ret = eval('xc.%s_build ( dom=id, image=image, ramdisk=ramdisk, cmdline=cmdline, control_evtchn=xend_response["remote_port"] )' % builder_fn)
         if ret < 0:
             print "Error building Linux guest OS: "
             print "Return code = " + str(ret)
             xc.domain_destroy ( dom=id )
             sys.exit()
-
-    cmsg = 'new_control_interface(dom='+str(id)+')'
-    xend_response = xenctl.utils.xend_control_message(cmsg)
-    if not xend_response['success']:
-        print "Error creating initial event channel"
-        print "Error type: " + xend_response['error_type']
-        if xend_response['error_type'] == 'exception':
-            print "Exception type: " + xend_response['exception_type']
-            print "Exception value: " + xend_response['exception_value']
-        xc.domain_destroy ( dom=id )
-        sys.exit()
 
     # setup the virtual block devices
 

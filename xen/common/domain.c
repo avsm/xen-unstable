@@ -60,6 +60,7 @@ struct task_struct *do_createdomain(domid_t dom_id, unsigned int cpu)
 
     p->domain    = dom_id;
     p->processor = cpu;
+    p->create_time = NOW();
 
     memcpy(&p->thread, &idle0_task.thread, sizeof(p->thread));
 
@@ -138,6 +139,28 @@ struct task_struct *find_domain_by_id(domid_t dom)
     read_unlock_irqrestore(&tasklist_lock, flags);
 
     return p;
+}
+
+
+/* return the most recent domain created */
+struct task_struct *find_last_domain(void)
+{
+    struct task_struct *p, *plast;
+    unsigned long flags;
+
+    read_lock_irqsave(&tasklist_lock, flags);
+    plast = task_list;
+    p = plast->next_list;
+    while ( p != NULL )
+    {
+	if ( p->create_time > plast->create_time )
+	    plast = p;
+        p = p->next_list;
+    }
+    get_task_struct(plast);
+    read_unlock_irqrestore(&tasklist_lock, flags);
+
+    return plast;
 }
 
 
@@ -460,12 +483,11 @@ unsigned int alloc_new_dom_mem(struct task_struct *p, unsigned int kbytes)
 {
     unsigned int alloc_pfns, nr_pages;
 
-    nr_pages = kbytes >> (PAGE_SHIFT - 10);
+    nr_pages = (kbytes + ((PAGE_SIZE-1)>>10)) >> (PAGE_SHIFT - 10);
+    p->max_pages = nr_pages; /* this can now be controlled independently */
 
-    /* TEMPORARY: max_pages should be explicitly specified. */
-    p->max_pages = nr_pages;
-
-    for ( alloc_pfns = 0; alloc_pfns < nr_pages; alloc_pfns++ )
+    /* grow the allocation if necessary */
+    for ( alloc_pfns = p->tot_pages; alloc_pfns < nr_pages; alloc_pfns++ )
     {
         if ( unlikely(alloc_domain_page(p) == NULL) ||
              unlikely(free_pfns < (SLACK_DOMAIN_MEM_KILOBYTES >> 
@@ -929,7 +951,7 @@ int construct_dom0(struct task_struct *p,
 
     /* Install the new page tables. */
     __cli();
-    write_cr3_counted(pagetable_val(p->mm.pagetable));
+    write_ptbase(&p->mm);
 
     /* Copy the OS image. */
     (void)loadelfimage(image_start);
@@ -977,7 +999,7 @@ int construct_dom0(struct task_struct *p,
     *dst = '\0';
 
     /* Reinstate the caller's page tables. */
-    write_cr3_counted(pagetable_val(current->mm.pagetable));
+    write_ptbase(&current->mm);
     __sti();
 
     /* Destroy low mappings - they were only for our convenience. */

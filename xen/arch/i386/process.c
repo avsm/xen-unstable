@@ -172,7 +172,7 @@ void machine_restart(char * __unused)
                 udelay(50);
             }
             /* That didn't work - force a triple fault.. */
-            __asm__ __volatile__("lidt %0": :"m" (no_idt));
+            __asm__ __volatile__("lidt %0": "=m" (no_idt));
             __asm__ __volatile__("int3");
         }
     }
@@ -280,8 +280,9 @@ void switch_to(struct task_struct *prev_p, struct task_struct *next_p)
         }
     }
 
-    /* Switch page tables.  */
-    write_ptbase( &next_p->mm );
+    /* Switch page tables. */
+    write_ptbase(&next_p->mm);
+    tlb_clocktick();
 
     set_current(next_p);
 

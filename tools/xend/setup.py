@@ -2,7 +2,9 @@
 from distutils.core import setup, Extension
 
 utils = Extension("utils",
-                  include_dirs         = ["../xc/lib"],
+                  extra_compile_args   = ["-fno-strict-aliasing"],
+                  include_dirs         = ["../xc/lib",
+                                          "../../xen/include/hypervisor-ifs"],
                   library_dirs         = ["../xc/lib"],
                   libraries            = ["xc"],
                   sources              = ["lib/utils.c"])

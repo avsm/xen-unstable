@@ -815,10 +815,10 @@ static struct file_operations megadev_fops = {
  */
 static struct mcontroller mcontroller[MAX_CONTROLLERS];
 
+#if XEN_KILLED
 /* The current driver version */
 static u32 driver_ver = 0x118C;
 
-#if XEN_KILLED
 /* major number used by the device for character interface */
 static int major;
 
@@ -4549,6 +4549,7 @@ mega_partsize(Disk * disk, kdev_t dev, int *geom)
 }
 
 
+#if 0 /* XEN */
 /*
  * This routine will be called when the use has done a forced shutdown on the
  * system. Flush the Adapter cache, that's the most we can do.
@@ -4587,6 +4588,7 @@ static int megaraid_reboot_notify (struct notifier_block *this, unsigned long co
 	}
 	return NOTIFY_DONE;
 }
+#endif /* 0 (XEN) */
 
 static int mega_init_scb (mega_host_config * megacfg)
 {
@@ -4714,6 +4716,7 @@ static void enq_scb_freelist (mega_host_config * megacfg, mega_scb * scb, int lo
 	}
 }
 
+#if 0 /* XEN */
 /*
  * Routines for the character/ioctl interface to the driver
  */
@@ -5173,10 +5176,9 @@ static int megadev_ioctl (struct inode *inode, struct file *filep,
 static void
 megadev_ioctl_done(Scsi_Cmnd *sc)
 {
-#if XEN_KILLED
 	up (&mimd_ioctl_sem);
-#endif
 }
+#endif /* 0 (XEN) */
 
 static mega_scb *
 megadev_doioctl (mega_host_config * megacfg, Scsi_Cmnd * sc)
@@ -5272,6 +5274,7 @@ megadev_doioctl (mega_host_config * megacfg, Scsi_Cmnd * sc)
 	return scb;
 }
 
+#if 0
 static int
 megadev_close (struct inode *inode, struct file *filep)
 {
@@ -5280,6 +5283,7 @@ megadev_close (struct inode *inode, struct file *filep)
 #endif
 	return 0;
 }
+#endif /* 0 */
 
 
 static int
@@ -5333,11 +5337,10 @@ mega_support_random_del(mega_host_config *this_hba)
 	return 0; // no support for random deletions
 }
 
+#if 0 /* XEN */
 static int
 mega_del_logdrv(mega_host_config *this_hba, int logdrv)
 {
-  return -ENOSYS;
-#if XEN_KILLED_DELLOGDRV
 	int		rval;
 	IO_LOCK_T;
 	DECLARE_WAIT_QUEUE_HEAD(wq);
@@ -5404,10 +5407,8 @@ mega_del_logdrv(mega_host_config *this_hba, int logdrv)
 	IO_UNLOCK;
 
 	return rval;
-#endif
 }
 
-#if XEN_KILLED_DELLOGDRV
 static int
 mega_do_del_logdrv(mega_host_config *this_hba, int logdrv)
 {
@@ -5442,7 +5443,7 @@ mega_do_del_logdrv(mega_host_config *this_hba, int logdrv)
 
 	return rval;
 }
-#endif
+#endif /* 0 (XEN) */
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,4,0)
 void *
