@@ -1,5 +1,9 @@
-package uk.ac.cam.cl.xeno.domctl;
+package org.xenoserver.control;
 
+/**
+ * A Domain object holds the details of one domain suitable for returning
+ * from methods enquiring about domain status.
+ */
 public class
 Domain
 {

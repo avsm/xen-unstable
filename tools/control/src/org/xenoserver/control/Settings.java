@@ -1,9 +1,12 @@
-package uk.ac.cam.cl.xeno.domctl;
+package org.xenoserver.control;
 
-import java.util.*;
-import java.io.*;
-import org.xml.sax.*;
+import java.io.File;
+import java.util.StringTokenizer;
 
+/**
+ * The Settings class is a repository for global settings such as the IP of
+ * the machine and the location of the defaults file.
+ */
 public final class Settings
 {
   public static final String DEFAULTS_FILE = System.getProperty ("DEFAULTS_FILE", "domctl.xml");

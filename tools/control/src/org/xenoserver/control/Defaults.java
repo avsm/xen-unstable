@@ -1,12 +1,21 @@
-package uk.ac.cam.cl.xeno.domctl;
+package org.xenoserver.control;
 
-import java.net.InetAddress;
-import java.io.*;
-import org.xml.sax.*;
-import org.xml.sax.helpers.*;
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileReader;
+import java.io.IOException;
+import java.io.InputStreamReader;
 
-/* these values are used in xenctl & domctl, so they need to be public */
+import org.xml.sax.Attributes;
+import org.xml.sax.InputSource;
+import org.xml.sax.XMLReader;
+import org.xml.sax.helpers.DefaultHandler;
 
+/**
+ * The Defaults class stores the default settings to be used by the
+ * management utilities. On construction it parses the defaults file
+ * located through the Settings class.
+ */
 public class Defaults
 {
   public String domainName;
@@ -26,8 +35,8 @@ public class Defaults
   public String NWNFSServer;
   public String NWNFSRoot;
 
-  int MaxDomainNumber = Integer.MAX_VALUE;
-  String args = "";
+  public int MaxDomainNumber = Integer.MAX_VALUE;
+  public String args = "";
 
   public String XIToolsDir = "";
 
