@@ -5,13 +5,14 @@
  * it permits debugging of seriously-toasted machines (e.g., in situations
  * where a device driver within a guest OS would be inaccessible).
  * 
- * Copyright (c) 2003-2004, K A Fraser
+ * Copyright (c) 2003-2005, K A Fraser
  */
 
 #ifndef __XEN_SERIAL_H__
 #define __XEN_SERIAL_H__
 
 #include <asm/regs.h>
+#include <asm/serial.h>
 
 /* 'Serial handles' are comprise the following fields. */
 #define SERHND_IDX      (1<<0) /* COM1 or COM2?                           */
@@ -50,3 +51,12 @@ unsigned char irq_serial_getc(int handle);
 void serial_force_unlock(int handle);
 
 #endif /* __XEN_SERIAL_H__ */
+
+/*
+ * Local variables:
+ * mode: C
+ * c-set-style: "BSD"
+ * c-basic-offset: 4
+ * tab-width: 4
+ * indent-tabs-mode: nil
+ */

@@ -22,7 +22,7 @@
 static struct {
     char *name;
     enum { TYPE_SINGLE, TYPE_CPU, TYPE_ARRAY,
-	   TYPE_S_SINGLE, TYPE_S_CPU, TYPE_S_ARRAY
+           TYPE_S_SINGLE, TYPE_S_CPU, TYPE_S_ARRAY
     } type;
     int nr_elements;
 } perfc_info[] = {
@@ -31,7 +31,7 @@ static struct {
 
 #define NR_PERFCTRS (sizeof(perfc_info) / sizeof(perfc_info[0]))
 
-struct perfcounter_t perfcounters;
+struct perfcounter perfcounters;
 
 void perfc_printall(unsigned char key)
 {
@@ -92,19 +92,19 @@ void perfc_reset(unsigned char key)
         switch ( perfc_info[i].type )
         {
         case TYPE_SINGLE:
-	    atomic_set(&counters[0],0);
+            atomic_set(&counters[0],0);
         case TYPE_S_SINGLE:
             counters += 1;
             break;
         case TYPE_CPU:
             for ( j = sum = 0; j < smp_num_cpus; j++ )
-	      	atomic_set(&counters[j],0);
+                atomic_set(&counters[j],0);
         case TYPE_S_CPU:
             counters += NR_CPUS;
             break;
         case TYPE_ARRAY:
             for ( j = sum = 0; j < perfc_info[i].nr_elements; j++ )
-	      	atomic_set(&counters[j],0);
+                atomic_set(&counters[j],0);
         case TYPE_S_ARRAY:
             counters += perfc_info[i].nr_elements;
             break;
@@ -216,3 +216,12 @@ int perfc_control(dom0_perfccontrol_t *pc)
 
     return rc;
 }
+
+/*
+ * Local variables:
+ * mode: C
+ * c-set-style: "BSD"
+ * c-basic-offset: 4
+ * tab-width: 4
+ * indent-tabs-mode: nil
+ */
