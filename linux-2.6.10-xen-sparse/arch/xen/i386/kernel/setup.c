@@ -39,6 +39,7 @@
 #include <linux/efi.h>
 #include <linux/init.h>
 #include <linux/edd.h>
+#include <linux/percpu.h>
 #include <video/edid.h>
 #include <asm/e820.h>
 #include <asm/mpspec.h>
@@ -344,11 +345,11 @@ static void __init probe_roms(void)
 shared_info_t *HYPERVISOR_shared_info = (shared_info_t *)empty_zero_page;
 EXPORT_SYMBOL(HYPERVISOR_shared_info);
 
-unsigned long *phys_to_machine_mapping, *pfn_to_mfn_frame_list;
+unsigned int *phys_to_machine_mapping, *pfn_to_mfn_frame_list;
 EXPORT_SYMBOL(phys_to_machine_mapping);
 
-multicall_entry_t multicall_list[8];
-int nr_multicall_ents = 0;
+DEFINE_PER_CPU(multicall_entry_t, multicall_list[8]);
+DEFINE_PER_CPU(int, nr_multicall_ents);
 
 /* Raw start-of-day parameters from the hypervisor. */
 union xen_start_info_union xen_start_info_union;
@@ -1141,7 +1142,7 @@ static unsigned long __init setup_memory(void)
 	}
 #endif
 
-	phys_to_machine_mapping = (unsigned long *)xen_start_info.mfn_list;
+	phys_to_machine_mapping = (unsigned int *)xen_start_info.mfn_list;
 
 	return max_low_pfn;
 }

@@ -1,5 +1,4 @@
-/* -*-  Mode:C; c-basic-offset:4; tab-width:4 -*-
- ****************************************************************************
+/****************************************************************************
  * (C) 2002-2003 - Rolf Neugebauer - Intel Research Cambridge
  * (C) 2002-2003 University of Cambridge
  ****************************************************************************
@@ -50,7 +49,7 @@ static s_time_t        stime_irq;       /* System time at last 'time update' */
 static unsigned long   wc_sec, wc_usec; /* UTC time at last 'time update'.   */
 static rwlock_t        time_lock = RW_LOCK_UNLOCKED;
 
-static void timer_interrupt(int irq, void *dev_id, struct xen_regs *regs)
+void timer_interrupt(int irq, void *dev_id, struct xen_regs *regs)
 {
     write_lock_irq(&time_lock);
 
@@ -274,11 +273,14 @@ s_time_t get_s_time(void)
 }
 
 
-void update_dom_time(shared_info_t *si)
+void update_dom_time(struct domain *d)
 {
+    shared_info_t *si = d->shared_info;
     unsigned long flags;
 
     read_lock_irqsave(&time_lock, flags);
+
+    spin_lock(&d->time_lock);
 
     si->time_version1++;
     wmb();
@@ -291,6 +293,8 @@ void update_dom_time(shared_info_t *si)
 
     wmb();
     si->time_version2++;
+
+    spin_unlock(&d->time_lock);
 
     read_unlock_irqrestore(&time_lock, flags);
 }
@@ -318,7 +322,7 @@ void do_settime(unsigned long secs, unsigned long usecs, u64 system_time_base)
 
     write_unlock_irq(&time_lock);
 
-    update_dom_time(current->shared_info);
+    update_dom_time(current->domain);
 }
 
 
@@ -373,3 +377,12 @@ void __init time_init(void)
 
     setup_irq(0, &irq0);
 }
+
+/*
+ * Local variables:
+ * mode: C
+ * c-set-style: "BSD"
+ * c-basic-offset: 4
+ * tab-width: 4
+ * indent-tabs-mode: nil
+ */
