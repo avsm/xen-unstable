@@ -117,13 +117,30 @@ int xc_domain_getinfo(int xc_handle,
     return nr_doms;
 }
 
+int xc_domain_getfullinfo(int xc_handle,
+		       u32 domid,
+		       dom0_op_t *op,
+		       full_execution_context_t *ctxt )
+{
+    int rc;
+    op->cmd = DOM0_GETDOMAININFO;
+    op->u.getdomaininfo.domain = (domid_t)domid;
+    op->u.getdomaininfo.ctxt = ctxt;
+
+    rc = do_dom0_op(xc_handle, op);
+    if ( ((u32)op->u.getdomaininfo.domain != domid) && rc > 0 )
+	return -ESRCH;
+    else
+	return rc;
+}
+
+
 int xc_shadow_control(int xc_handle,
                       u32 domid, 
                       unsigned int sop,
-                      unsigned long *dirty_bitmap,
-                      unsigned long pages,
-                      unsigned long *fault_count,
-                      unsigned long *dirty_count)
+		      unsigned long *dirty_bitmap,
+		      unsigned long pages,
+		      xc_shadow_control_stats_t *stats )
 {
     int rc;
     dom0_op_t op;
@@ -135,10 +152,8 @@ int xc_shadow_control(int xc_handle,
 
     rc = do_dom0_op(xc_handle, &op);
 
-    if ( fault_count ) 
-        *fault_count = op.u.shadow_control.fault_count;
-    if ( dirty_count )
-        *dirty_count = op.u.shadow_control.dirty_count;
+    if(stats) memcpy(stats, &op.u.shadow_control.stats,
+		     sizeof(xc_shadow_control_stats_t));
 
     return (rc == 0) ? op.u.shadow_control.pages : rc;
 }

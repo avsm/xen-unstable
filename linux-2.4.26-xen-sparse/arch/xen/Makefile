@@ -20,8 +20,8 @@ override EXTRAVERSION:=$(subst linux-$(VERSION).$(PATCHLEVEL).$(SUBLEVEL),,$(she
 
 # If no .config file exists then use the appropriate defconfig-* file
 ifneq (.config,$(wildcard .config))
-X:=$(shell cp arch/xen/defconfig$(EXTRAVERSION) .config 2>/dev/null)
--include .config
+DUMMYX:=$(shell cp $(TOPDIR)/arch/xen/defconfig$(EXTRAVERSION) $(TOPDIR)/.config)
+-include $(TOPDIR)/.config
 endif
 
 LD=$(CROSS_COMPILE)ld -m elf_i386
