@@ -333,7 +333,7 @@ asmlinkage void do_page_fault(struct pt_regs *regs, long error_code)
 
     if ( unlikely(p->mm.shadow_mode) && 
          (addr < PAGE_OFFSET) && shadow_fault(addr, error_code) )
-	return; /* Return TRUE if fault was handled. */
+	return; /* Returns TRUE if fault was handled. */
 
     if ( unlikely(!(regs->xcs & 3)) )
         goto fault_in_hypervisor;

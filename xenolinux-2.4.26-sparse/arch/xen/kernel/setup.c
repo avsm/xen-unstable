@@ -62,6 +62,9 @@ unsigned long *phys_to_machine_mapping;
 multicall_entry_t multicall_list[8];
 int nr_multicall_ents = 0;
 
+/* used so we treat multiple stop requests as a single one */
+int suspending = 0;
+
 /*
  * Machine setup..
  */
@@ -1161,11 +1164,11 @@ static void stop_task(void *unused)
         virt_to_machine(pfn_to_mfn_frame_list) >> PAGE_SHIFT;
     suspend_record->nr_pfns = max_pfn;
 
-    j = 0;
-    for ( i = 0; i < max_pfn; i += (PAGE_SIZE / sizeof(unsigned long)) )
-        pfn_to_mfn_frame_list[j++] = 
+    for ( i=0, j=0; i < max_pfn; i+=(PAGE_SIZE/sizeof(unsigned long)), j++ )
+    {	
+        pfn_to_mfn_frame_list[j] = 
             virt_to_machine(&phys_to_machine_mapping[i]) >> PAGE_SHIFT;
-
+    }
     /*
      * NB. This is /not/ a full dev_close() as that loses route information!
      * Instead we do essentialy the same as dev_close() but without notifying
@@ -1204,10 +1207,14 @@ static void stop_task(void *unused)
 
     HYPERVISOR_stop(virt_to_machine(suspend_record) >> PAGE_SHIFT);
 
+    suspending = 0; 
+
     memcpy(&start_info, &suspend_record->resume_info, sizeof(start_info));
 
     set_fixmap(FIX_SHARED_INFO, start_info.shared_info);
+
     HYPERVISOR_shared_info = (shared_info_t *)fix_to_virt(FIX_SHARED_INFO);
+
     memset(empty_zero_page, 0, PAGE_SIZE);
 
     irq_resume();
@@ -1259,8 +1266,14 @@ static int stop_irq;
 
 static void stop_interrupt(int irq, void *unused, struct pt_regs *regs)
 {
-    stop_tq.routine = stop_task;
-    schedule_task(&stop_tq);
+    if (!suspending)
+    {
+	suspending = 1;
+	stop_tq.routine = stop_task;
+	schedule_task(&stop_tq);	
+    }
+    else
+	printk(KERN_ALERT"Ignore queued stop request\n");
 }
 
 static int __init setup_stop_event(void)

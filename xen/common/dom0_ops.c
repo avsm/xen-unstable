@@ -21,6 +21,11 @@
 #include <xen/shadow.h>
 #include <hypervisor-ifs/sched_ctl.h>
 
+
+#define TRC_DOM0OP_START_BASE   0x00020000
+#define TRC_DOM0OP_FINISH_BASE  0x00030000
+
+
 extern unsigned int alloc_new_dom_mem(struct task_struct *, unsigned int);
 
 static int msr_cpu_mask;
@@ -58,6 +63,9 @@ long do_dom0_op(dom0_op_t *u_dom0_op)
     {
         return -EACCES;
     }
+
+    TRACE_5D( TRC_DOM0OP_START_BASE + op->cmd, 
+	 0, op->u.dummy[0], op->u.dummy[1], op->u.dummy[2], op->u.dummy[3] );
 
     switch ( op->cmd )
     {
@@ -514,10 +522,10 @@ long do_dom0_op(dom0_op_t *u_dom0_op)
 	p = find_domain_by_id( op->u.shadow_control.domain );
 	if ( p )
 	{
-            ret = shadow_mode_control(p, op->u.shadow_control.op );
+            ret = shadow_mode_control(p, &op->u.shadow_control );
 	    put_task_struct(p);
-        }
-	
+	    copy_to_user(u_dom0_op, op, sizeof(*op));
+        }	
     }
     break;
 
@@ -659,6 +667,10 @@ long do_dom0_op(dom0_op_t *u_dom0_op)
         ret = -ENOSYS;
 
     }
+
+    TRACE_5D( TRC_DOM0OP_FINISH_BASE + op->cmd, ret,
+	 op->u.dummy[0], op->u.dummy[1], op->u.dummy[2], op->u.dummy[3]  );
+
 
     return ret;
 }

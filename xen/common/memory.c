@@ -208,6 +208,12 @@ void __init init_frametable(unsigned long nr_pages)
     INIT_LIST_HEAD(&free_list);    
     free_pfns = 0;
 
+    /* initialise to a magic of 0x55555555 so easier to spot bugs later */
+    memset( machine_to_phys_mapping, 0x55, 4*1024*1024 );
+
+    /* The array is sized for a 4GB machine regardless of actuall mem size. 
+       This costs 4MB -- may want to fix some day */
+
     /* Pin the ownership of the MP table so that DOM0 can map it later. */
     for ( mfn = virt_to_phys((void *)RDWR_MPT_VIRT_START)>>PAGE_SHIFT;
           mfn < virt_to_phys((void *)RDWR_MPT_VIRT_END)>>PAGE_SHIFT;
@@ -322,7 +328,7 @@ static int get_page_from_pagenr(unsigned long page_nr, struct task_struct *p)
 
     if ( unlikely(!get_page(page, p)) )
     {
-        MEM_LOG("Could not get page ref for pfn %08lx\n", page_nr);
+        MEM_LOG("Could not get page ref for pfn %08lx", page_nr);
         return 0;
     }
 
@@ -982,8 +988,9 @@ static int do_extended_command(unsigned long ptr, unsigned long val)
 }
 
 
-int do_mmu_update(mmu_update_t *ureqs, int count)
+int do_mmu_update(mmu_update_t *ureqs, int * p_count)
 {
+    int count;
     mmu_update_t req;
     unsigned long va = 0, deferred_ops, pfn, prev_pfn = 0;
     struct pfn_info *page;
@@ -991,6 +998,11 @@ int do_mmu_update(mmu_update_t *ureqs, int count)
     unsigned int cmd;
     unsigned long prev_spfn = 0;
     l1_pgentry_t *prev_spl1e = 0;
+
+    if ( unlikely( get_user(count, p_count) ) )
+    {
+	return -EFAULT;
+    }
 
     perfc_incrc(calls_to_mmu_update); 
     perfc_addc(num_page_updates, count);
@@ -1147,6 +1159,9 @@ int do_mmu_update(mmu_update_t *ureqs, int count)
         put_task_struct(percpu_info[cpu].gps);
         percpu_info[cpu].gps = percpu_info[cpu].pts = NULL;
     }
+
+    if ( unlikely(rc) )
+	put_user( count, p_count );
 
     return rc;
 }

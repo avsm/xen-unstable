@@ -191,17 +191,18 @@ static PyObject *pyxc_linux_save(PyObject *self,
 
     u64   dom;
     char *state_file;
-    int   progress = 1;
+    int   progress = 1, live = -1, debug = 0;
     unsigned int flags = 0;
 
-    static char *kwd_list[] = { "dom", "state_file", "progress", NULL };
+    static char *kwd_list[] = { "dom", "state_file", "progress", "live", "debug", NULL };
 
-    if ( !PyArg_ParseTupleAndKeywords(args, kwds, "Ls|i", kwd_list, 
-                                      &dom, &state_file, &progress) )
+    if ( !PyArg_ParseTupleAndKeywords(args, kwds, "Ls|iii", kwd_list, 
+                                      &dom, &state_file, &progress, &live, &debug) )
         return NULL;
 
-    if ( progress )
-        flags |= XCFLAGS_VERBOSE;
+    if (progress)  flags |= XCFLAGS_VERBOSE;
+    if (live == 1) flags |= XCFLAGS_LIVE;
+    if (debug)     flags |= XCFLAGS_DEBUG;
 
     if ( strncmp(state_file,"tcp:", strlen("tcp:")) == 0 )
     {
@@ -225,6 +226,8 @@ static PyObject *pyxc_linux_save(PyObject *self,
 	    while ( tot < count );
 	    return 0;
 	}
+
+	if (live == -1) flags |= XCFLAGS_LIVE; // default to live for tcp
 
 	strncpy( server, state_file+strlen("tcp://"), max_namelen);
 	server[max_namelen-1]='\0';
@@ -360,6 +363,7 @@ static PyObject *pyxc_linux_restore(PyObject *self,
 	    do { 
 		rc = read( (int) fd, ((char*)buf)+tot, count-tot ); 
 		if ( rc < 0 ) { perror("READ"); return rc; }
+		if ( rc == 0 ) { printf("read: need %d, tot=%d got zero\n"); return -1; }
 		tot += rc;
 	    } 
             while ( tot < count );
@@ -1270,7 +1274,7 @@ static PyObject *pyxc_shadow_control(PyObject *self,
                                       &dom, &op) )
         return NULL;
 
-    if ( xc_shadow_control(xc->xc_handle, dom, op) != 0 )
+    if ( xc_shadow_control(xc->xc_handle, dom, op, NULL, 0) < 0 )
         return PyErr_SetFromErrno(xc_error);
     
     Py_INCREF(zero);
