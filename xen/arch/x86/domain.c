@@ -192,16 +192,6 @@ void dump_pageframe_info(struct domain *d)
            page->u.inuse.type_info);
 }
 
-struct domain *arch_alloc_domain_struct(void)
-{
-    return xmalloc(struct domain);
-}
-
-void arch_free_domain_struct(struct domain *d)
-{
-    xfree(d);
-}
-
 struct exec_domain *arch_alloc_exec_domain_struct(void)
 {
     return xmalloc(struct exec_domain);
@@ -259,12 +249,14 @@ void arch_do_createdomain(struct exec_domain *ed)
         machine_to_phys_mapping[virt_to_phys(d->arch.mm_perdomain_pt) >> 
                                PAGE_SHIFT] = INVALID_M2P_ENTRY;
         ed->arch.perdomain_ptes = d->arch.mm_perdomain_pt;
-#if 0 /* don't need this yet, but maybe soon! */
-        ed->arch.guest_vtable = linear_l2_table;
-        ed->arch.shadow_vtable = shadow_linear_l2_table;
-#endif
+
+        ed->arch.guest_vtable  = __linear_l2_table;
+        ed->arch.shadow_vtable = __shadow_linear_l2_table;
 
 #ifdef __x86_64__
+        ed->arch.guest_vl3table = __linear_l3_table;
+        ed->arch.guest_vl4table = __linear_l4_table;
+
         d->arch.mm_perdomain_l2 = (l2_pgentry_t *)alloc_xenheap_page();
         memset(d->arch.mm_perdomain_l2, 0, PAGE_SIZE);
         d->arch.mm_perdomain_l2[l2_table_offset(PERDOMAIN_VIRT_START)] = 
@@ -275,7 +267,10 @@ void arch_do_createdomain(struct exec_domain *ed)
             mk_l3_pgentry(__pa(d->arch.mm_perdomain_l2) | __PAGE_HYPERVISOR);
 #endif
 
+        (void)ptwr_init(d);
+
         shadow_lock_init(d);        
+        INIT_LIST_HEAD(&d->arch.free_shadow_frames);
     }
 }
 
@@ -305,70 +300,6 @@ void arch_vmx_do_launch(struct exec_domain *ed)
     load_vmcs(&ed->arch.arch_vmx, vmcs_phys_ptr);
     vmx_do_launch(ed);
     reset_stack_and_jump(vmx_asm_do_launch);
-}
-
-unsigned long alloc_monitor_pagetable(struct exec_domain *ed)
-{
-    unsigned long mmfn;
-    l2_pgentry_t *mpl2e;
-    struct pfn_info *mmfn_info;
-    struct domain *d = ed->domain;
-
-    ASSERT(pagetable_val(ed->arch.monitor_table) == 0);
-
-    mmfn_info = alloc_domheap_page(NULL);
-    ASSERT(mmfn_info != NULL); 
-
-    mmfn = (unsigned long) (mmfn_info - frame_table);
-    mpl2e = (l2_pgentry_t *) map_domain_mem(mmfn << PAGE_SHIFT);
-    memset(mpl2e, 0, PAGE_SIZE);
-
-    memcpy(&mpl2e[DOMAIN_ENTRIES_PER_L2_PAGETABLE], 
-           &idle_pg_table[DOMAIN_ENTRIES_PER_L2_PAGETABLE],
-           HYPERVISOR_ENTRIES_PER_L2_PAGETABLE * sizeof(l2_pgentry_t));
-
-    mpl2e[l2_table_offset(PERDOMAIN_VIRT_START)] =
-        mk_l2_pgentry((__pa(d->arch.mm_perdomain_pt) & PAGE_MASK) 
-                      | __PAGE_HYPERVISOR);
-
-    ed->arch.monitor_vtable = mpl2e;
-
-    /* Map the p2m map into the Read-Only MPT space for this domain. */
-    mpl2e[l2_table_offset(RO_MPT_VIRT_START)] =
-        mk_l2_pgentry(pagetable_val(ed->arch.phys_table) | __PAGE_HYPERVISOR);
-
-    return mmfn;
-}
-
-/*
- * Free the pages for monitor_table and hl2_table
- */
-static void free_monitor_pagetable(struct exec_domain *ed)
-{
-    l2_pgentry_t *mpl2e;
-    unsigned long mfn;
-
-    ASSERT( pagetable_val(ed->arch.monitor_table) );
-    
-    mpl2e = ed->arch.monitor_vtable;
-
-    /*
-     * First get the mfn for hl2_table by looking at monitor_table
-     */
-    mfn = l2_pgentry_val(mpl2e[LINEAR_PT_VIRT_START >> L2_PAGETABLE_SHIFT])
-        >> PAGE_SHIFT;
-
-    free_domheap_page(&frame_table[mfn]);
-    unmap_domain_mem(mpl2e);
-
-    /*
-     * Then free monitor_table.
-     */
-    mfn = (pagetable_val(ed->arch.monitor_table)) >> PAGE_SHIFT;
-    free_domheap_page(&frame_table[mfn]);
-
-    ed->arch.monitor_table = mk_pagetable(0);
-    ed->arch.monitor_vtable = 0;
 }
 
 static int vmx_final_setup_guest(struct exec_domain *ed,
@@ -420,8 +351,6 @@ static int vmx_final_setup_guest(struct exec_domain *ed,
          * the shared 1:1 page table initially. It shouldn't hurt */
         shadow_mode_enable(ed->domain, SHM_enable|SHM_translate|SHM_external);
     }
-
-    update_pagetables(ed);
 
     return 0;
 
@@ -509,7 +438,7 @@ int arch_set_info_guest(
         d->vm_assist = c->vm_assist;
 
     phys_basetab = c->pt_base;
-    ed->arch.guest_table = ed->arch.phys_table = mk_pagetable(phys_basetab);
+    ed->arch.guest_table = mk_pagetable(phys_basetab);
 
     if ( !get_page_and_type(&frame_table[phys_basetab>>PAGE_SHIFT], d, 
                             PGT_base_page_table) )
@@ -528,8 +457,22 @@ int arch_set_info_guest(
     }
 
 #ifdef CONFIG_VMX
-    if (c->flags & ECF_VMX_GUEST)
-        return vmx_final_setup_guest(ed, c);
+    if ( c->flags & ECF_VMX_GUEST )
+    {
+        int error;
+
+        // VMX uses the initially provided page tables as the P2M map.
+        //
+        // XXX: This creates a security issue -- Xen can't necessarily
+        //      trust the VMX domain builder.  Xen should validate this
+        //      page table, and/or build the table itself, or ???
+        //
+        if ( !pagetable_val(d->arch.phys_table) )
+            d->arch.phys_table = ed->arch.guest_table;
+
+        if ( (error = vmx_final_setup_guest(ed, c)) )
+            return error;
+    }
 #endif
 
     update_pagetables(ed);
@@ -573,7 +516,7 @@ void new_thread(struct exec_domain *d,
 void toggle_guest_mode(struct exec_domain *ed)
 {
     ed->arch.flags ^= TF_kernel_mode;
-    __asm__ __volatile__ ( "swapgs" );
+    __asm__ __volatile__ ( "mfence; swapgs" ); /* AMD erratum #88 */
     update_pagetables(ed);
     write_ptbase(ed);
 }
@@ -657,7 +600,7 @@ static void load_segments(struct exec_domain *p, struct exec_domain *n)
 
     /* If in kernel mode then switch the GS bases around. */
     if ( n->arch.flags & TF_kernel_mode )
-        __asm__ __volatile__ ( "swapgs" );
+        __asm__ __volatile__ ( "mfence; swapgs" ); /* AMD erratum #88 */
 
     if ( unlikely(!all_segs_okay) )
     {
@@ -711,7 +654,9 @@ static void clear_segments(void)
         "movl %0,%%ds; "
         "movl %0,%%es; "
         "movl %0,%%fs; "
-        "movl %0,%%gs; swapgs; movl %0,%%gs"
+        "movl %0,%%gs; "
+        "mfence; swapgs; " /* AMD erratum #88 */
+        "movl %0,%%gs"
         : : "r" (0) );
 }
 
@@ -806,10 +751,14 @@ static void __context_switch(void)
         }
     }
 
-    set_bit(cpu, &n->domain->cpuset);
+    if ( p->domain != n->domain )
+        set_bit(cpu, &n->domain->cpuset);
+
     write_ptbase(n);
     __asm__ __volatile__ ( "lgdt %0" : "=m" (*n->arch.gdt) );
-    clear_bit(cpu, &p->domain->cpuset);
+
+    if ( p->domain != n->domain )
+        clear_bit(cpu, &p->domain->cpuset);
 
     percpu_ctxt[cpu].curr_ed = n;
 }
@@ -934,7 +883,24 @@ unsigned long __hypercall_create_continuation(
     return op;
 }
 
-static void relinquish_list(struct domain *d, struct list_head *list)
+#ifdef CONFIG_VMX
+static void vmx_relinquish_resources(struct exec_domain *ed)
+{
+    if ( !VMX_DOMAIN(ed) )
+        return;
+
+    BUG_ON(ed->arch.arch_vmx.vmcs == NULL);
+    free_vmcs(ed->arch.arch_vmx.vmcs);
+    ed->arch.arch_vmx.vmcs = 0;
+    
+    free_monitor_pagetable(ed);
+    rem_ac_timer(&ed->arch.arch_vmx.vmx_platform.vmx_pit.pit_timer);
+}
+#else
+#define vmx_relinquish_resources(_ed) ((void)0)
+#endif
+
+static void relinquish_memory(struct domain *d, struct list_head *list)
 {
     struct list_head *ent;
     struct pfn_info  *page;
@@ -992,30 +958,16 @@ static void relinquish_list(struct domain *d, struct list_head *list)
     spin_unlock_recursive(&d->page_alloc_lock);
 }
 
-#ifdef CONFIG_VMX
-static void vmx_domain_relinquish_memory(struct exec_domain *ed)
-{
-    struct vmx_virpit_t *vpit = &(ed->arch.arch_vmx.vmx_platform.vmx_pit);
-    /*
-     * Free VMCS
-     */
-    ASSERT(ed->arch.arch_vmx.vmcs);
-    free_vmcs(ed->arch.arch_vmx.vmcs);
-    ed->arch.arch_vmx.vmcs = 0;
-    
-    free_monitor_pagetable(ed);
-    rem_ac_timer(&(vpit->pit_timer));
-}
-#endif
-
-void domain_relinquish_memory(struct domain *d)
+void domain_relinquish_resources(struct domain *d)
 {
     struct exec_domain *ed;
 
     BUG_ON(d->cpuset != 0);
 
+    ptwr_destroy(d);
+
     /* Release device mappings of other domains */
-    gnttab_release_dev_mappings( d->grant_table );
+    gnttab_release_dev_mappings(d->grant_table);
 
     /* Exit shadow mode before deconstructing final guest page table. */
     shadow_mode_disable(d);
@@ -1036,13 +988,9 @@ void domain_relinquish_memory(struct domain *d)
                 pagetable_val(ed->arch.guest_table_user) >> PAGE_SHIFT]);
             ed->arch.guest_table_user = mk_pagetable(0);
         }
-    }
 
-#ifdef CONFIG_VMX
-    if ( VMX_DOMAIN(d->exec_domain[0]) )
-        for_each_exec_domain ( d, ed )
-            vmx_domain_relinquish_memory(ed);
-#endif
+        vmx_relinquish_resources(ed);
+    }
 
     /*
      * Relinquish GDT mappings. No need for explicit unmapping of the LDT as 
@@ -1052,8 +1000,8 @@ void domain_relinquish_memory(struct domain *d)
         destroy_gdt(ed);
 
     /* Relinquish every page of memory. */
-    relinquish_list(d, &d->xenpage_list);
-    relinquish_list(d, &d->page_list);
+    relinquish_memory(d, &d->xenpage_list);
+    relinquish_memory(d, &d->page_list);
 }
 
 

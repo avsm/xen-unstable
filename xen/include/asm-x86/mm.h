@@ -5,6 +5,7 @@
 #include <xen/config.h>
 #include <xen/list.h>
 #include <asm/io.h>
+#include <asm/uaccess.h>
 
 /*
  * Per-page-frame information.
@@ -58,7 +59,17 @@ struct pfn_info
 #define PGT_gdt_page        (5<<29) /* using this page in a GDT? */
 #define PGT_ldt_page        (6<<29) /* using this page in an LDT? */
 #define PGT_writable_page   (7<<29) /* has writable mappings of this page? */
+
+#define PGT_l1_shadow       PGT_l1_page_table
+#define PGT_l2_shadow       PGT_l2_page_table
+#define PGT_l3_shadow       PGT_l3_page_table
+#define PGT_l4_shadow       PGT_l4_page_table
+#define PGT_hl2_shadow      (5<<29)
+#define PGT_snapshot        (6<<29)
+#define PGT_writable_pred   (7<<29) /* predicted gpfn with writable ref */
+
 #define PGT_type_mask       (7<<29) /* Bits 29-31. */
+
  /* Has this page been validated for use as its current type? */
 #define _PGT_validated      28
 #define PGT_validated       (1U<<_PGT_validated)
@@ -75,11 +86,22 @@ struct pfn_info
  /* 17-bit count of uses of this frame as its current type. */
 #define PGT_count_mask      ((1U<<17)-1)
 
+#define PGT_mfn_mask        ((1U<<20)-1) /* mfn mask for shadow types */
+
+#define PGT_score_shift     20
+#define PGT_score_mask      (((1U<<4)-1)<<PGT_score_shift)
+
  /* Cleared when the owning guest 'frees' this page. */
 #define _PGC_allocated      31
 #define PGC_allocated       (1U<<_PGC_allocated)
- /* 31-bit count of references to this frame. */
-#define PGC_count_mask      ((1U<<31)-1)
+ /* Set when fullshadow mode marks a page out-of-sync */
+#define _PGC_out_of_sync     30
+#define PGC_out_of_sync     (1U<<_PGC_out_of_sync)
+ /* Set when fullshadow mode is using a page as a page table */
+#define _PGC_page_table      29
+#define PGC_page_table      (1U<<_PGC_page_table)
+ /* 29-bit count of references to this frame. */
+#define PGC_count_mask      ((1U<<29)-1)
 
 /* We trust the slab allocator in slab.c, and our use of it. */
 #define PageSlab(page)	    (1)
@@ -124,6 +146,11 @@ void init_frametable(void);
 
 int alloc_page_type(struct pfn_info *page, unsigned int type);
 void free_page_type(struct pfn_info *page, unsigned int type);
+extern void invalidate_shadow_ldt(struct exec_domain *d);
+extern int shadow_remove_all_write_access(
+    struct domain *d, unsigned long gpfn, unsigned long gmfn);
+extern u32 shadow_remove_all_access( struct domain *d, unsigned long gmfn);
+extern int _shadow_mode_enabled(struct domain *d);
 
 static inline void put_page(struct pfn_info *page)
 {
@@ -155,9 +182,10 @@ static inline int get_page(struct pfn_info *page,
              unlikely((nx & PGC_count_mask) == 0) || /* Count overflow? */
              unlikely(d != _domain) )                /* Wrong owner? */
         {
-            DPRINTK("Error pfn %p: ed=%p, sd=%p, caf=%08x, taf=%08x\n",
-                    page_to_pfn(page), domain, unpickle_domptr(d),
-                    x, page->u.inuse.type_info);
+            if ( !_shadow_mode_enabled(domain) )
+                DPRINTK("Error pfn %p: rd=%p, od=%p, caf=%08x, taf=%08x\n",
+                        page_to_pfn(page), domain, unpickle_domptr(d),
+                        x, page->u.inuse.type_info);
             return 0;
         }
         __asm__ __volatile__(
@@ -173,6 +201,8 @@ static inline int get_page(struct pfn_info *page,
 
 void put_page_type(struct pfn_info *page);
 int  get_page_type(struct pfn_info *page, u32 type);
+int  get_page_from_l1e(l1_pgentry_t l1e, struct domain *d);
+void put_page_from_l1e(l1_pgentry_t l1e, struct domain *d);
 
 static inline void put_page_and_type(struct pfn_info *page)
 {
@@ -214,7 +244,8 @@ int check_descriptor(struct desc_struct *d);
 #undef  machine_to_phys_mapping
 #define machine_to_phys_mapping ((u32 *)RDWR_MPT_VIRT_START)
 #define INVALID_M2P_ENTRY        (~0U)
-#define IS_INVALID_M2P_ENTRY(_e) (!!((_e) & (1U<<31)))
+#define VALID_M2P(_e)            (!((_e) & (1U<<31)))
+#define IS_INVALID_M2P_ENTRY(_e) (!VALID_M2P(_e))
 
 /*
  * The phys_to_machine_mapping is the reversed mapping of MPT for full
@@ -223,12 +254,23 @@ int check_descriptor(struct desc_struct *d);
  * been used by the read-only MPT map.
  */
 #define __phys_to_machine_mapping ((unsigned long *)RO_MPT_VIRT_START)
+#define INVALID_MFN               (~0UL)
+#define VALID_MFN(_mfn)           (!((_mfn) & (1U<<31)))
 
-#define phys_to_machine_mapping(_pfn)                                      \
-({ l1_pgentry_t l1e; unsigned long mfn;                                    \
-   mfn = __get_user(l1_pgentry_val(l1e), &__phys_to_machine_mapping[_pfn]) \
-       ? 0 : l1_pgentry_to_pfn(l1e);                                       \
-   mfn; })
+/* Returns the machine physical */
+static inline unsigned long phys_to_machine_mapping(unsigned long pfn) 
+{
+    unsigned long mfn;
+    l1_pgentry_t pte;
+
+   if ( !__get_user(l1_pgentry_val(pte), (__phys_to_machine_mapping + pfn)) &&
+        (l1_pgentry_val(pte) & _PAGE_PRESENT) )
+       mfn = l1_pgentry_to_phys(pte) >> PAGE_SHIFT;
+   else
+       mfn = INVALID_MFN;
+
+   return mfn; 
+}
 #define set_machinetophys(_mfn, _pfn) machine_to_phys_mapping[(_mfn)] = (_pfn)
 
 #define DEFAULT_GDT_ENTRIES     (LAST_RESERVED_GDT_ENTRY+1)
@@ -247,7 +289,7 @@ void memguard_unguard_range(void *p, unsigned long l);
 #endif
 
 /* Writable Pagetables */
-typedef struct {
+struct ptwr_info {
     /* Linear address where the guest is updating the p.t. page. */
     unsigned long l1va;
     /* Copy of the p.t. page, taken before guest is given write access. */
@@ -257,15 +299,8 @@ typedef struct {
     /* Index in L2 page table where this L1 p.t. is always hooked. */
     unsigned int l2_idx; /* NB. Only used for PTWR_PT_ACTIVE. */
     /* Info about last ptwr update batch. */
-    struct exec_domain *prev_exec_domain; /* domain making the update */
-    unsigned int        prev_nr_updates;  /* size of update batch */
-} ptwr_ptinfo_t;
-
-typedef struct {
-    ptwr_ptinfo_t ptinfo[2];
-} __cacheline_aligned ptwr_info_t;
-
-extern ptwr_info_t ptwr_info[];
+    unsigned int prev_nr_updates;
+};
 
 #define PTWR_PT_ACTIVE 0
 #define PTWR_PT_INACTIVE 1
@@ -273,36 +308,42 @@ extern ptwr_info_t ptwr_info[];
 #define PTWR_CLEANUP_ACTIVE 1
 #define PTWR_CLEANUP_INACTIVE 2
 
-void ptwr_flush(const int);
-int ptwr_do_page_fault(unsigned long);
+int  ptwr_init(struct domain *);
+void ptwr_destroy(struct domain *);
+void ptwr_flush(struct domain *, const int);
+int  ptwr_do_page_fault(struct domain *, unsigned long);
 
-int new_guest_cr3(unsigned long pfn);
-
-#define __cleanup_writable_pagetable(_what)                                 \
-do {                                                                        \
-    int cpu = smp_processor_id();                                           \
-    if ((_what) & PTWR_CLEANUP_ACTIVE)                                      \
-        if (ptwr_info[cpu].ptinfo[PTWR_PT_ACTIVE].l1va)                     \
-            ptwr_flush(PTWR_PT_ACTIVE);                                     \
-    if ((_what) & PTWR_CLEANUP_INACTIVE)                                    \
-        if (ptwr_info[cpu].ptinfo[PTWR_PT_INACTIVE].l1va)                   \
-            ptwr_flush(PTWR_PT_INACTIVE);                                   \
-} while ( 0 )
-
-#define cleanup_writable_pagetable(_d)                                    \
-    do {                                                                  \
-        if ( unlikely(VM_ASSIST((_d), VMASST_TYPE_writable_pagetables)) ) \
-        __cleanup_writable_pagetable(PTWR_CLEANUP_ACTIVE |                \
-                                     PTWR_CLEANUP_INACTIVE);              \
+#define cleanup_writable_pagetable(_d)                                      \
+    do {                                                                    \
+        if ( unlikely(VM_ASSIST((_d), VMASST_TYPE_writable_pagetables)) ) { \
+            if ( (_d)->arch.ptwr[PTWR_PT_ACTIVE].l1va )                     \
+                ptwr_flush((_d), PTWR_PT_ACTIVE);                           \
+            if ( (_d)->arch.ptwr[PTWR_PT_INACTIVE].l1va )                   \
+                ptwr_flush((_d), PTWR_PT_INACTIVE);                         \
+        }                                                                   \
     } while ( 0 )
 
+int audit_adjust_pgtables(struct domain *d, int dir, int noisy);
+
 #ifndef NDEBUG
-void audit_domain(struct domain *d);
+
+#define AUDIT_ALREADY_LOCKED ( 1u << 0 )
+#define AUDIT_ERRORS_OK      ( 1u << 1 )
+#define AUDIT_QUIET          ( 1u << 2 )
+
+void _audit_domain(struct domain *d, int flags);
+#define audit_domain(_d) _audit_domain((_d), 0)
 void audit_domains(void);
+
 #else
-#define audit_domain(_d) ((void)0)
-#define audit_domains()  ((void)0)
+
+#define _audit_domain(_d, _f) ((void)0)
+#define audit_domain(_d)      ((void)0)
+#define audit_domains()       ((void)0)
+
 #endif
+
+int new_guest_cr3(unsigned long pfn);
 
 void propagate_page_fault(unsigned long addr, u16 error_code);
 

@@ -23,7 +23,13 @@
 
 /* opt_dom0_mem: Kilobytes of memory allocated to domain 0. */
 static unsigned int opt_dom0_mem = 0;
-integer_param("dom0_mem", opt_dom0_mem);
+integer_unit_param("dom0_mem", opt_dom0_mem);
+
+static unsigned int opt_dom0_shadow = 0;
+boolean_param("dom0_shadow", opt_dom0_shadow);
+
+static unsigned int opt_dom0_translate = 0;
+boolean_param("dom0_translate", opt_dom0_translate);
 
 #if defined(__i386__)
 /* No ring-3 access in initial leaf page tables. */
@@ -103,6 +109,7 @@ int construct_dom0(struct domain *d,
     unsigned long mpt_alloc;
 
     extern void physdev_init_dom0(struct domain *);
+    extern void translate_l2pgtable(struct domain *d, l1_pgentry_t *p2m, unsigned long l2mfn);
 
     /* Sanity! */
     if ( d->id != 0 ) 
@@ -111,6 +118,8 @@ int construct_dom0(struct domain *d,
         BUG();
 
     memset(&dsi, 0, sizeof(struct domain_setup_info));
+    dsi.image_addr = (unsigned long)image_start;
+    dsi.image_len  = image_len;
 
     printk("*** LOADING DOMAIN 0 ***\n");
 
@@ -125,8 +134,7 @@ int construct_dom0(struct domain *d,
     alloc_start = page_to_phys(page);
     alloc_end   = alloc_start + (d->tot_pages << PAGE_SHIFT);
     
-    rc = parseelfimage(image_start, image_len, &dsi);
-    if ( rc != 0 )
+    if ( (rc = parseelfimage(&dsi)) != 0 )
         return rc;
 
     /* Align load address to 4MB boundary. */
@@ -139,7 +147,7 @@ int construct_dom0(struct domain *d,
      * read-only). We have a pair of simultaneous equations in two unknowns, 
      * which we solve by exhaustive search.
      */
-    vinitrd_start    = round_pgup(dsi.v_kernend);
+    vinitrd_start    = round_pgup(dsi.v_end);
     vinitrd_end      = vinitrd_start + initrd_len;
     vphysmap_start   = round_pgup(vinitrd_end);
     vphysmap_end     = vphysmap_start + (nr_pages * sizeof(u32));
@@ -269,8 +277,13 @@ int construct_dom0(struct domain *d,
     l1tab += l1_table_offset(vpt_start);
     for ( count = 0; count < nr_pt_pages; count++ ) 
     {
-        *l1tab = mk_l1_pgentry(l1_pgentry_val(*l1tab) & ~_PAGE_RW);
         page = &frame_table[l1_pgentry_to_pfn(*l1tab)];
+        if ( !opt_dom0_shadow )
+            *l1tab = mk_l1_pgentry(l1_pgentry_val(*l1tab) & ~_PAGE_RW);
+        else
+            if ( !get_page_type(page, PGT_writable_page) )
+                BUG();
+
         if ( count == 0 )
         {
             page->u.inuse.type_info &= ~PGT_type_mask;
@@ -413,7 +426,7 @@ int construct_dom0(struct domain *d,
         d->shared_info->vcpu_data[i].evtchn_upcall_mask = 1;
     d->shared_info->n_vcpu = smp_num_cpus;
 
-    /* Set up shadow and monitor tables. */
+    /* Set up monitor table */
     update_pagetables(ed);
 
     /* Install the new page tables. */
@@ -421,7 +434,8 @@ int construct_dom0(struct domain *d,
     write_ptbase(ed);
 
     /* Copy the OS image and free temporary buffer. */
-    (void)loadelfimage(image_start);
+    (void)loadelfimage(&dsi);
+
     init_domheap_pages(
         _image_start, (_image_start+image_len+PAGE_SIZE-1) & PAGE_MASK);
 
@@ -432,12 +446,24 @@ int construct_dom0(struct domain *d,
         init_domheap_pages(
             _initrd_start, (_initrd_start+initrd_len+PAGE_SIZE-1) & PAGE_MASK);
     }
-    
+
+    d->next_io_page = max_page;
+
     /* Set up start info area. */
     si = (start_info_t *)vstartinfo_start;
     memset(si, 0, PAGE_SIZE);
     si->nr_pages     = nr_pages;
-    si->shared_info  = virt_to_phys(d->shared_info);
+
+    if ( opt_dom0_translate )
+    {
+        si->shared_info  = d->next_io_page << PAGE_SHIFT;
+        set_machinetophys(virt_to_phys(d->shared_info) >> PAGE_SHIFT,
+                          d->next_io_page);
+        d->next_io_page++;
+    }
+    else
+        si->shared_info  = virt_to_phys(d->shared_info);
+
     si->flags        = SIF_PRIVILEGED | SIF_INITDOMAIN;
     si->pt_base      = vpt_start;
     si->nr_pt_frames = nr_pt_pages;
@@ -449,7 +475,7 @@ int construct_dom0(struct domain *d,
         mfn = pfn + (alloc_start>>PAGE_SHIFT);
 #ifndef NDEBUG
 #define REVERSE_START ((v_end - dsi.v_start) >> PAGE_SHIFT)
-        if ( pfn > REVERSE_START )
+        if ( !opt_dom0_translate && (pfn > REVERSE_START) )
             mfn = (alloc_end>>PAGE_SHIFT) - (pfn - REVERSE_START);
 #endif
         ((u32 *)vphysmap_start)[pfn] = mfn;
@@ -510,6 +536,30 @@ int construct_dom0(struct domain *d,
     set_bit(DF_CONSTRUCTED, &d->d_flags);
 
     new_thread(ed, dsi.v_kernentry, vstack_end, vstartinfo_start);
+
+    if ( opt_dom0_shadow || opt_dom0_translate )
+    {
+        shadow_mode_enable(d, (opt_dom0_translate
+                               ? SHM_enable | SHM_translate
+                               : SHM_enable));
+        if ( opt_dom0_translate )
+        {
+            // map this domain's p2m table into current page table,
+            // so that we can easily access it.
+            //
+            ASSERT( root_pgentry_val(idle_pg_table[1]) == 0 );
+            ASSERT( pagetable_val(d->arch.phys_table) );
+            idle_pg_table[1] = mk_root_pgentry(
+                pagetable_val(d->arch.phys_table) | __PAGE_HYPERVISOR);
+            translate_l2pgtable(d, (l1_pgentry_t *)(1u << L2_PAGETABLE_SHIFT),
+                                pagetable_val(ed->arch.guest_table)
+                                >> PAGE_SHIFT);
+            idle_pg_table[1] = mk_root_pgentry(0);
+            local_flush_tlb();
+        }
+
+        update_pagetables(ed); /* XXX SMP */
+    }
 
     return 0;
 }

@@ -32,6 +32,7 @@
 #include <xen/softirq.h>
 #include <asm/domain_page.h>
 #include <asm/page.h>
+#include <asm/shadow.h>
 
 /*
  * Comma-separated list of hexadecimal page numbers containing bad bytes.
@@ -542,7 +543,7 @@ void free_domheap_pages(struct pfn_info *pg, unsigned int order)
 
     if ( unlikely(IS_XEN_HEAP_FRAME(pg)) )
     {
-        /* NB. May recursively lock from domain_relinquish_memory(). */
+        /* NB. May recursively lock from relinquish_memory(). */
         spin_lock_recursive(&d->page_alloc_lock);
 
         for ( i = 0; i < (1 << order); i++ )
@@ -555,11 +556,27 @@ void free_domheap_pages(struct pfn_info *pg, unsigned int order)
     }
     else if ( likely(d != NULL) )
     {
-        /* NB. May recursively lock from domain_relinquish_memory(). */
+        /* NB. May recursively lock from relinquish_memory(). */
         spin_lock_recursive(&d->page_alloc_lock);
 
         for ( i = 0; i < (1 << order); i++ )
         {
+            if ( ((pg[i].u.inuse.type_info & PGT_count_mask) != 0) &&
+                shadow_mode_enabled(d) )
+            {
+                // XXX This needs more thought...
+                //
+                printk("%s: needing to call shadow_remove_all_access for mfn=%p\n",
+                       __func__, page_to_pfn(&pg[i]));
+                printk("Amfn=%p c=%p t=%p\n", page_to_pfn(&pg[i]),
+                       pg[i].count_info, pg[i].u.inuse.type_info);
+                shadow_lock(d);
+                shadow_remove_all_access(d, page_to_pfn(&pg[i]));
+                shadow_unlock(d);
+                printk("Bmfn=%p c=%p t=%p\n", page_to_pfn(&pg[i]),
+                       pg[i].count_info, pg[i].u.inuse.type_info);
+            }
+
             ASSERT((pg[i].u.inuse.type_info & PGT_count_mask) == 0);
             pg[i].tlbflush_timestamp  = tlbflush_current_time();
             pg[i].u.free.cpu_mask     = d->cpuset;

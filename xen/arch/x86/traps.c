@@ -115,7 +115,7 @@ asmlinkage void fatal_trap(int trapnr, struct xen_regs *regs)
     if ( trapnr == TRAP_page_fault )
     {
         __asm__ __volatile__ ("mov %%cr2,%0" : "=r" (cr2) : );
-        printk("Faulting linear address might be %0lx %lx\n", cr2, cr2);
+        printk("Faulting linear address might be %p\n", cr2);
     }
 
     printk("************************************\n");
@@ -262,31 +262,31 @@ asmlinkage int do_page_fault(struct xen_regs *regs)
     unsigned long off, addr, fixup;
     struct exec_domain *ed = current;
     struct domain *d = ed->domain;
-    extern int map_ldt_shadow_page(unsigned int);
-    int cpu = ed->processor;
     int ret;
 
     __asm__ __volatile__ ("mov %%cr2,%0" : "=r" (addr) : );
 
     DEBUGGER_trap_entry(TRAP_page_fault, regs);
 
+    //printk("do_page_fault(eip=%p, va=%p, code=%d)\n", regs->eip, addr, regs->error_code);
+
     perfc_incrc(page_faults);
 
     if ( likely(VM_ASSIST(d, VMASST_TYPE_writable_pagetables)) )
     {
         LOCK_BIGLOCK(d);
-        if ( unlikely(ptwr_info[cpu].ptinfo[PTWR_PT_ACTIVE].l1va) &&
+        if ( unlikely(d->arch.ptwr[PTWR_PT_ACTIVE].l1va) &&
              unlikely((addr >> L2_PAGETABLE_SHIFT) ==
-                      ptwr_info[cpu].ptinfo[PTWR_PT_ACTIVE].l2_idx) )
+                      d->arch.ptwr[PTWR_PT_ACTIVE].l2_idx) )
         {
-            ptwr_flush(PTWR_PT_ACTIVE);
+            ptwr_flush(d, PTWR_PT_ACTIVE);
             UNLOCK_BIGLOCK(d);
             return EXCRET_fault_fixed;
         }
 
         if ( (addr < PAGE_OFFSET) &&
              ((regs->error_code & 3) == 3) && /* write-protection fault */
-             ptwr_do_page_fault(addr) )
+             ptwr_do_page_fault(d, addr) )
         {
             if ( unlikely(shadow_mode_enabled(d)) )
                 (void)shadow_fault(addr, regs);
@@ -296,9 +296,12 @@ asmlinkage int do_page_fault(struct xen_regs *regs)
         UNLOCK_BIGLOCK(d);
     }
 
-    if ( unlikely(shadow_mode_enabled(d)) && 
-         (addr < PAGE_OFFSET) && shadow_fault(addr, regs) )
+    if ( unlikely(shadow_mode_enabled(d)) &&
+         ((addr < HYPERVISOR_VIRT_START) || shadow_mode_external(d)) &&
+         shadow_fault(addr, regs) )
+    {
         return EXCRET_fault_fixed;
+    }
 
     if ( unlikely(addr >= LDT_VIRT_START(ed)) && 
          (addr < (LDT_VIRT_START(ed) + (ed->arch.ldt_ents*LDT_ENTRY_SIZE))) )
@@ -307,6 +310,7 @@ asmlinkage int do_page_fault(struct xen_regs *regs)
          * Copy a mapping from the guest's LDT, if it is valid. Otherwise we
          * send the fault up to the guest OS to be handled.
          */
+        extern int map_ldt_shadow_page(unsigned int);
         LOCK_BIGLOCK(d);
         off  = addr - LDT_VIRT_START(ed);
         addr = ed->arch.ldt_base + off;

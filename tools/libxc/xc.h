@@ -257,20 +257,6 @@ int xc_bvtsched_domain_get(int xc_handle,
                            long long *warpl,
                            long long *warpu);
 
-int xc_atropos_domain_set(int xc_handle,
-                          u32 domid,
-                          u64 period, u64 slice, u64 latency,
-                          int xtratime);
-
-int xc_atropos_domain_get(int xc_handle,
-                          u32 domid,
-                          u64* period, u64 *slice, u64 *latency,
-                          int *xtratime);
-
-int xc_rrobin_global_set(int xc_handle, u64 slice);
-
-int xc_rrobin_global_get(int xc_handle, u64 *slice);
-
 typedef evtchn_status_t xc_evtchn_status_t;
 
 /*
@@ -380,6 +366,11 @@ typedef dom0_perfc_desc_t xc_perfc_desc_t;
 int xc_perfc_control(int xc_handle,
                      u32 op,
                      xc_perfc_desc_t *desc);
+
+/* read/write msr */
+long long xc_msr_read(int xc_handle, int cpu_mask, int msr);
+int xc_msr_write(int xc_handle, int cpu_mask, int msr, unsigned int low,
+                  unsigned int high);
 
 /**
  * Memory maps a range within one domain to a local address range.  Mappings

@@ -13,7 +13,7 @@ CFLAGS   += $(INCLUDES)
 
 HDRS     = $(wildcard *.h)
 
-TARGETS  = xenperf
+TARGETS  = xenperf xc_shadow
 
 INSTALL_BIN  = $(TARGETS) xencons
 INSTALL_SBIN = netfix xm xend xensv xenperf
@@ -21,6 +21,7 @@ INSTALL_SBIN = netfix xm xend xensv xenperf
 all: build
 build: $(TARGETS)
 	$(MAKE) -C miniterm
+	$(MAKE) -C cpuperf
 	$(MAKE) -C mbootpack
 
 install: build
@@ -28,6 +29,7 @@ install: build
 	[ -d $(DESTDIR)/usr/sbin ] || $(INSTALL_DIR) $(DESTDIR)/usr/sbin
 	$(INSTALL_PROG) $(INSTALL_BIN) $(DESTDIR)/usr/bin
 	$(INSTALL_PROG) $(INSTALL_SBIN) $(DESTDIR)/usr/sbin
+	$(MAKE) -C cpuperf install
 #       No sense in installing miniterm on the Xen box.
 #	$(MAKE) -C miniterm install
 #       Likewise mbootpack
@@ -36,6 +38,7 @@ install: build
 clean:
 	$(RM) *.o $(TARGETS) *~
 	$(MAKE) -C miniterm clean
+	$(MAKE) -C cpuperf clean
 	$(MAKE) -C mbootpack clean
 
 %.o: %.c $(HDRS) Makefile

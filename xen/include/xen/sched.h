@@ -104,6 +104,7 @@ struct domain
     struct list_head xenpage_list;    /* linked list, of size xenheap_pages */
     unsigned int     tot_pages;       /* number of pages currently possesed */
     unsigned int     max_pages;       /* maximum value for tot_pages        */
+    unsigned int     next_io_page;    /* next io pfn to give to domain      */
     unsigned int     xenheap_pages;   /* # pages allocated from Xen heap    */
 
     /* Scheduling. */
@@ -147,10 +148,19 @@ struct domain
 
 struct domain_setup_info
 {
+    /* Initialised by caller. */
+    unsigned long image_addr;
+    unsigned long image_len;
+    /* Initialised by loader: Public. */
     unsigned long v_start;
+    unsigned long v_end;
     unsigned long v_kernstart;
     unsigned long v_kernend;
     unsigned long v_kernentry;
+    /* Initialised by loader: Private. */
+    unsigned int  load_symtab;
+    unsigned long symtab_addr;
+    unsigned long symtab_len;
 };
 
 #include <asm/uaccess.h> /* for KERNEL_DS */
