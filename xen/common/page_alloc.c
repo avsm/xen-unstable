@@ -1,4 +1,3 @@
-/* -*-  Mode:C; c-basic-offset:4; tab-width:4; indent-tabs-mode:nil -*- */
 /******************************************************************************
  * page_alloc.c
  * 
@@ -204,8 +203,8 @@ unsigned long alloc_boot_pages(unsigned long size, unsigned long align)
 #define MEMZONE_DOM 1
 #define NR_ZONES    2
 
-/* Up to 2^10 pages can be allocated at once. */
-#define MAX_ORDER 10
+/* Up to 2^20 pages can be allocated at once. */
+#define MAX_ORDER 20
 static struct list_head heap[NR_ZONES][MAX_ORDER+1];
 
 static unsigned long avail[NR_ZONES];
@@ -608,3 +607,12 @@ unsigned long avail_domheap_pages(void)
 {
     return avail[MEMZONE_DOM];
 }
+
+/*
+ * Local variables:
+ * mode: C
+ * c-set-style: "BSD"
+ * c-basic-offset: 4
+ * tab-width: 4
+ * indent-tabs-mode: nil
+ */

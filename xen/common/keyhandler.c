@@ -1,8 +1,8 @@
-/* -*-  Mode:C; c-basic-offset:4; tab-width:4; indent-tabs-mode:nil -*- */
 /******************************************************************************
  * keyhandler.c
  */
 
+#include <asm/regs.h>
 #include <xen/keyhandler.h> 
 #include <xen/reboot.h>
 #include <xen/event.h>
@@ -155,6 +155,16 @@ void do_debug_key(unsigned char key, struct xen_regs *regs)
                              bit. */
 }
 
+#ifndef NDEBUG
+void debugtrace_key(unsigned char key)
+{
+    debugtrace_send_to_console = !debugtrace_send_to_console;
+    debugtrace_dump();
+    printk("debugtrace_printk now writing to %s.\n",
+           debugtrace_send_to_console ? "console" : "buffer");
+}
+#endif
+
 void initialize_keytable(void)
 {
     open_softirq(KEYPRESS_SOFTIRQ, keypress_softirq);
@@ -176,7 +186,9 @@ void initialize_keytable(void)
 
 #ifndef NDEBUG
     register_keyhandler(
-        'o', audit_domains_key,  "audit domains >0 EXPERIMENTAL"); 
+        'o', audit_domains_key,  "audit domains >0 EXPERIMENTAL");
+    register_keyhandler(
+        'T', debugtrace_key, "dump debugtrace");
 #endif
 
 #ifdef PERF_COUNTERS
@@ -188,3 +200,12 @@ void initialize_keytable(void)
 
     register_irq_keyhandler('%', do_debug_key,   "Trap to xendbg");
 }
+
+/*
+ * Local variables:
+ * mode: C
+ * c-set-style: "BSD"
+ * c-basic-offset: 4
+ * tab-width: 4
+ * indent-tabs-mode: nil
+ */

@@ -109,9 +109,25 @@ static inline unsigned long _get_base(char * addr)
 
 /* NB. 'clts' is done for us by Xen during virtual trap. */
 #define clts() ((void)0)
-#define stts() (HYPERVISOR_fpu_taskswitch())
+#define stts() (HYPERVISOR_fpu_taskswitch(1))
 
 #endif	/* __KERNEL__ */
+
+/**
+ * __ffs - find first bit in word.
+ * @word: The word to search
+ *
+ * Undefined if no bit exists, so code should check against 0 first.
+ *
+ * Taken from 2.6 for Xen.
+ */
+static inline unsigned long __ffs(unsigned long word)
+{
+	__asm__("bsfl %1,%0"
+		:"=r" (word)
+		:"rm" (word));
+	return word;
+}
 
 static inline unsigned long get_limit(unsigned long segment)
 {

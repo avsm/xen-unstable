@@ -343,8 +343,6 @@ printk("About to  process command line\n");
 #ifdef IA64
 printk("About to call construct_dom0()\n");
     if ( construct_dom0(dom0, dom0_memory_start, dom0_memory_end,
-                        0, 
-                        0,
 			0,
                         0,
 			0) != 0)
@@ -367,8 +365,6 @@ printk("About to call construct_dom0()\n");
 printk("CONSTRUCTING DOMAIN0 CLONE #%d\n",i+1);
         if ( construct_dom0(clones[i], dom0_memory_start, dom0_memory_end,
                         0, 
-                        0,
-			0,
                         0,
 			0) != 0)
             panic("Could not set up DOM0 clone %d\n",i);

@@ -36,13 +36,13 @@ static unsigned long msr_hi;
 static void write_msr_for(void *unused)
 {
     if (((1 << current->processor) & msr_cpu_mask))
-        wrmsr(msr_addr, msr_lo, msr_hi);
+        (void)wrmsr_user(msr_addr, msr_lo, msr_hi);
 }
 
 static void read_msr_for(void *unused)
 {
     if (((1 << current->processor) & msr_cpu_mask))
-        rdmsr(msr_addr, msr_lo, msr_hi);
+        (void)rdmsr_user(msr_addr, msr_lo, msr_hi);
 }
 
 long arch_do_dom0_op(dom0_op_t *op, dom0_op_t *u_dom0_op)
@@ -349,8 +349,9 @@ void arch_getdomaininfo_ctxt(
 { 
     int i;
 #ifdef __i386__  /* Remove when x86_64 VMX is implemented */
-    unsigned long vmx_domain;
+#ifdef CONFIG_VMX
     extern void save_vmx_execution_context(execution_context_t *);
+#endif
 #endif
 
     c->flags = 0;
@@ -359,9 +360,10 @@ void arch_getdomaininfo_ctxt(
            sizeof(ed->arch.user_ctxt));
 
 #ifdef __i386__
-    vmx_domain = ed->arch.arch_vmx.flags;
-    if (vmx_domain)
+#ifdef CONFIG_VMX
+    if ( VMX_DOMAIN(ed) )
         save_vmx_execution_context(&c->cpu_ctxt);
+#endif
 #endif
 
     if ( test_bit(EDF_DONEFPUINIT, &ed->ed_flags) )

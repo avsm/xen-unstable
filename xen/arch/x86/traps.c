@@ -1,4 +1,3 @@
-/* -*-  Mode:C; c-basic-offset:4; tab-width:4; indent-tabs-mode:nil -*- */
 /******************************************************************************
  * arch/x86/traps.c
  * 
@@ -289,7 +288,7 @@ asmlinkage int do_page_fault(struct xen_regs *regs)
              ptwr_do_page_fault(addr) )
         {
             if ( unlikely(shadow_mode_enabled(d)) )
-                (void)shadow_fault(addr, regs->error_code);
+                (void)shadow_fault(addr, regs);
             UNLOCK_BIGLOCK(d);
             return EXCRET_fault_fixed;
         }
@@ -297,7 +296,7 @@ asmlinkage int do_page_fault(struct xen_regs *regs)
     }
 
     if ( unlikely(shadow_mode_enabled(d)) && 
-         (addr < PAGE_OFFSET) && shadow_fault(addr, regs->error_code) )
+         (addr < PAGE_OFFSET) && shadow_fault(addr, regs) )
         return EXCRET_fault_fixed;
 
     if ( unlikely(addr >= LDT_VIRT_START(ed)) && 
@@ -349,9 +348,27 @@ asmlinkage int do_page_fault(struct xen_regs *regs)
     return 0;
 }
 
+long do_fpu_taskswitch(int set)
+{
+    struct exec_domain *ed = current;
+
+    if ( set )
+    {
+        set_bit(EDF_GUEST_STTS, &ed->ed_flags);
+        stts();
+    }
+    else
+    {
+        clear_bit(EDF_GUEST_STTS, &ed->ed_flags);
+        if ( test_bit(EDF_USEDFPU, &ed->ed_flags) )
+            clts();
+    }
+
+    return 0;
+}
+
 static int emulate_privileged_op(struct xen_regs *regs)
 {
-    extern long do_fpu_taskswitch(void);
     extern void *decode_reg(struct xen_regs *regs, u8 b);
 
     struct exec_domain *ed = current;
@@ -371,16 +388,15 @@ static int emulate_privileged_op(struct xen_regs *regs)
     switch ( opcode )
     {
     case 0x06: /* CLTS */
-        (void)do_fpu_taskswitch();
+        (void)do_fpu_taskswitch(0);
         break;
 
     case 0x09: /* WBINVD */
+        /* Ignore the instruction if unprivileged. */
         if ( !IS_CAPABLE_PHYSDEV(ed->domain) )
-        {
             DPRINTK("Non-physdev domain attempted WBINVD.\n");
-            goto fail;
-        }
-        wbinvd();
+        else
+            wbinvd();
         break;
 
     case 0x20: /* MOV CR?,<reg> */
@@ -421,8 +437,7 @@ static int emulate_privileged_op(struct xen_regs *regs)
         switch ( (opcode >> 3) & 7 )
         {
         case 0: /* Write CR0 */
-            if ( *reg & X86_CR0_TS ) /* XXX ignore all but TS bit */
-                (void)do_fpu_taskswitch;
+            (void)do_fpu_taskswitch(!!(*reg & X86_CR0_TS));
             break;
 
         case 2: /* Write CR2 */
@@ -441,21 +456,21 @@ static int emulate_privileged_op(struct xen_regs *regs)
         break;
 
     case 0x30: /* WRMSR */
+        /* Ignore the instruction if unprivileged. */
         if ( !IS_PRIV(ed->domain) )
-        {
-            DPRINTK("Non-priv domain attempted WRMSR.\n");
+            DPRINTK("Non-priv domain attempted WRMSR(%p,%08lx,%08lx).\n",
+                    regs->ecx, (long)regs->eax, (long)regs->edx);
+        else if ( wrmsr_user(regs->ecx, regs->eax, regs->edx) )
             goto fail;
-        }
-        wrmsr(regs->ecx, regs->eax, regs->edx);
         break;
 
     case 0x32: /* RDMSR */
         if ( !IS_PRIV(ed->domain) )
-        {
-            DPRINTK("Non-priv domain attempted RDMSR.\n");
+            DPRINTK("Non-priv domain attempted RDMSR(%p,%08lx,%08lx).\n",
+                    regs->ecx, (long)regs->eax, (long)regs->edx);
+        /* Everyone can read the MSR space. */
+        if ( rdmsr_user(regs->ecx, regs->eax, regs->edx) )
             goto fail;
-        }
-        rdmsr(regs->ecx, regs->eax, regs->edx);
         break;
 
     default:
@@ -819,14 +834,6 @@ long do_set_trap_table(trap_info_t *traps)
 }
 
 
-long do_fpu_taskswitch(void)
-{
-    set_bit(EDF_GUEST_STTS, &current->ed_flags);
-    stts();
-    return 0;
-}
-
-
 #if defined(__i386__)
 #define DB_VALID_ADDR(_a) \
     ((_a) <= (PAGE_OFFSET - 4))
@@ -909,3 +916,12 @@ unsigned long do_get_debugreg(int reg)
     if ( (reg < 0) || (reg > 7) ) return -EINVAL;
     return current->arch.debugreg[reg];
 }
+
+/*
+ * Local variables:
+ * mode: C
+ * c-set-style: "BSD"
+ * c-basic-offset: 4
+ * tab-width: 4
+ * indent-tabs-mode: nil
+ */

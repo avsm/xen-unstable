@@ -7,6 +7,7 @@
 #include <xen/string.h>
 
 #define BUG() do {					\
+    debugtrace_dump();                                  \
     printk("BUG at %s:%d\n", __FILE__, __LINE__);	\
     FORCE_CRASH();                                      \
 } while ( 0 )
@@ -22,6 +23,8 @@
 #define SWAP(_a, _b) \
    do { typeof(_a) _t = (_a); (_a) = (_b); (_b) = _t; } while ( 0 )
 
+#define DIV_ROUND(x, y) (((x) + (y) - 1) / (y))
+
 #define reserve_bootmem(_p,_l) ((void)0)
 
 struct domain;
@@ -29,11 +32,10 @@ struct domain;
 void cmdline_parse(char *cmdline);
 
 #ifndef NDEBUG
-extern void debugtrace_reset(void);
+extern int debugtrace_send_to_console;
 extern void debugtrace_dump(void);
 extern void debugtrace_printk(const char *fmt, ...);
 #else
-#define debugtrace_reset()         ((void)0)
 #define debugtrace_dump()          ((void)0)
 #define debugtrace_printk(_f, ...) ((void)0)
 #endif

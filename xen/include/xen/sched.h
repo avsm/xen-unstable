@@ -1,4 +1,3 @@
-/* -*-  Mode:C; c-basic-offset:4; tab-width:4; indent-tabs-mode:nil -*- */
 
 #ifndef __SCHED_H__
 #define __SCHED_H__
@@ -216,12 +215,11 @@ static inline void get_knownalive_domain(struct domain *d)
   
 extern struct domain *do_createdomain(
     domid_t dom_id, unsigned int cpu);
-extern int construct_dom0(struct domain *d, 
-                          unsigned long alloc_start,
-                          unsigned long alloc_end,
-                          unsigned long image_start, unsigned long image_len, 
-                          unsigned long initrd_start, unsigned long initrd_len,
-                          char *cmdline);
+extern int construct_dom0(
+    struct domain *d,
+    unsigned long image_start, unsigned long image_len, 
+    unsigned long initrd_start, unsigned long initrd_len,
+    char *cmdline);
 extern int final_setup_guest(struct domain *d, dom0_builddomain_t *);
 
 struct domain *find_domain_by_id(domid_t dom);
@@ -402,3 +400,12 @@ static inline void domain_unpause_by_systemcontroller(struct domain *d)
 
 
 #endif /* __SCHED_H__ */
+
+/*
+ * Local variables:
+ * mode: C
+ * c-set-style: "BSD"
+ * c-basic-offset: 4
+ * tab-width: 4
+ * indent-tabs-mode: nil
+ */

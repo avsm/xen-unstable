@@ -1,4 +1,3 @@
-/* -*-  Mode:C; c-basic-offset:4; tab-width:4; indent-tabs-mode:nil -*- */
 /*
  * vmx_io.c: handling I/O, interrupts related VMX entry/exit 
  * Copyright (c) 2004, Intel Corporation.
@@ -22,6 +21,7 @@
 #include <xen/mm.h>
 #include <xen/lib.h>
 #include <xen/errno.h>
+#include <xen/trace.h>
 
 #include <asm/cpufeature.h>
 #include <asm/processor.h>
@@ -194,7 +194,7 @@ void vmx_io_assist(struct exec_domain *ed)
     vio = (vcpu_iodata_t *) ed->arch.arch_vmx.vmx_platform.shared_page_va;
     if (vio == 0) {
         VMX_DBG_LOG(DBG_LEVEL_1, 
-                    "bad shared page: %lx\n", (unsigned long) vio);
+                    "bad shared page: %lx", (unsigned long) vio);
         domain_crash();
     }
     p = &vio->vp_ioreq;
@@ -313,7 +313,7 @@ static inline int find_highest_pending_irq(struct exec_domain *d)
     vio = (vcpu_iodata_t *) d->arch.arch_vmx.vmx_platform.shared_page_va;
     if (vio == 0) {
         VMX_DBG_LOG(DBG_LEVEL_1, 
-                    "bad shared page: %lx\n", (unsigned long) vio);
+                    "bad shared page: %lx", (unsigned long) vio);
         domain_crash();
     }
         
@@ -327,7 +327,7 @@ static inline void clear_highest_bit(struct exec_domain *d, int vector)
     vio = (vcpu_iodata_t *) d->arch.arch_vmx.vmx_platform.shared_page_va;
     if (vio == 0) {
         VMX_DBG_LOG(DBG_LEVEL_1, 
-                    "bad shared page: %lx\n", (unsigned long) vio);
+                    "bad shared page: %lx", (unsigned long) vio);
         domain_crash();
     }
         
@@ -350,14 +350,14 @@ void vmx_intr_assist(struct exec_domain *d)
 
     __vmread(VM_ENTRY_INTR_INFO_FIELD, &intr_fields);
     if (intr_fields & INTR_INFO_VALID_MASK) {
-        VMX_DBG_LOG(DBG_LEVEL_1, "vmx_intr_assist: intr_fields: %lx\n", 
+        VMX_DBG_LOG(DBG_LEVEL_1, "vmx_intr_assist: intr_fields: %lx",
                     intr_fields);
         return;
     }
 
     __vmread(GUEST_EFLAGS, &eflags);
     if (irq_masked(eflags)) {
-        VMX_DBG_LOG(DBG_LEVEL_1, "guesting pending: %x, eflags: %lx\n", 
+        VMX_DBG_LOG(DBG_LEVEL_1, "guesting pending: %x, eflags: %lx",
                     highest_vector, eflags);
         return;
     }
@@ -367,11 +367,18 @@ void vmx_intr_assist(struct exec_domain *d)
     else
         clear_highest_bit(d, highest_vector); 
 
+    /* close the window between guest PIT initialization and sti */
+    if (highest_vector == vpit->vector && !vpit->first_injected){
+        vpit->first_injected = 1;
+        vpit->pending_intr_nr = 0;
+    }
+
     intr_fields = (INTR_INFO_VALID_MASK | INTR_TYPE_EXT_INTR | highest_vector);
     __vmwrite(VM_ENTRY_INTR_INFO_FIELD, intr_fields);
 
     __vmwrite(GUEST_INTERRUPTIBILITY_INFO, 0);
 
+    TRACE_2D(TRC_VMX_INT, d, highest_vector);
     if (highest_vector == vpit->vector)
         vpit->inject_point = NOW();
 
@@ -380,8 +387,13 @@ void vmx_intr_assist(struct exec_domain *d)
 
 void vmx_do_resume(struct exec_domain *d) 
 {
+    if ( test_bit(VMX_CPU_STATE_PG_ENABLED, &d->arch.arch_vmx.cpu_state) )
+        __vmwrite(GUEST_CR3, pagetable_val(d->arch.shadow_table));
+    else
+        // paging is not enabled in the guest
+        __vmwrite(GUEST_CR3, pagetable_val(d->arch.phys_table));
+
     __vmwrite(HOST_CR3, pagetable_val(d->arch.monitor_table));
-    __vmwrite(GUEST_CR3, pagetable_val(d->arch.shadow_table));
     __vmwrite(HOST_ESP, (unsigned long)get_stack_bottom());
 
     if (event_pending(d)) {
@@ -404,3 +416,12 @@ void vmx_do_resume(struct exec_domain *d)
 }
 
 #endif /* CONFIG_VMX */
+
+/*
+ * Local variables:
+ * mode: C
+ * c-set-style: "BSD"
+ * c-basic-offset: 4
+ * tab-width: 4
+ * indent-tabs-mode: nil
+ */

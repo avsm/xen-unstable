@@ -1,4 +1,3 @@
-/* -*-  Mode:C; c-basic-offset:4; tab-width:4; indent-tabs-mode:nil -*- */
 /******************************************************************************
  * console.c
  * 
@@ -466,6 +465,20 @@ void console_force_lock(void)
     spin_lock(&console_lock);
 }
 
+void console_putc(char c)
+{
+    serial_putc(sercon_handle, c);
+}
+
+int console_getc(void)
+{
+    return serial_getc(sercon_handle);
+}
+
+int irq_console_getc(void)
+{
+    return irq_serial_getc(sercon_handle);
+}
 
 
 /*
@@ -476,21 +489,19 @@ void console_force_lock(void)
 
 #ifndef NDEBUG
 
+/* Send output direct to console, or buffer it? */
+int debugtrace_send_to_console;
+
 static unsigned char *debugtrace_buf; /* Debug-trace buffer */
 static unsigned int   debugtrace_prd; /* Producer index     */
 static unsigned int   debugtrace_kilobytes = 128, debugtrace_bytes;
+static spinlock_t debugtrace_lock = SPIN_LOCK_UNLOCKED;
 integer_param("debugtrace", debugtrace_kilobytes);
-#define DEBUGTRACE_MASK(_p) ((_p) & (debugtrace_bytes-1))
-
-void debugtrace_reset(void)
-{
-    if ( debugtrace_bytes != 0 )
-        memset(debugtrace_buf, '\0', debugtrace_bytes);
-}
 
 void debugtrace_dump(void)
 {
     int _watchdog_on = watchdog_on;
+    unsigned long flags;
 
     if ( debugtrace_bytes == 0 )
         return;
@@ -498,42 +509,55 @@ void debugtrace_dump(void)
     /* Watchdog can trigger if we print a really large buffer. */
     watchdog_on = 0;
 
+    spin_lock_irqsave(&debugtrace_lock, flags);
+
     /* Print oldest portion of the ring. */
-    serial_puts(sercon_handle,
-                &debugtrace_buf[DEBUGTRACE_MASK(debugtrace_prd)]);
+    serial_puts(sercon_handle, &debugtrace_buf[debugtrace_prd]);
 
     /* Print youngest portion of the ring. */
-    debugtrace_buf[DEBUGTRACE_MASK(debugtrace_prd)] = '\0';
-    serial_puts(sercon_handle,
-                &debugtrace_buf[0]);
+    debugtrace_buf[debugtrace_prd] = '\0';
+    serial_puts(sercon_handle, &debugtrace_buf[0]);
 
-    debugtrace_reset();
+    memset(debugtrace_buf, '\0', debugtrace_bytes);
+
+    spin_unlock_irqrestore(&debugtrace_lock, flags);
 
     watchdog_on = _watchdog_on;
 }
 
 void debugtrace_printk(const char *fmt, ...)
 {
-    static spinlock_t _lock = SPIN_LOCK_UNLOCKED;
-    static char       buf[1024];
+    static char    buf[1024];
 
-    va_list       args;
+    va_list        args;
     unsigned char *p;
     unsigned long  flags;
 
     if ( debugtrace_bytes == 0 )
         return;
 
-    spin_lock_irqsave(&_lock, flags);
+    spin_lock_irqsave(&debugtrace_lock, flags);
 
     va_start(args, fmt);
     (void)vsnprintf(buf, sizeof(buf), fmt, args);
-    va_end(args);        
+    va_end(args);
 
-    for ( p = buf; *p != '\0'; p++ )
-        debugtrace_buf[DEBUGTRACE_MASK(debugtrace_prd++)] = *p;
+    if ( debugtrace_send_to_console )
+    {
+        serial_puts(sercon_handle, buf);
+    }
+    else
+    {
+        for ( p = buf; *p != '\0'; p++ )
+        {
+            debugtrace_buf[debugtrace_prd++] = *p;            
+            /* Always leave a nul byte at the end of the buffer. */
+            if ( debugtrace_prd == (debugtrace_bytes - 1) )
+                debugtrace_prd = 0;
+        }
+    }
 
-    spin_unlock_irqrestore(&_lock, flags);
+    spin_unlock_irqrestore(&debugtrace_lock, flags);
 }
 
 static int __init debugtrace_init(void)
@@ -578,6 +602,8 @@ void panic(const char *fmt, ...)
     unsigned long flags;
     extern void machine_restart(char *);
     
+    debugtrace_dump();
+
     va_start(args, fmt);
     (void)vsnprintf(buf, sizeof(buf), fmt, args);
     va_end(args);
@@ -596,8 +622,6 @@ void panic(const char *fmt, ...)
     __putstr("Reboot in five seconds...\n");
     spin_unlock_irqrestore(&console_lock, flags);
 
-    debugtrace_dump();
-
     watchdog_on = 0;
     mdelay(5000);
     machine_restart(0);
@@ -610,3 +634,12 @@ void __out_of_line_bug(int line)
     BUG();
     for ( ; ; ) ;
 }
+
+/*
+ * Local variables:
+ * mode: C
+ * c-set-style: "BSD"
+ * c-basic-offset: 4
+ * tab-width: 4
+ * indent-tabs-mode: nil
+ */
