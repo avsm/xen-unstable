@@ -4,7 +4,7 @@ INSTALL_PROG	= $(INSTALL) -m0755
 INSTALL_DATA	= $(INSTALL) -m0644
 INSTALL_DIR	= $(INSTALL) -d -m0755
 
-MAJOR    = 2.0
+MAJOR    = 3.0
 MINOR    = 0
 
 CC       = gcc
@@ -20,6 +20,7 @@ SRCS     += xc_atropos.c
 SRCS     += xc_bvtsched.c
 SRCS     += xc_domain.c
 SRCS     += xc_evtchn.c
+SRCS     += xc_gnttab.c
 SRCS     += xc_io.c
 SRCS     += xc_linux_build.c
 SRCS     += xc_plan9_build.c
@@ -29,6 +30,7 @@ SRCS     += xc_misc.c
 SRCS     += xc_physdev.c
 SRCS     += xc_private.c
 SRCS     += xc_rrobin.c
+SRCS     += xc_vmx_build.c
 
 CFLAGS   += -Wall
 CFLAGS   += -Werror
@@ -75,6 +77,11 @@ install: all
 	ln -sf libxc.so.$(MAJOR) $(DESTDIR)/usr/lib/libxc.so
 	$(INSTALL_DATA) xc.h $(DESTDIR)/usr/include
 
+.PHONY: TAGS clean rpm install all
+
+TAGS:
+	etags -t $(SRCS) *.h
+
 clean:
 	rm -rf *.a *.so* *.o *.opic *.rpm $(LIB) *~ $(DEPS) xen
 
@@ -96,6 +103,6 @@ libxc.so.$(MAJOR): libxc.so.$(MAJOR).$(MINOR)
 	ln -sf $< $@
 
 libxc.so.$(MAJOR).$(MINOR): $(PIC_OBJS)
-	$(CC) -Wl,-soname -Wl,libxc.so.$(MAJOR) -shared -o $@ $^ -L../libxutil -lxutil -lz
+	$(CC) $(CFLAGS) -Wl,-soname -Wl,libxc.so.$(MAJOR) -shared -o $@ $^ -L../libxutil -lxutil -lz
 
 -include $(DEPS)
