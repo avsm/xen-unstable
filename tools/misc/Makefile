@@ -5,7 +5,6 @@ INSTALL_DIR	= $(INSTALL) -d -m0755
 XEN_ROOT=../..
 include $(XEN_ROOT)/tools/Rules.mk
 
-CC        = gcc
 CFLAGS   += -Wall -Werror -O3 
 
 INCLUDES += -I $(XEN_XC)
@@ -22,6 +21,7 @@ INSTALL_SBIN = netfix xm xend xensv xenperf
 all: build
 build: $(TARGETS)
 	$(MAKE) -C miniterm
+	$(MAKE) -C mbootpack
 
 install: build
 	[ -d $(DESTDIR)/usr/bin ] || $(INSTALL_DIR) $(DESTDIR)/usr/bin
@@ -30,10 +30,13 @@ install: build
 	$(INSTALL_PROG) $(INSTALL_SBIN) $(DESTDIR)/usr/sbin
 #       No sense in installing miniterm on the Xen box.
 #	$(MAKE) -C miniterm install
+#       Likewise mbootpack
+#	$(MAKE) -C mbootpack install
 
 clean:
 	$(RM) *.o $(TARGETS) *~
 	$(MAKE) -C miniterm clean
+	$(MAKE) -C mbootpack clean
 
 %.o: %.c $(HDRS) Makefile
 	$(CC) -c $(CFLAGS) -o $@ $<

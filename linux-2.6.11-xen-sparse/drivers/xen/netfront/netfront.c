@@ -382,16 +382,10 @@ static void network_alloc_rx_buffers(struct net_device *dev)
 	    = INVALID_P2M_ENTRY;
 
         rx_mcl[i].op = __HYPERVISOR_update_va_mapping;
-        rx_mcl[i].args[0] = (unsigned long)skb->head >> PAGE_SHIFT;
+        rx_mcl[i].args[0] = (unsigned long)skb->head;
         rx_mcl[i].args[1] = 0;
         rx_mcl[i].args[2] = 0;
     }
-
-    /*
-     * We may have allocated buffers which have entries outstanding in the page
-     * update queue -- make sure we flush those first!
-     */
-    flush_page_update_queue();
 
     /* After all PTEs have been zapped we blow away stale TLB entries. */
     rx_mcl[i-1].args[2] = UVMF_FLUSH_TLB;
@@ -574,7 +568,7 @@ static int netif_poll(struct net_device *dev, int *pbudget)
         mmu->val  = __pa(skb->head) >> PAGE_SHIFT;
         mmu++;
         mcl->op = __HYPERVISOR_update_va_mapping;
-        mcl->args[0] = (unsigned long)skb->head >> PAGE_SHIFT;
+        mcl->args[0] = (unsigned long)skb->head;
         mcl->args[1] = (rx->addr & PAGE_MASK) | __PAGE_KERNEL;
         mcl->args[2] = 0;
         mcl++;
