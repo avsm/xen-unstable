@@ -642,24 +642,6 @@ class XendDomain:
         except Exception, ex:
             raise XendError(str(ex))
     
-    def domain_cpu_atropos_set(self, id, period, slice, latency, xtratime):
-        """Set Atropos scheduler parameters for a domain.
-        """
-        dominfo = self.domain_lookup(id)
-        try:
-            return xc.atropos_domain_set(dominfo.dom, period, slice, latency, xtratime)
-        except Exception, ex:
-            raise XendError(str(ex))
-
-    def domain_cpu_atropos_get(self, id):
-        """Get Atropos scheduler parameters for a domain.
-        """
-        dominfo = self.domain_lookup(id)
-        try:
-            return xc.atropos_domain_get(dominfo.dom)
-        except Exception, ex:
-            raise XendError(str(ex))
-
     def domain_device_create(self, id, devconfig):
         """Create a new device for a domain.
 
@@ -687,6 +669,18 @@ class XendDomain:
         self.update_domain(dominfo.id)
         return val
     
+    def domain_device_refresh(self, id, type, idx):
+        """Refresh a device.
+
+        @param id:  domain id
+        @param idx:  device index
+        @param type: device type
+        """
+        dominfo = self.domain_lookup(id)
+        self.refresh_schedule()
+        val = dominfo.device_refresh(type, idx)
+        self.update_domain(dominfo.id)
+        return val
 
     def domain_device_destroy(self, id, type, idx):
         """Destroy a device.
@@ -723,6 +717,15 @@ class XendDomain:
         dominfo = self.domain_lookup(id)
         return dominfo.get_device_by_index(type, idx)
 
+    def domain_vif_credit_limit(self, id, vif, credit, period):
+        """Limit the vif's transmission rate
+        """
+        dominfo = self.domain_lookup(id)
+        try:
+            return dominfo.limit_vif(vif, credit, period)
+        except Exception, ex:
+            raise XendError(str(ex))
+        
     def domain_vif_ls(self, id):
         """Get list of virtual network interface (vif) indexes for a domain.
 

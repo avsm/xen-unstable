@@ -566,40 +566,6 @@ class ProgBvtslice(Prog):
 
 xm.prog(ProgBvtslice)
 
-
-class ProgAtropos(Prog):
-    group = 'scheduler'
-    name= "atropos"
-    info = """Set atropos parameters."""
-
-    def help(self, args):
-        print args[0], "DOM PERIOD SLICE LATENCY XTRATIME"
-        print "\nSet atropos parameters."
-
-    def main(self, args):
-        if len(args) != 6: self.err("%s: Invalid argument(s)" % args[0])
-        dom = args[1]
-        v = map(int, args[2:6])
-        server.xend_domain_cpu_atropos_set(dom, *v)
-
-xm.prog(ProgAtropos)
-
-class ProgRrobin(Prog):
-    group = 'scheduler'
-    name = "rrobin"
-    info = """Set round robin slice."""
-
-    def help(self, args):
-        print args[0], "SLICE"
-        print "\nSet round robin scheduler slice."
-
-    def main(self, args):
-        if len(args) != 2: self.err("%s: Invalid argument(s)" % args[0])
-        rrslice = int(args[1])
-        server.xend_node_rrobin_set(rrslice)
-
-xm.prog(ProgRrobin)
-
 class ProgInfo(Prog):
     group = 'host'
     name = "info"
@@ -717,6 +683,23 @@ class ProgLog(Prog):
 
 xm.prog(ProgLog)
 
+class ProgVifCreditLimit(Prog):
+    group = 'vif'
+    name= "vif-limit"
+    info = """Limit the transmission rate of a virtual network interface."""
+
+    def help(self, args):
+        print args[0], "DOMAIN VIF CREDIT_IN_BYTES PERIOD_IN_USECS"
+        print "\nSet the credit limit of a virtual network interface."
+
+    def main(self, args):
+        if len(args) != 5: self.err("%s: Invalid argument(s)" % args[0])
+        dom = args[1]
+        v = map(int, args[2:5])
+        server.xend_domain_vif_limit(dom, *v)
+
+xm.prog(ProgVifCreditLimit)
+
 class ProgVifList(Prog):
     group = 'vif'
     name  = 'vif-list'
@@ -782,6 +765,28 @@ Create a virtual block device for a domain.
         server.xend_domain_device_create(dom, vbd)
 
 xm.prog(ProgVbdCreate)
+
+class ProgVbdRefresh(Prog):
+    group = 'vbd'
+    name  = 'vbd-refresh'
+    info = """Refresh a virtual block device for a domain"""
+
+    def help(self, args):
+        print args[0], "DOM DEV"
+        print """
+Refresh a virtual block device for a domain.
+
+  DEV     - idx field in the device information
+"""
+
+    def main(self, args):
+        if len(args) != 3: self.err("%s: Invalid argument(s)" % args[0])
+        dom = args[1]
+        dev = args[2]
+        server.xend_domain_device_refresh(dom, 'vbd', dev)
+
+xm.prog(ProgVbdRefresh)
+
 
 class ProgVbdDestroy(Prog):
     group = 'vbd'
