@@ -405,7 +405,7 @@ def make_domain(opts, config):
     dom = int(sxp.child_value(dominfo, 'id'))
     console_info = sxp.child(dominfo, 'console')
     if console_info:
-        console_port = int(sxp.child_value(console_info, 'port'))
+        console_port = int(sxp.child_value(console_info, 'console_port'))
     else:
         console_port = None
     
@@ -431,11 +431,11 @@ def main(argv):
             (var, val) = arg.strip().split('=', 1)
             gopts.setvar(var.strip(), val.strip())
     if opts.vals.config:
-        pass
+        config = opts.vals.config
     else:
         opts.load_defaults()
-    preprocess(opts, opts.vals)
-    config = make_config(opts.vals)
+        preprocess(opts, opts.vals)
+        config = make_config(opts.vals)
     if opts.vals.dryrun:
         PrettyPrint.prettyprint(config)
     else:

@@ -1,5 +1,6 @@
 
 from distutils.core import setup, Extension
+import os
 
 XEN_ROOT = "../.."
 
@@ -41,8 +42,12 @@ setup(name            = 'xen',
                          'xen.util',
                          'xen.xend',
                          'xen.xend.server',
+                         'xen.sv',
                          'xen.xm',
                          ],
       ext_package = "xen.lowlevel",
       ext_modules = [ xc, xu ]
       )
+
+os.chdir('logging')
+execfile('setup.py')

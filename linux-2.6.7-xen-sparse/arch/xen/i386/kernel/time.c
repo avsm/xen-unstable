@@ -87,6 +87,14 @@ EXPORT_SYMBOL(i8253_lock);
 
 struct timer_opts *cur_timer = &timer_none;
 
+extern u64 shadow_system_time;
+extern void __get_time_values_from_xen(void);
+
+/* Keep track of last time we did processing/updating of jiffies and xtime. */
+u64 processed_system_time;   /* System time (ns) at last processing. */
+
+#define NS_PER_TICK (1000000000ULL/HZ)
+
 /*
  * This version of gettimeofday has microsecond resolution
  * and better than microsecond precision on fast x86 machines with TSC.
@@ -210,6 +218,7 @@ EXPORT_SYMBOL(monotonic_clock);
 static inline void do_timer_interrupt(int irq, void *dev_id,
 					struct pt_regs *regs)
 {
+
 #ifdef CONFIG_X86_IO_APIC
 	if (timer_ack) {
 		/*
@@ -226,7 +235,8 @@ static inline void do_timer_interrupt(int irq, void *dev_id,
 	}
 #endif
 
-	do_timer_interrupt_hook(regs);
+	if (regs)
+		do_timer_interrupt_hook(regs);
 
 #if 0				/* XEN PRIV */
 	/*
@@ -277,6 +287,8 @@ static inline void do_timer_interrupt(int irq, void *dev_id,
  */
 irqreturn_t timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
+	s64 delta;
+
 	/*
 	 * Here we are in the timer irq handler. We just have irqs locally
 	 * disabled but we don't know if the timer_bh is running on the other
@@ -286,11 +298,22 @@ irqreturn_t timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	 */
 	write_seqlock(&xtime_lock);
 
+	__get_time_values_from_xen();
+
+	delta = (s64)(shadow_system_time - processed_system_time);
+	if (delta < 0) {
+		printk("Timer ISR: Time went backwards: %lld\n", delta);
+		goto out;
+	}
+
+	if (delta < NS_PER_TICK)
+		goto out;
+
 	cur_timer->mark_offset();
  
-	if (regs)		/* XXXcl check regs in do_timer_interrupt */
-		do_timer_interrupt(irq, NULL, regs);
+	do_timer_interrupt(irq, NULL, regs);
 
+ out:
 	write_sequnlock(&xtime_lock);
 	return IRQ_HANDLED;
 }
@@ -400,7 +423,7 @@ void __init time_init(void)
 #endif
 	xtime.tv_sec = HYPERVISOR_shared_info->wc_sec;
 	wall_to_monotonic.tv_sec = -xtime.tv_sec;
-	xtime.tv_nsec = (INITIAL_JIFFIES % HZ) * (NSEC_PER_SEC / HZ);
+	xtime.tv_nsec = HYPERVISOR_shared_info->wc_usec * 1000;
 	wall_to_monotonic.tv_nsec = -xtime.tv_nsec;
 
 	cur_timer = select_timer();
@@ -409,4 +432,41 @@ void __init time_init(void)
 	time_irq  = bind_virq_to_irq(VIRQ_TIMER);
 
 	(void)setup_irq(time_irq, &irq_timer);
+}
+
+/* Convert jiffies to system time. Call with xtime_lock held for reading. */
+static inline u64 __jiffies_to_st(unsigned long j) 
+{
+	return processed_system_time + ((j - jiffies) * NS_PER_TICK);
+}
+
+/*
+ * This function works out when the the next timer function has to be
+ * executed (by looking at the timer list) and sets the Xen one-shot
+ * domain timer to the appropriate value. This is typically called in
+ * cpu_idle() before the domain blocks.
+ * 
+ * The function returns a non-0 value on error conditions.
+ * 
+ * It must be called with interrupts disabled.
+ */
+int set_timeout_timer(void)
+{
+	u64 alarm = 0;
+	int ret = 0;
+
+	/*
+	 * This is safe against long blocking (since calculations are
+	 * not based on TSC deltas). It is also safe against warped
+	 * system time since suspend-resume is cooperative and we
+	 * would first get locked out. It is safe against normal
+	 * updates of jiffies since interrupts are off.
+	 */
+	alarm = __jiffies_to_st(next_timer_interrupt());
+
+	/* Failure is pretty bad, but we'd best soldier on. */
+	if ( HYPERVISOR_set_timer_op(alarm) != 0 )
+		ret = -1;
+
+	return ret;
 }

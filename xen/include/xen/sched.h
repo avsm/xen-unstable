@@ -100,7 +100,6 @@ struct domain
     unsigned int     xenheap_pages;   /* # pages allocated from Xen heap    */
 
     /* Scheduling. */
-    struct list_head run_list;
     int              shutdown_code; /* code value from OS (if DF_SHUTDOWN). */
     s_time_t         lastschd;      /* time this domain was last scheduled */
     s_time_t         lastdeschd;    /* time this domain was last descheduled */
@@ -197,8 +196,6 @@ void new_thread(struct domain *d,
 extern unsigned long wait_init_idle;
 #define init_idle() clear_bit(smp_processor_id(), &wait_init_idle);
 
-extern spinlock_t schedule_lock[NR_CPUS] __cacheline_aligned;
-
 #define set_current_state(_s) do { current->state = (_s); } while (0)
 void scheduler_init(void);
 void schedulers_start(void);
@@ -210,8 +207,6 @@ int  sched_id();
 void init_idle_task(void);
 void domain_wake(struct domain *d);
 void domain_sleep(struct domain *d);
-void pause_domain(struct domain *d);
-void unpause_domain(struct domain *d);
 
 void __enter_scheduler(void);
 
@@ -262,14 +257,14 @@ static inline void domain_pause(struct domain *d)
 {
     ASSERT(d != current);
     atomic_inc(&d->pausecnt);
-    pause_domain(d);
+    domain_sleep(d);
 }
 
 static inline void domain_unpause(struct domain *d)
 {
     ASSERT(d != current);
     if ( atomic_dec_and_test(&d->pausecnt) )
-        unpause_domain(d);
+        domain_wake(d);
 }
 
 static inline void domain_unblock(struct domain *d)
@@ -282,13 +277,13 @@ static inline void domain_pause_by_systemcontroller(struct domain *d)
 {
     ASSERT(d != current);
     if ( !test_and_set_bit(DF_CTRLPAUSE, &d->flags) )
-        pause_domain(d);
+        domain_sleep(d);
 }
 
 static inline void domain_unpause_by_systemcontroller(struct domain *d)
 {
     if ( test_and_clear_bit(DF_CTRLPAUSE, &d->flags) )
-        unpause_domain(d);
+        domain_wake(d);
 }
 
 

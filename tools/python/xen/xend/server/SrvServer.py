@@ -25,8 +25,8 @@
 # todo Support security settings etc. in the config file.
 # todo Support command-line args.
 
-from twisted.web import server
-from twisted.web import resource
+from twisted.web import server, static
+from twisted.web import resource, script
 from twisted.internet import reactor
 
 from xen.xend import XendRoot
