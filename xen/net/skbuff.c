@@ -143,7 +143,7 @@ static inline u8 *alloc_skb_data_page(struct sk_buff *skb)
 
     list_ptr = free_list.next;
     pf = list_entry(list_ptr, struct pfn_info, list);
-    pf->flags = 0; /* owned by dom0 */
+    pf->flags = 0;
     list_del(&pf->list);
     free_pfns--;
 
@@ -162,6 +162,7 @@ static inline void dealloc_skb_data_page(struct sk_buff *skb)
 
     spin_lock_irqsave(&free_list_lock, flags);
         
+    pf->flags = pf->type_count = pf->tot_count = 0;
     list_add(&pf->list, &free_list);
     free_pfns++;
 
@@ -221,8 +222,6 @@ struct sk_buff *alloc_skb(unsigned int size,int gfp_mask)
     /* Set up other state */
     skb->len = 0;
     skb->data_len = 0;
-    skb->src_vif = VIF_UNKNOWN_INTERFACE;
-    skb->dst_vif = VIF_UNKNOWN_INTERFACE;
     skb->skb_type = SKB_NORMAL;
 
     skb_shinfo(skb)->nr_frags = 0;
@@ -269,8 +268,6 @@ struct sk_buff *alloc_zc_skb(unsigned int size,int gfp_mask)
     /* Set up other state */
     skb->len = 0;
     skb->data_len = 0;
-    skb->src_vif = VIF_UNKNOWN_INTERFACE;
-    skb->dst_vif = VIF_UNKNOWN_INTERFACE;
     skb->skb_type = SKB_ZERO_COPY;
 
     skb_shinfo(skb)->nr_frags = 0;
@@ -311,6 +308,8 @@ static inline void skb_headerinit(void *p, kmem_cache_t *cache,
 {
     struct sk_buff *skb = p;
 
+    skb->src_vif = NULL;
+    skb->dst_vif = NULL;
     skb->next = NULL;
     skb->prev = NULL;
     skb->list = NULL;

@@ -14,17 +14,19 @@
 #include <asm/domain_page.h>
 #include <asm/flushtlb.h>
 #include <asm/msr.h>
-#include <xeno/multiboot.h>
 #include <xeno/blkdev.h>
 
-#define L1_PROT (_PAGE_PRESENT|_PAGE_RW|_PAGE_USER|_PAGE_ACCESSED)
-#define L2_PROT (_PAGE_PRESENT|_PAGE_RW|_PAGE_USER|_PAGE_ACCESSED|_PAGE_DIRTY)
+/*
+ * NB. No ring-3 access in initial guestOS pagetables. Note that we allow
+ * ring-3 privileges in the page directories, so that the guestOS may later
+ * decide to share a 4MB region with applications.
+ */
+#define L1_PROT (_PAGE_PRESENT|_PAGE_RW|_PAGE_ACCESSED)
+#define L2_PROT (_PAGE_PRESENT|_PAGE_RW|_PAGE_ACCESSED|_PAGE_DIRTY|_PAGE_USER)
 
-extern int nr_mods;
-extern module_t *mod;
-extern unsigned char *cmdline;
-
+/* Both these structures are protected by the tasklist_lock. */
 rwlock_t tasklist_lock __cacheline_aligned = RW_LOCK_UNLOCKED;
+struct task_struct *task_hash[TASK_HASH_SIZE];
 
 /*
  * create a new domain
@@ -37,7 +39,7 @@ struct task_struct *do_newdomain(unsigned int dom_id, unsigned int cpu)
 
     retval = -ENOMEM;
     p = alloc_task_struct();
-    if (!p) goto newdomain_out;
+    if ( p == NULL ) return NULL;
     memset(p, 0, sizeof(*p));
 
     atomic_set(&p->refcnt, 1);
@@ -52,6 +54,9 @@ struct task_struct *do_newdomain(unsigned int dom_id, unsigned int cpu)
     memset(p->shared_info, 0, PAGE_SIZE);
     SHARE_PFN_WITH_DOMAIN(virt_to_page(p->shared_info), dom_id);
 
+    p->mm.perdomain_pt = (l1_pgentry_t *)get_free_page(GFP_KERNEL);
+    memset(p->mm.perdomain_pt, 0, PAGE_SIZE);
+
     init_blkdev_info(p);
 
     SET_GDT_ENTRIES(p, DEFAULT_GDT_ENTRIES);
@@ -59,41 +64,40 @@ struct task_struct *do_newdomain(unsigned int dom_id, unsigned int cpu)
 
     p->addr_limit = USER_DS;
     p->active_mm  = &p->mm;
-    p->num_net_vifs = 0;
 
     sched_add_domain(p);
 
-    p->net_ring_base = (net_ring_t *)(p->shared_info + 1);
     INIT_LIST_HEAD(&p->pg_head);
     p->max_pages = p->tot_pages = 0;
     write_lock_irqsave(&tasklist_lock, flags);
     SET_LINKS(p);
+    p->next_hash = task_hash[TASK_HASH(dom_id)];
+    task_hash[TASK_HASH(dom_id)] = p;
     write_unlock_irqrestore(&tasklist_lock, flags);
 
- newdomain_out:
     return(p);
 }
 
-/* Get a pointer to the specified domain.  Consider replacing this
- * with a hash lookup later.
- *
- * Also, kill_other_domain should call this instead of scanning on its own.
- */
+
 struct task_struct *find_domain_by_id(unsigned int dom)
 {
-    struct task_struct *p = &idle0_task;
+    struct task_struct *p;
+    unsigned long flags;
 
-    read_lock_irq(&tasklist_lock);
-    do {
-        if ( (p->domain == dom) ) {
-            get_task_struct(p); /* increment the refcnt for caller */
-            read_unlock_irq(&tasklist_lock);
-            return (p);
+    read_lock_irqsave(&tasklist_lock, flags);
+    p = task_hash[TASK_HASH(dom)];
+    while ( p != NULL )
+    {
+        if ( p->domain == dom )
+        {
+            get_task_struct(p);
+            break;
         }
-    } while ( (p = p->next_task) != &idle0_task );
-    read_unlock_irq(&tasklist_lock);
+        p = p->next_hash;
+    }
+    read_unlock_irqrestore(&tasklist_lock, flags);
 
-    return 0;
+    return p;
 }
 
 
@@ -105,21 +109,41 @@ void kill_domain_with_errmsg(const char *err)
 }
 
 
-/* Kill the currently executing domain. */
-void kill_domain(void)
+void __kill_domain(struct task_struct *p)
 {
-    if ( current->domain == 0 )
+    int i;
+
+    if ( p->domain == 0 )
     {
         extern void machine_restart(char *);
         printk("Domain 0 killed: rebooting machine!\n");
         machine_restart(0);
     }
 
-    printk("Killing domain %d\n", current->domain);
-    
-    sched_rem_domain(current);
-    schedule();
-    BUG(); /* never get here */
+    printk("Killing domain %d\n", p->domain);
+
+    sched_rem_domain(p);
+
+    unlink_blkdev_info(p);
+
+    for ( i = 0; i < MAX_DOMAIN_VIFS; i++ )
+        unlink_net_vif(p->net_vif_list[i]);
+
+    if ( p == current )
+    {
+        schedule();
+        BUG(); /* never get here */
+    }
+    else
+    {
+        free_task_struct(p);
+    }
+}
+
+
+void kill_domain(void)
+{
+    __kill_domain(current);
 }
 
 
@@ -131,7 +155,11 @@ long kill_other_domain(unsigned int dom, int force)
     p = find_domain_by_id(dom);
     if ( p == NULL ) return -ESRCH;
 
-    if ( force )
+    if ( p->state == TASK_SUSPENDED )
+    {
+        __kill_domain(p);
+    }
+    else if ( force )
     {
         cpu_mask = mark_hyp_event(p, _HYP_EVENT_DIE);
         hyp_event_notify(cpu_mask);
@@ -173,19 +201,20 @@ unsigned int alloc_new_dom_mem(struct task_struct *p, unsigned int kbytes)
     for ( alloc_pfns = 0; alloc_pfns < req_pages; alloc_pfns++ )
     {
         pf = list_entry(temp, struct pfn_info, list);
-        pf->flags |= p->domain;
+        pf->flags = p->domain;
         pf->type_count = pf->tot_count = 0;
         temp = temp->next;
         list_del(&pf->list);
         list_add_tail(&pf->list, &p->pg_head);
         free_pfns--;
+        ASSERT(free_pfns != 0);
     }
    
     spin_unlock_irqrestore(&free_list_lock, flags);
     
     p->tot_pages = req_pages;
 
-    // temporary, max_pages should be explicitly specified
+    /* TEMPORARY: max_pages should be explicitly specified. */
     p->max_pages = p->tot_pages;
 
     return 0;
@@ -194,15 +223,21 @@ unsigned int alloc_new_dom_mem(struct task_struct *p, unsigned int kbytes)
 
 void free_all_dom_mem(struct task_struct *p)
 {
-    struct list_head *list_ent, *tmp;
+    struct list_head *ent;
+    unsigned long flags;
 
-    list_for_each_safe(list_ent, tmp, &p->pg_head)
+    spin_lock_irqsave(&free_list_lock, flags);
+    while ( (ent = p->pg_head.next) != &p->pg_head )
     {
-        struct pfn_info *pf = list_entry(list_ent, struct pfn_info, list);
+        struct pfn_info *pf = list_entry(ent, struct pfn_info, list);
         pf->type_count = pf->tot_count = pf->flags = 0;
-        list_del(list_ent);
-        list_add(list_ent, &free_list);
+        ASSERT(ent->next->prev == ent);
+        ASSERT(ent->prev->next == ent);
+        list_del(ent);
+        list_add(ent, &free_list);
+        free_pfns++;
     }
+    spin_unlock_irqrestore(&free_list_lock, flags);
 
     p->tot_pages = 0;
 }
@@ -211,37 +246,33 @@ void free_all_dom_mem(struct task_struct *p)
 /* Release resources belonging to task @p. */
 void release_task(struct task_struct *p)
 {
+    struct task_struct **pp;
+    unsigned long flags;
+
     ASSERT(p->state == TASK_DYING);
     ASSERT(!p->has_cpu);
-    write_lock_irq(&tasklist_lock);
+
+    printk("Releasing task %d\n", p->domain);
+
+    write_lock_irqsave(&tasklist_lock, flags);
     REMOVE_LINKS(p);
-    write_unlock_irq(&tasklist_lock);
+    pp = &task_hash[TASK_HASH(p->domain)];
+    while ( *pp != p ) *pp = (*pp)->next_hash;
+    *pp = p->next_hash;
+    write_unlock_irqrestore(&tasklist_lock, flags);
 
-    /* XXX SMH: so below is screwed currently; need ref counting on vifs,
-       vhds, etc and proper clean up. Until then just blow the memory :-( */
-#if 0
     /*
-     * Safe! Only queue skbuffs with tasklist_lock held.
-     * Only access shared_info with tasklist_lock held.
-     * And free_task_struct() only releases if refcnt == 0.
+     * This frees up blkdev rings. Totally safe since blkdev ref counting
+     * actually uses the task_struct refcnt.
      */
-    while ( p->num_net_vifs )
-    {
-        destroy_net_vif(p);
-    }
-    if ( p->mm.perdomain_pt ) free_page((unsigned long)p->mm.perdomain_pt);
-
     destroy_blkdev_info(p);
 
+    /* Free all memory associated with this domain. */
+    free_page((unsigned long)p->mm.perdomain_pt);
     UNSHARE_PFN(virt_to_page(p->shared_info));
     free_page((unsigned long)p->shared_info);
-
     free_all_dom_mem(p);
-
-    free_task_struct(p);
-#else 
-    printk("XEN::release_task: not freeing memory etc yet XXX FIXME.\n"); 
-#endif
+    free_pages((unsigned long)p, 1);
 }
 
 
@@ -270,10 +301,11 @@ int final_setup_guestos(struct task_struct * p, dom_meminfo_t * meminfo)
     start_info_t * virt_startinfo_addr;
     unsigned long virt_stack_addr;
     unsigned long phys_l2tab;
-    net_ring_t *net_ring;
+    net_ring_t *shared_rings;
     net_vif_t *net_vif;
+    int i;
 
-    /* entries 0xe0000000 onwards in page table must contain hypervisor
+    /* High entries in page table must contain hypervisor
      * mem mappings - set them up.
      */
     phys_l2tab = meminfo->l2_pgt_addr;
@@ -284,7 +316,7 @@ int final_setup_guestos(struct task_struct * p, dom_meminfo_t * meminfo)
         (ENTRIES_PER_L2_PAGETABLE - DOMAIN_ENTRIES_PER_L2_PAGETABLE) 
         * sizeof(l2_pgentry_t));
     l2tab[PERDOMAIN_VIRT_START >> L2_PAGETABLE_SHIFT] = 
-        mk_l2_pgentry(__pa(p->mm.perdomain_pt) | PAGE_HYPERVISOR);
+        mk_l2_pgentry(__pa(p->mm.perdomain_pt) | __PAGE_HYPERVISOR);
     p->mm.pagetable = mk_pagetable(phys_l2tab);
     unmap_domain_mem(l2tab);
 
@@ -319,19 +351,30 @@ int final_setup_guestos(struct task_struct * p, dom_meminfo_t * meminfo)
     virt_startinfo_addr->shared_info = (shared_info_t *)meminfo->virt_shinfo_addr;
     virt_startinfo_addr->pt_base = meminfo->virt_load_addr + 
                     ((p->tot_pages - 1) << PAGE_SHIFT);
-    
+   
+    /* module size and length */
+
+    virt_startinfo_addr->mod_start = meminfo->virt_mod_addr;
+    virt_startinfo_addr->mod_len   = meminfo->virt_mod_len;
+
+    if( virt_startinfo_addr->mod_len )
+	printk("Initrd module present %08lx (%08lx)\n",
+               virt_startinfo_addr->mod_start, 
+               virt_startinfo_addr->mod_len);	
+ 
     /* Add virtual network interfaces and point to them in startinfo. */
     while (meminfo->num_vifs-- > 0) {
         net_vif = create_net_vif(p->domain);
-        net_ring = net_vif->net_ring;
-        if (!net_ring) panic("no network ring!\n");
+        shared_rings = net_vif->shared_rings;
+        if (!shared_rings) panic("no network ring!\n");
     }
 
-/* XXX SMH: horrible hack to convert hypervisor VAs in SHIP to guest VAs  */
-#define SH2G(_x) (meminfo->virt_shinfo_addr | (((unsigned long)(_x)) & 0xFFF))
-
-    virt_startinfo_addr->net_rings = (net_ring_t *)SH2G(p->net_ring_base); 
-    virt_startinfo_addr->num_net_rings = p->num_net_vifs;
+    for ( i = 0; i < MAX_DOMAIN_VIFS; i++ )
+    {
+        if ( p->net_vif_list[i] == NULL ) continue;
+        virt_startinfo_addr->net_rings[i] = 
+            virt_to_phys(p->net_vif_list[i]->shared_rings);
+    }
 
     /* Add block io interface */
     virt_startinfo_addr->blk_ring = virt_to_phys(p->blk_ring_base);
@@ -366,11 +409,12 @@ static unsigned long alloc_page_from_domain(unsigned long * cur_addr,
 /* setup_guestos is used for building dom0 solely. other domains are built in
  * userspace dom0 and final setup is being done by final_setup_guestos.
  */
-int setup_guestos(struct task_struct *p, dom0_newdomain_t *params)
+int setup_guestos(struct task_struct *p, dom0_newdomain_t *params, 
+                  char *phy_data_start, unsigned long data_len, 
+		  char *cmdline, unsigned long initrd_len)
 {
-
     struct list_head *list_ent;
-    char *src, *dst;
+    char *src, *vsrc, *dst, *data_start;
     int i, dom = p->domain;
     unsigned long phys_l1tab, phys_l2tab;
     unsigned long cur_address, alloc_address;
@@ -381,19 +425,33 @@ int setup_guestos(struct task_struct *p, dom0_newdomain_t *params)
     l2_pgentry_t *l2tab, *l2start;
     l1_pgentry_t *l1tab = NULL, *l1start = NULL;
     struct pfn_info *page = NULL;
-    net_ring_t *net_ring;
+    net_ring_t *shared_rings;
     net_vif_t *net_vif;
 
     /* Sanity! */
     if ( p->domain != 0 ) BUG();
 
-    if ( strncmp(__va(mod[0].mod_start), "XenoGues", 8) )
+    /*
+     * This is all a bit grim. We've moved the modules to the "safe" physical 
+     * memory region above MAP_DIRECTMAP_ADDRESS (48MB). Later in this 
+     * routeine, we're going to copy it down into the region that's actually 
+     * been allocated to domain 0. This is highly likely to be overlapping, so 
+     * we use a forward copy.
+     * 
+     * MAP_DIRECTMAP_ADDRESS should be safe. The worst case is a machine with 
+     * 4GB and lots of network/disk cards that allocate loads of buffers. 
+     * We'll have to revist this if we ever support PAE (64GB).
+     */
+
+    data_start = map_domain_mem((unsigned long)phy_data_start);
+
+    if ( strncmp(data_start, "XenoGues", 8) )
     {
         printk("DOM%d: Invalid guest OS image\n", dom);
         return -1;
     }
 
-    virt_load_address = *(unsigned long *)__va(mod[0].mod_start + 8);
+    virt_load_address = *(unsigned long *)(data_start + 8);
     if ( (virt_load_address & (PAGE_SIZE-1)) )
     {
         printk("DOM%d: Guest OS load address not page-aligned (%08lx)\n",
@@ -407,13 +465,12 @@ int setup_guestos(struct task_struct *p, dom0_newdomain_t *params)
     alloc_address <<= PAGE_SHIFT;
     alloc_index = p->tot_pages;
 
-    if ( (mod[nr_mods-1].mod_end-mod[0].mod_start) > 
-         (params->memory_kb << 9) )
+    if ( data_len > (params->memory_kb << 9) )
     {
         printk("DOM%d: Guest OS image is too large\n"
                "       (%luMB is greater than %uMB limit for a\n"
                "        %uMB address space)\n",
-               dom, (mod[nr_mods-1].mod_end-mod[0].mod_start)>>20,
+               dom, data_len>>20,
                (params->memory_kb)>>11,
                (params->memory_kb)>>10);
         free_all_dom_mem(p);
@@ -461,7 +518,7 @@ int setup_guestos(struct task_struct *p, dom0_newdomain_t *params)
         if ( count < p->tot_pages )
         {
             page = frame_table + (cur_address >> PAGE_SHIFT);
-            page->flags = dom | PGT_writeable_page;
+            page->flags = dom | PGT_writeable_page | PG_need_flush;
             page->type_count = page->tot_count = 1;
             /* Set up the MPT entry. */
             machine_to_phys_mapping[cur_address >> PAGE_SHIFT] = count;
@@ -527,7 +584,6 @@ int setup_guestos(struct task_struct *p, dom0_newdomain_t *params)
     p->shared_info->cpu_freq     = cpu_freq;
     p->shared_info->domain_time  = 0;
 
-
     virt_startinfo_address = (start_info_t *)
         (virt_load_address + ((alloc_index - 1) << PAGE_SHIFT));
     virt_stack_address  = (unsigned long)virt_startinfo_address;
@@ -538,11 +594,22 @@ int setup_guestos(struct task_struct *p, dom0_newdomain_t *params)
     __cli();
     __write_cr3_counted(pagetable_val(p->mm.pagetable));
 
-    /* Copy the guest OS image. */
-    src = (char *)__va(mod[0].mod_start + 12);
-    dst = (char *)virt_load_address;
-    while ( src < (char *)__va(mod[nr_mods-1].mod_end) ) *dst++ = *src++;
-
+    /* Copy the guest OS image. */    
+    src  = (char *)(phy_data_start + 12);
+    vsrc = (char *)(data_start + 12); /* data_start invalid after first page*/
+    dst  = (char *)virt_load_address;
+    while ( src < (phy_data_start+data_len) )
+    {
+	*dst++ = *vsrc++;
+	src++;
+	if ( (((unsigned long)src) & (PAGE_SIZE-1)) == 0 )
+        {
+	    unmap_domain_mem( vsrc-1 );
+	    vsrc = map_domain_mem( (unsigned long)src );
+        }
+    }
+    unmap_domain_mem( vsrc );
+    
     /* Set up start info area. */
     memset(virt_startinfo_address, 0, sizeof(*virt_startinfo_address));
     virt_startinfo_address->nr_pages = p->tot_pages;
@@ -551,40 +618,39 @@ int setup_guestos(struct task_struct *p, dom0_newdomain_t *params)
     virt_startinfo_address->pt_base = virt_load_address + 
         ((p->tot_pages - 1) << PAGE_SHIFT); 
 
+    if ( initrd_len )
+    {
+	virt_startinfo_address->mod_start = (unsigned long)dst-initrd_len;
+	virt_startinfo_address->mod_len   = initrd_len;
+	printk("Initrd len 0x%lx, start at 0x%08lx\n",
+	       virt_startinfo_address->mod_len, 
+               virt_startinfo_address->mod_start);
+    }
+
     /* Add virtual network interfaces and point to them in startinfo. */
     while (params->num_vifs-- > 0) {
         net_vif = create_net_vif(dom);
-        net_ring = net_vif->net_ring;
-        if (!net_ring) panic("no network ring!\n");
+        shared_rings = net_vif->shared_rings;
+        if (!shared_rings) panic("no network ring!\n");
     }
 
-/* XXX SMH: horrible hack to convert hypervisor VAs in SHIP to guest VAs  */
-#define SHIP2GUEST(_x) (virt_shinfo_address | (((unsigned long)(_x)) & 0xFFF))
-
-    virt_startinfo_address->net_rings = 
-    (net_ring_t *)SHIP2GUEST(p->net_ring_base); 
-    virt_startinfo_address->num_net_rings = p->num_net_vifs;
+    for ( i = 0; i < MAX_DOMAIN_VIFS; i++ )
+    {
+        if ( p->net_vif_list[i] == NULL ) continue;
+        virt_startinfo_address->net_rings[i] = 
+            virt_to_phys(p->net_vif_list[i]->shared_rings);
+    }
 
     /* Add block io interface */
     virt_startinfo_address->blk_ring = virt_to_phys(p->blk_ring_base); 
 
-    /* We tell OS about any modules we were given. */
-    if ( nr_mods > 1 )
-    {
-        virt_startinfo_address->mod_start = 
-            (mod[1].mod_start-mod[0].mod_start-12) + virt_load_address;
-        virt_startinfo_address->mod_len = 
-            mod[nr_mods-1].mod_end - mod[1].mod_start;
-    }
-
     dst = virt_startinfo_address->cmd_line;
-    if ( mod[0].string )
+    if ( cmdline != NULL )
     {
-        char *modline = (char *)__va(mod[0].string);
         for ( i = 0; i < 255; i++ )
         {
-            if ( modline[i] == '\0' ) break;
-            *dst++ = modline[i];
+            if ( cmdline[i] == '\0' ) break;
+            *dst++ = cmdline[i];
         }
     }
     *dst = '\0';

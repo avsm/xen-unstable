@@ -96,10 +96,14 @@
 3ddb79beyWwLRP_BiM2t1JKgr_plEw xen/drivers/block/ll_rw_blk.c
 3e4a8cb7RhubVgsPwO7cK0pgAN8WCQ xen/drivers/block/xen_block.c
 3e5d129asHNyZOjBKTkqs-9AFzxemA xen/drivers/block/xen_segment.c
+3e9c248afxxsnAzIt2na7Ej24yNFzg xen/drivers/cdrom/Makefile
+3e9c248ajUkn2W3n4vgm72Hp2ftZ8A xen/drivers/cdrom/cdrom.c
 3e4a8cb7alzQCDKS7MlioPoHBKYkdQ xen/drivers/char/Makefile
 3e4a8cb7WmiYdC-ASGiCSG_CL8vsqg xen/drivers/char/xen_kbd.c
 3e4a8cb7nMChlro4wvOBo76n__iCFA xen/drivers/char/xen_serial.c
 3ddb79bdhcqD9ebrslr0O0oHqTiiXg xen/drivers/ide/Makefile
+3e9c248aCM6Lex1Am8_NJIeesN4kKg xen/drivers/ide/ide-cd.c
+3e9c248aFfSNR_hl-WQBbv-R9CTgzg xen/drivers/ide/ide-cd.h
 3ddb79bdErDn_WC3G-fWxKNR3viLnA xen/drivers/ide/ide-disk.c
 3ddb79bdIPNW36FrlId94jTXaW8HoA xen/drivers/ide/ide-dma.c
 3ddb79be5Ysvhn4se_Z-LQY_hI6UPw xen/drivers/ide/ide-features.c
@@ -205,6 +209,8 @@
 3ddb79beXZxwKh7cGyPfr40bhDyRrA xen/drivers/scsi/constants.h
 3e564120ZeinH9nf3IVSerB80T7dHg xen/drivers/scsi/hosts.c
 3ddb79beGiGljlTNq_kRnCBZECgC9Q xen/drivers/scsi/hosts.h
+3e8827bdE8FgsI-QxZ4zKzYTRmACOQ xen/drivers/scsi/megaraid.c
+3e8827bdEMIzjyF9OHnDRmJGp_O68g xen/drivers/scsi/megaraid.h
 3ddb79bexarQo1tQ541PPUyK9HXNDA xen/drivers/scsi/scsi.c
 3ddb79beBOiYxQUiWTHosepRlJyuGA xen/drivers/scsi/scsi.h
 3ddb79beVTYJj6_KMxYLJmCP7p9MuQ xen/drivers/scsi/scsi_dma.c
@@ -288,6 +294,7 @@
 3ddb79c116WbJV8bwGZXFFJy_GNNvw xen/include/xeno/byteorder/swab.h
 3ddb79c1pwmlw8VXW8aaSKAVGVmjDA xen/include/xeno/byteorder/swabb.h
 3ddb79c0c0cX_DZE209-Bb-Rx1v-Aw xen/include/xeno/cache.h
+3e9c248aEG_nCngztiFmv5CfayNkcA xen/include/xeno/cdrom.h
 3ddb79c259jh8hE7vre_8NuE7nwNSA xen/include/xeno/config.h
 3ddb79c1V44RD26YqCUm-kqIupM37A xen/include/xeno/ctype.h
 3ddb79c05DdHQ0UxX_jKsXdR4QlMCA xen/include/xeno/delay.h
@@ -345,6 +352,7 @@
 3ddb79c2_m8lT9jDKse_tePj7zcnNQ xen/include/xeno/timex.h
 3ddb79c2e2C14HkndNEJlYwXaPrF5A xen/include/xeno/tqueue.h
 3ddb79c1-kVvF8cVa0k3ZHDdBMj01Q xen/include/xeno/types.h
+3e8827bdaqPeZAWGVOwswgY9bWSx4g xen/include/xeno/version.h
 3ddb79c2Ae5KpzhC9LCYG7mP_Vi4Aw xen/include/xeno/vif.h
 3ddb79c4YQCQ6r0xNLLu0jfbM7pVmA xen/net/Makefile
 3ddb79c4AkfDkTCw0comx4L8wsUOMg xen/net/dev.c

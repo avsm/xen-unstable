@@ -10,10 +10,16 @@
 
 #ifdef __KERNEL__
 
-struct task_struct;	/* one of the stranger aspects of C forward declarations.. */
-extern void FASTCALL(__switch_to(struct task_struct *prev, struct task_struct *next));
+struct task_struct;
+extern void FASTCALL(__switch_to(struct task_struct *prev, 
+                                 struct task_struct *next));
 
-#define prepare_to_switch()	do { } while(0)
+#define prepare_to_switch()                                             \
+do {                                                                    \
+    struct thread_struct *__t = &current->thread;                       \
+    __asm__ __volatile__ ( "movl %%fs,%0" : "=m" (*(int *)&__t->fs) );  \
+    __asm__ __volatile__ ( "movl %%gs,%0" : "=m" (*(int *)&__t->gs) );  \
+} while (0)
 #define switch_to(prev,next,last) do {					\
 	asm volatile("pushl %%esi\n\t"					\
 		     "pushl %%edi\n\t"					\
@@ -312,31 +318,47 @@ static inline unsigned long __cmpxchg(volatile void *ptr, unsigned long old,
 #define set_mb(var, value) do { xchg(&var, value); } while (0)
 #define set_wmb(var, value) do { var = value; wmb(); } while (0)
 
-/* interrupt control.. */
-#define __save_flags(x)         ((x) = HYPERVISOR_shared_info->events_enable); barrier()
-#define __restore_flags(x)                            \
-do {                                                  \
-    shared_info_t *_shared = HYPERVISOR_shared_info;  \
-    _shared->events_enable = (x);                     \
-    barrier();                                        \
-    if ( unlikely(_shared->events) && (x) ) do_hypervisor_callback(NULL);  \
+
+#define __save_flags(x)                                                       \
+do {                                                                          \
+    (x) = test_bit(EVENTS_MASTER_ENABLE_BIT,                                  \
+                   &HYPERVISOR_shared_info->events_mask);                     \
+    barrier();                                                                \
 } while (0)
-#define __cli()                 (HYPERVISOR_shared_info->events_enable = 0); barrier()
-#define __sti()                                       \
-do {                                                  \
-    shared_info_t *_shared = HYPERVISOR_shared_info;  \
-    _shared->events_enable = 1;                       \
-    barrier();                                        \
-    if ( unlikely(_shared->events) ) do_hypervisor_callback(NULL);  \
+
+#define __restore_flags(x)                                                    \
+do {                                                                          \
+    shared_info_t *_shared = HYPERVISOR_shared_info;                          \
+    if (x) set_bit(EVENTS_MASTER_ENABLE_BIT, &_shared->events_mask);          \
+    barrier();                                                                \
+    if ( unlikely(_shared->events) && (x) ) do_hypervisor_callback(NULL);     \
 } while (0)
+
+#define __cli()                                                               \
+do {                                                                          \
+    clear_bit(EVENTS_MASTER_ENABLE_BIT, &HYPERVISOR_shared_info->events_mask);\
+    barrier();                                                                \
+} while (0)
+
+#define __sti()                                                               \
+do {                                                                          \
+    shared_info_t *_shared = HYPERVISOR_shared_info;                          \
+    set_bit(EVENTS_MASTER_ENABLE_BIT, &_shared->events_mask);                 \
+    barrier();                                                                \
+    if ( unlikely(_shared->events) ) do_hypervisor_callback(NULL);            \
+} while (0)
+
 #define safe_halt()             ((void)0)
 
 #define __save_and_cli(x)	do { __save_flags(x); __cli(); } while(0);
 #define __save_and_sti(x)	do { __save_flags(x); __sti(); } while(0);
 
-/* For spinlocks etc */
-//XXX#define local_irq_set(x)	__save_and_sti(x)
-#define local_irq_save(x)       ((x) = HYPERVISOR_shared_info->events_enable); (HYPERVISOR_shared_info->events_enable = 0); barrier()
+#define local_irq_save(x)                                                     \
+do {                                                                          \
+    (x) = test_and_clear_bit(EVENTS_MASTER_ENABLE_BIT,                        \
+                             &HYPERVISOR_shared_info->events_mask);           \
+    barrier();                                                                \
+} while (0)
 #define local_irq_restore(x)    __restore_flags(x)
 #define local_irq_disable()     __cli()
 #define local_irq_enable()      __sti()

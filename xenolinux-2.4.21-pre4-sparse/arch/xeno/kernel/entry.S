@@ -133,6 +133,55 @@ ENOSYS = 38
 	movl $-8192, reg; \
 	andl %esp, reg
 
+ENTRY(lcall7)
+	pushfl			# We get a different stack layout with call
+	pushl %eax		# gates, which has to be cleaned up later..
+	SAVE_ALL
+	movl EIP(%esp),%eax	# due to call gates, this is eflags, not eip..
+	movl CS(%esp),%edx	# this is eip..
+	movl EFLAGS(%esp),%ecx	# and this is cs..
+	movl %eax,EFLAGS(%esp)	#
+	andl $~(NT_MASK|TF_MASK|DF_MASK), %eax
+	pushl %eax
+	popfl
+	movl %edx,EIP(%esp)	# Now we move them to their "normal" places
+	movl %ecx,CS(%esp)	#
+	movl %esp,%ebx
+	pushl %ebx
+	andl $-8192,%ebx	# GET_CURRENT
+	movl exec_domain(%ebx),%edx	# Get the execution domain
+	movl 4(%edx),%edx	# Get the lcall7 handler for the domain
+	pushl $0x7
+	call *%edx
+	addl $4, %esp
+	popl %eax
+	jmp ret_from_sys_call
+
+ENTRY(lcall27)
+	pushfl			# We get a different stack layout with call
+	pushl %eax		# gates, which has to be cleaned up later..
+	SAVE_ALL
+	movl EIP(%esp),%eax	# due to call gates, this is eflags, not eip..
+	movl CS(%esp),%edx	# this is eip..
+	movl EFLAGS(%esp),%ecx	# and this is cs..
+	movl %eax,EFLAGS(%esp)	#
+	andl $~(NT_MASK|TF_MASK|DF_MASK), %eax
+	pushl %eax
+	popfl
+	movl %edx,EIP(%esp)	# Now we move them to their "normal" places
+	movl %ecx,CS(%esp)	#
+	movl %esp,%ebx
+	pushl %ebx
+	andl $-8192,%ebx	# GET_CURRENT
+	movl exec_domain(%ebx),%edx	# Get the execution domain
+	movl 4(%edx),%edx	# Get the lcall7 handler for the domain
+	pushl $0x27
+	call *%edx
+	addl $4, %esp
+	popl %eax
+	jmp ret_from_sys_call
+
+        
 ENTRY(ret_from_fork)
 	pushl %ebx
 	call SYMBOL_NAME(schedule_tail)
@@ -161,15 +210,14 @@ ENTRY(system_call)
 	movl %eax,EAX(%esp)		# save the return value
 ENTRY(ret_from_sys_call)
         movl SYMBOL_NAME(HYPERVISOR_shared_info),%esi
-        xorl %eax,%eax
-        movl %eax,4(%esi)               # need_resched and signals atomic test
+        btrl $EVENTS_MASTER_ENABLE_BIT,4(%esi) # make tests atomic
 ret_syscall_tests:      
 	cmpl $0,need_resched(%ebx)
 	jne reschedule
 	cmpl $0,sigpending(%ebx)
 	je   safesti                    # ensure need_resched updates are seen
 signal_return:
-	btsl %eax,4(%esi)               # reenable event callbacks
+	btsl $EVENTS_MASTER_ENABLE_BIT,4(%esi) # reenable event callbacks
 	movl %esp,%eax
 	xorl %edx,%edx
 	call SYMBOL_NAME(do_signal)
@@ -206,8 +254,8 @@ ret_from_exception:
 
 	ALIGN
 reschedule:
-        btsl %eax,4(%esi)             # reenable event callbacks
-	call SYMBOL_NAME(schedule)    # test
+        btsl $EVENTS_MASTER_ENABLE_BIT,4(%esi) # reenable event callbacks
+	call SYMBOL_NAME(schedule)             # test
 	jmp ret_from_sys_call
 
 ENTRY(divide_error)
@@ -270,12 +318,12 @@ ENTRY(hypervisor_callback)
         movb CS(%esp),%cl
 	test $2,%cl          # slow return to ring 2 or 3
 	jne  ret_syscall_tests
-safesti:btsl %eax,4(%esi)     # reenable event callbacks
+safesti:btsl $EVENTS_MASTER_ENABLE_BIT,4(%esi) # reenable event callbacks
 scrit:  /**** START OF CRITICAL REGION ****/
         cmpl %eax,(%esi)
         jne  14f              # process more events if necessary...
         RESTORE_ALL
-14:     btrl %eax,4(%esi)
+14:     btrl $EVENTS_MASTER_ENABLE_BIT,4(%esi)
         jmp  11b
 ecrit:  /**** END OF CRITICAL REGION ****/
 # [How we do the fixup]. We want to merge the current stack frame with the
@@ -317,20 +365,26 @@ critical_fixup_table:
         .byte 0x20                            # pop  %es
         .byte 0x24,0x24,0x24                  # add  $4,%esp
         .byte 0x28                            # iret
-        .byte 0x00,0x00,0x00,0x00             # btrl %eax,4(%esi)
+        .byte 0x00,0x00,0x00,0x00,0x00        # btrl $31,4(%esi)
         .byte 0x00,0x00                       # jmp  11b
 
 # Hypervisor uses this for application faults while it executes.
 ENTRY(failsafe_callback)
 1:      pop  %ds
 2:      pop  %es
-3:      iret
+3:      pop  %fs
+4:      pop  %gs
+5:      iret
 .section .fixup,"ax";	\
-4:	movl $0,(%esp);	\
+6:	movl $0,(%esp);	\
 	jmp 1b;		\
-5:	movl $0,(%esp);	\
+7:	movl $0,(%esp);	\
 	jmp 2b;		\
-6:	pushl %ss;	\
+8:	movl $0,(%esp);	\
+	jmp 3b;		\
+9:	movl $0,(%esp);	\
+	jmp 4b;		\
+10:	pushl %ss;	\
 	popl %ds;	\
 	pushl %ss;	\
 	popl %es;	\
@@ -339,9 +393,11 @@ ENTRY(failsafe_callback)
 .previous;		\
 .section __ex_table,"a";\
 	.align 4;	\
-	.long 1b,4b;	\
-	.long 2b,5b;	\
-	.long 3b,6b;	\
+	.long 1b,6b;	\
+	.long 2b,7b;	\
+	.long 3b,8b;	\
+	.long 4b,9b;	\
+	.long 5b,10b;	\
 .previous
         
 ENTRY(coprocessor_error)

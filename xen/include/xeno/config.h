@@ -78,6 +78,10 @@
 /* Next 4MB of virtual address space used for per-domain mappings (eg. GDT). */
 #define PERDOMAIN_VIRT_START  (DIRECTMAP_VIRT_END)
 #define PERDOMAIN_VIRT_END    (PERDOMAIN_VIRT_START + (4*1024*1024))
+#define GDT_VIRT_START        (PERDOMAIN_VIRT_START)
+#define GDT_VIRT_END          (GDT_VIRT_START + (64*1024))
+#define LDT_VIRT_START        (GDT_VIRT_END)
+#define LDT_VIRT_END          (LDT_VIRT_START + (64*1024))
 /* Penultimate 4MB of virtual address space used for domain page mappings. */
 #define MAPCACHE_VIRT_START   (PERDOMAIN_VIRT_END)
 #define MAPCACHE_VIRT_END     (MAPCACHE_VIRT_START + (4*1024*1024))
@@ -120,10 +124,8 @@
 
 #define barrier() __asm__ __volatile__("": : :"memory")
 
-#define __HYPERVISOR_CS 0x30
-#define __HYPERVISOR_DS 0x38
-#define __GUEST_CS      0x11
-#define __GUEST_DS      0x19
+#define __HYPERVISOR_CS 0x0008
+#define __HYPERVISOR_DS 0x0010
 
 #define NR_syscalls 256
 
@@ -141,6 +143,7 @@
 #define capable(_c) 0
 
 #ifndef __ASSEMBLY__
+extern unsigned long _end; /* standard ELF symbol */
 extern void __out_of_line_bug(int line) __attribute__((noreturn));
 #define out_of_line_bug() __out_of_line_bug(__LINE__)
 #endif

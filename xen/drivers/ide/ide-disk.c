@@ -1322,10 +1322,6 @@ static void idedisk_setup (ide_drive_t *drive)
 	struct hd_driveid *id = drive->id;
 	unsigned long capacity;
 
-	printk (KERN_ALERT
-		"ide-disk.c::idedisk_setup: chs %d %d %d\n",
-		drive->cyl, drive->head, drive->sect);
-	
 	idedisk_add_settings(drive);
 
 	if (id == NULL)

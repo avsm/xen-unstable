@@ -9,6 +9,7 @@
 #include <xeno/config.h>
 #include <xeno/types.h>
 #include <xeno/lib.h>
+#include <xeno/mm.h>
 #include <xeno/dom0_ops.h>
 #include <xeno/sched.h>
 #include <xeno/event.h>
@@ -18,21 +19,8 @@ extern unsigned int alloc_new_dom_mem(struct task_struct *, unsigned int);
 
 static unsigned int get_domnr(void)
 {
-#if 1
     static unsigned int domnr = 0;
     return ++domnr;
-#else
-    struct task_struct *p = &idle0_task;
-    unsigned long dom_mask = 0;
-    read_lock_irq(&tasklist_lock);
-    do {
-        if ( is_idle_task(p) ) continue;
-        set_bit(p->domain, &dom_mask); 
-    }
-    while ( (p = p->next_task) != &idle0_task );   
-    read_unlock_irq(&tasklist_lock);
-    return (dom_mask == ~0UL) ? 0 : ffz(dom_mask);
-#endif
 }
 
 static void build_page_list(struct task_struct *p)
@@ -78,11 +66,7 @@ long do_dom0_op(dom0_op_t *u_dom0_op)
     {
         struct task_struct * p = find_domain_by_id(op.u.meminfo.domain);
         if ( (ret = final_setup_guestos(p, &op.u.meminfo)) != 0 )
-        {
-            p->state = TASK_DYING;
-            release_task(p);
             break;
-        }
         wake_up(p);
         reschedule(p);
         ret = p->domain;
@@ -96,13 +80,21 @@ long do_dom0_op(dom0_op_t *u_dom0_op)
         static unsigned int pro = 0;
         unsigned int dom = get_domnr();
         ret = -ENOMEM;
-        if ( dom == 0 ) break;
+
+        if ( dom == 0 ) 
+            break;
+
         pro = (pro+1) % smp_num_cpus;
         p = do_newdomain(dom, pro);
-        if ( p == NULL ) break;
+        if ( p == NULL ) 
+            break;
 
         ret = alloc_new_dom_mem(p, op.u.newdomain.memory_kb);
-        if ( ret != 0 ) break;
+        if ( ret != 0 ) 
+        {
+            __kill_domain(p);
+            break;
+        }
 
         build_page_list(p);
         

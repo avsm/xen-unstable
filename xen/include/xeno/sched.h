@@ -27,10 +27,10 @@ struct mm_struct {
      * Every domain has a L1 pagetable of its own. Per-domain mappings
      * are put in this table (eg. the current GDT is mapped here).
      */
-    l2_pgentry_t *perdomain_pt;
+    l1_pgentry_t *perdomain_pt;
     pagetable_t  pagetable;
-    /* Current LDT selector. */
-    unsigned int ldt_sel;
+    /* Current LDT details. */
+    unsigned long ldt_base, ldt_ents, shadow_ldt_mapcnt;
     /* Next entry is passed to LGDT on domain switch. */
     char gdt[6];
 };
@@ -50,8 +50,7 @@ extern struct mm_struct init_mm;
 }
 
 #define _HYP_EVENT_NEED_RESCHED 0
-#define _HYP_EVENT_NET_RX       1
-#define _HYP_EVENT_DIE          2
+#define _HYP_EVENT_DIE          1
 
 #define PF_DONEFPUINIT  0x1  /* Has the FPU been initialised for this task? */
 #define PF_USEDFPU      0x2  /* Has this task used the FPU since last save? */
@@ -65,16 +64,28 @@ struct task_struct {
 
     /*
      * DO NOT CHANGE THE ORDER OF THE FOLLOWING.
-     * There offsets are hardcoded in entry.S
+     * Their offsets are hardcoded in entry.S
      */
 
     int processor;               /* 00: current processor */
     int state;                   /* 04: current run state */
-    int hyp_events;              /* 08: pending events */
+    int hyp_events;              /* 08: pending intra-Xen events */
     unsigned int domain;         /* 12: domain id */
 
     /* An unsafe pointer into a shared data area. */
     shared_info_t *shared_info;  /* 16: shared data area */
+
+    /*
+     * Return vectors pushed to us by guest OS.
+     * The stack frame for events is exactly that of an x86 hardware interrupt.
+     * The stack frame for a failsafe callback is augmented with saved values
+     * for segment registers %ds, %es, %fs and %gs:
+     * 	%ds, %es, %fs, %gs, %eip, %cs, %eflags [, %oldesp, %oldss]
+     */
+    unsigned long event_selector;    /* 20: entry CS  */
+    unsigned long event_address;     /* 24: entry EIP */
+    unsigned long failsafe_selector; /* 28: entry CS  */
+    unsigned long failsafe_address;  /* 32: entry EIP */
 
     /*
      * From here on things can be added and shuffled without special attention
@@ -105,11 +116,8 @@ struct task_struct {
     long warped;                    /* time it ran warped last time */
     long uwarped;                   /* time it ran unwarped last time */
 
-
     /* Network I/O */
-    net_ring_t *net_ring_base;
-    net_vif_t *net_vif_list[MAX_GUEST_VIFS];
-    int num_net_vifs;
+    net_vif_t *net_vif_list[MAX_DOMAIN_VIFS];
 
     /* Block I/O */
     blk_ring_t *blk_ring_base;
@@ -136,7 +144,7 @@ struct task_struct {
      */
     struct mm_struct *active_mm;
     struct thread_struct thread;
-    struct task_struct *prev_task, *next_task;
+    struct task_struct *prev_task, *next_task, *next_hash;
     
     unsigned long flags;
 
@@ -151,7 +159,7 @@ struct task_struct {
  * TASK_UNINTERRUPTIBLE: Domain is blocked but may not be woken up by an
  *                       arbitrary event or timer.
  * TASK_WAIT:            Domains CPU allocation expired.
- * TASK_STOPPED:         not really used in Xen
+ * TASK_SUSPENDED:       Domain is in supsended state (eg. start of day)
  * TASK_DYING:           Domain is about to cross over to the land of the dead.
  */
 
@@ -159,8 +167,8 @@ struct task_struct {
 #define TASK_INTERRUPTIBLE      1
 #define TASK_UNINTERRUPTIBLE    2
 #define TASK_WAIT               4
+#define TASK_SUSPENDED          8
 #define TASK_DYING              16
-/* #define TASK_STOPPED            8  not really used */
 
 #define SCHED_YIELD             0x10
 
@@ -199,11 +207,15 @@ extern union task_union idle0_task_union;
 extern struct task_struct first_task_struct;
 
 extern struct task_struct *do_newdomain(unsigned int dom_id, unsigned int cpu);
-extern int setup_guestos(struct task_struct *p, dom0_newdomain_t *params);
+extern int setup_guestos(
+    struct task_struct *p, dom0_newdomain_t *params,
+    char *data_start, unsigned long data_len, 
+    char *cmdline, unsigned long initrd_len);
 extern int final_setup_guestos(struct task_struct *p, dom_meminfo_t *);
 
 struct task_struct *find_domain_by_id(unsigned int dom);
 extern void release_task(struct task_struct *);
+extern void __kill_domain(struct task_struct *p);
 extern void kill_domain(void);
 extern void kill_domain_with_errmsg(const char *err);
 extern long kill_other_domain(unsigned int dom, int force);
@@ -254,6 +266,11 @@ void domain_init(void);
 int idle_cpu(int cpu); /* Is CPU 'cpu' idle right now? */
 void cpu_idle(void);   /* Idle loop. */
 
+/* This hash table is protected by the tasklist_lock. */
+#define TASK_HASH_SIZE 256
+#define TASK_HASH(_id) ((_id)&(TASK_HASH_SIZE-1))
+struct task_struct *task_hash[TASK_HASH_SIZE];
+
 #define REMOVE_LINKS(p) do { \
         (p)->next_task->prev_task = (p)->prev_task; \
         (p)->prev_task->next_task = (p)->next_task; \
@@ -267,5 +284,27 @@ void cpu_idle(void);   /* Idle loop. */
         } while (0)
 
 extern void update_process_times(int user);
+
+#include <asm/desc.h>
+static inline void load_LDT(void)
+{
+    unsigned int cpu;
+    struct desc_struct *desc;
+    unsigned long ents;
+
+    if ( (ents = current->mm.ldt_ents) == 0 )
+    {
+        __asm__ __volatile__ ( "lldt %%ax" : : "a" (0) );
+    }
+    else
+    {
+        cpu = smp_processor_id();
+        desc = (struct desc_struct *)GET_GDT_ADDRESS(current) + __LDT(cpu);
+        desc->a = ((LDT_VIRT_START&0xffff)<<16) | (ents*8-1);
+        desc->b = (LDT_VIRT_START&(0xff<<24)) | 0x8200 | 
+            ((LDT_VIRT_START&0xff0000)>>16);
+        __asm__ __volatile__ ( "lldt %%ax" : : "a" (__LDT(cpu)<<3) );
+    }
+}
 
 #endif

@@ -3,8 +3,11 @@
  * This is the hypervisor end of the network code.  The net_ring structure
  * stored in each vif is placed on a shared page to interact with the guest VM.
  *
- * Copyright (c) 2002, A K Warfield and K A Fraser
+ * Copyright (c) 2002-2003, A K Warfield and K A Fraser
  */
+
+#ifndef __XENO_VIF_H__
+#define __XENO_VIF_H__
 
 /* virtual network interface struct and associated defines. */
 /* net_vif_st is the larger struct that describes a virtual network interface
@@ -16,7 +19,6 @@
  */
 
 #include <hypervisor-ifs/network.h>
-#include <xeno/skbuff.h>
 
 /* 
  * shadow ring structures are used to protect the descriptors from
@@ -25,72 +27,72 @@
  * TX_RING_SIZE and RX_RING_SIZE are defined in the shared network.h.
  */
 
-typedef struct rx_shadow_entry_st {
-    unsigned long  addr;
-    unsigned short size;
-    unsigned char  status;
-    unsigned char  offset;
-    unsigned long  flush_count;
+typedef struct rx_shadow_entry_st 
+{
+    unsigned short id;
+    unsigned short flush_count; /* 16 bits should be enough */
+    unsigned long  pte_ptr;
+    unsigned long  buf_pfn;
 } rx_shadow_entry_t;
 
-typedef struct tx_shadow_entry_st {
+typedef struct tx_shadow_entry_st 
+{
+    unsigned short id;
+    unsigned short size;
     void          *header;
     unsigned long  payload;
-    unsigned short size;
-    unsigned char  status;
-    unsigned char  _unused;
 } tx_shadow_entry_t;
 
-typedef struct net_shadow_ring_st {
-    rx_shadow_entry_t *rx_ring;
-    tx_shadow_entry_t *tx_ring;
-
-    /*
-     * Private copy of producer. Follows guest OS version, but never
-     * catches up with our consumer index.
-     */
-    unsigned int rx_prod;
-    /* Points at next buffer to be filled by NIC. Chases rx_prod. */
-    unsigned int rx_idx;
-    /* Points at next buffer to be returned to the guest OS. Chases rx_idx. */
-    unsigned int rx_cons;
-
-    /*
-     * Private copy of producer. Follows guest OS version, but never
-     * catches up with our consumer index.
-     */
-    unsigned int tx_prod;
-    /* Points at next buffer to be scheduled. Chases tx_prod. */
-    unsigned int tx_idx;
-    /* Points at next buffer to be returned to the guest OS. Chases tx_idx. */
-    unsigned int tx_cons;
-} net_shadow_ring_t;
-
 typedef struct net_vif_st {
-    net_ring_t         *net_ring;
-    net_shadow_ring_t  *shadow_ring;
-    int                 id;
+    /* The shared rings and indexes. */
+    net_ring_t         *shared_rings;
+    net_idx_t          *shared_idxs;
+
+    /* The private rings and indexes. */
+    rx_shadow_entry_t rx_shadow_ring[RX_RING_SIZE];
+    unsigned int rx_prod;  /* More buffers for filling go here. */
+    unsigned int rx_cons;  /* Next buffer to fill is here. */
+    tx_shadow_entry_t tx_shadow_ring[TX_RING_SIZE];
+    unsigned int tx_prod;  /* More packets for sending go here. */
+    unsigned int tx_idx;   /* Next packet to send is here. */
+    unsigned int tx_cons;  /* Next packet to create response for is here. */
+
+    /* Private indexes into shared ring. */
+    unsigned int rx_req_cons;
+    unsigned int rx_resp_prod; /* private version of shared variable */
+    unsigned int tx_req_cons;
+    unsigned int tx_resp_prod; /* private version of shared variable */
+
+    /* Miscellaneous private stuff. */
     struct task_struct *domain;
-    struct list_head    list;
+    unsigned int idx; /* index within domain */
+    struct list_head    list;     /* scheduling list */
+    atomic_t            refcnt;
+    spinlock_t          rx_lock, tx_lock;
 } net_vif_t;
 
-/* VIF-related defines. */
-#define MAX_GUEST_VIFS    2 // each VIF is a small overhead in task_struct
-#define MAX_SYSTEM_VIFS 256  
-
-/* vif globals */
-extern int sys_vif_count;
-extern net_vif_t *sys_vif_list[];
+#define get_vif(_v) (atomic_inc(&(_v)->refcnt))
+#define put_vif(_v)                                                \
+do {                                                               \
+    if ( atomic_dec_and_test(&(_v)->refcnt) ) destroy_net_vif(_v); \
+} while (0)                                                        \
 
 /* vif prototypes */
 net_vif_t *create_net_vif(int domain);
-void destroy_net_vif(struct task_struct *p);
-void add_default_net_rule(int vif_id, u32 ipaddr);
-int __net_get_target_vif(u8 *data, unsigned int len, int src_vif);
-void add_default_net_rule(int vif_id, u32 ipaddr);
+void destroy_net_vif(net_vif_t *vif);
+void unlink_net_vif(net_vif_t *vif);
+void add_default_net_rule(unsigned long vif_id, u32 ipaddr);
+net_vif_t *net_get_target_vif(u8 *data, unsigned int len, net_vif_t *src_vif);
+net_vif_t *find_vif_by_id(unsigned long id);
 
-#define net_get_target_vif(skb) __net_get_target_vif(skb->data, skb->len, skb->src_vif)
-/* status fields per-descriptor:
+/*
+ * Return values from net_get_target_vif:
+ *  VIF_PHYS -- Send to physical NIC
+ *  VIF_DROP -- Drop this packet
+ *  others   -- Send to specified VIF (reference held on return)
  */
+#define VIF_PHYS ((net_vif_t *)0)
+#define VIF_DROP ((net_vif_t *)1)
 
+#endif /* __XENO_VIF_H__ */
 

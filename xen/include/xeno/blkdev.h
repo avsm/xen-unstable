@@ -7,6 +7,7 @@
 #include <xeno/list.h>
 #include <xeno/kdev_t.h>
 #include <xeno/sched.h>
+#include <xeno/mm.h>
 
 /* Some defines from fs.h that may actually be useful to the blkdev layer. */
 #define READ 0
@@ -26,6 +27,7 @@ typedef struct {
 extern kdev_t xendev_to_physdev(unsigned short xendev);
 
 extern void init_blkdev_info(struct task_struct *);
+extern void unlink_blkdev_info(struct task_struct *);
 extern void destroy_blkdev_info(struct task_struct *);
 
 extern int unregister_blkdev(unsigned int, const char *);

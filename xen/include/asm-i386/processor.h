@@ -401,17 +401,6 @@ extern struct desc_struct *idt_tables[];
 	{~0, } /* ioperm */					\
 }
 
-#define start_thread(regs, new_eip, new_esp) do {		\
-	__asm__("movl %0,%%fs ; movl %0,%%gs": :"r" (0));	\
-	set_fs(USER_DS);					\
-	regs->xds = __USER_DS;					\
-	regs->xes = __USER_DS;					\
-	regs->xss = __USER_DS;					\
-	regs->xcs = __USER_CS;					\
-	regs->eip = new_eip;					\
-	regs->esp = new_esp;					\
-} while (0)
-
 /* Forward declaration, a strange C thing */
 struct task_struct;
 struct mm_struct;
@@ -443,7 +432,7 @@ unsigned long get_wchan(struct task_struct *p);
 #define alloc_task_struct()  \
   ((struct task_struct *) __get_free_pages(GFP_KERNEL,1))
 #define free_task_struct(_p) \
-  if ( atomic_dec_and_test(&(_p)->refcnt) ) free_pages((unsigned long)(_p), 1)
+  if ( atomic_dec_and_test(&(_p)->refcnt) ) release_task(_p)
 #define get_task_struct(_p)  \
   atomic_inc(&(_p)->refcnt)
 

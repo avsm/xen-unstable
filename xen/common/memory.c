@@ -209,7 +209,9 @@ struct list_head free_list;
 spinlock_t free_list_lock = SPIN_LOCK_UNLOCKED;
 unsigned int free_pfns;
 
-static int tlb_flush[NR_CPUS];
+/* Used to defer flushing of memory structures. */
+static int flush_tlb[NR_CPUS] __cacheline_aligned;
+
 
 /*
  * init_frametable:
@@ -222,7 +224,7 @@ void __init init_frametable(unsigned long nr_pages)
     unsigned long page_index;
     unsigned long flags;
 
-    memset(tlb_flush, 0, sizeof(tlb_flush));
+    memset(flush_tlb, 0, sizeof(flush_tlb));
 
     max_page = nr_pages;
     frame_table_size = nr_pages * sizeof(struct pfn_info);
@@ -244,6 +246,34 @@ void __init init_frametable(unsigned long nr_pages)
         free_pfns++;
     }
     spin_unlock_irqrestore(&free_list_lock, flags);
+}
+
+
+static void __invalidate_shadow_ldt(void)
+{
+    int i;
+    unsigned long pfn;
+    struct pfn_info *page;
+    
+    current->mm.shadow_ldt_mapcnt = 0;
+
+    for ( i = 16; i < 32; i++ )
+    {
+        pfn = l1_pgentry_to_pagenr(current->mm.perdomain_pt[i]);
+        if ( pfn == 0 ) continue;
+        current->mm.perdomain_pt[i] = mk_l1_pgentry(0);
+        page = frame_table + pfn;
+        ASSERT((page->flags & PG_type_mask) == PGT_ldt_page);
+        ASSERT((page->flags & PG_domain_mask) == current->domain);
+        ASSERT((page->type_count != 0) && (page->tot_count != 0));
+        put_page_type(page);
+        put_page_tot(page);                
+    }
+}
+static inline void invalidate_shadow_ldt(void)
+{
+    if ( current->mm.shadow_ldt_mapcnt != 0 )
+        __invalidate_shadow_ldt();
 }
 
 
@@ -275,6 +305,7 @@ static int inc_page_refcnt(unsigned long page_nr, unsigned int type)
             return -1;
         }
 
+        page->flags &= ~PG_type_mask;
         page->flags |= type;
     }
 
@@ -282,11 +313,11 @@ static int inc_page_refcnt(unsigned long page_nr, unsigned int type)
     return get_page_type(page);
 }
 
+
 /* Return new refcnt, or -1 on error. */
 static int dec_page_refcnt(unsigned long page_nr, unsigned int type)
 {
     struct pfn_info *page;
-    int ret;
 
     if ( page_nr >= max_page )
     {
@@ -303,9 +334,8 @@ static int dec_page_refcnt(unsigned long page_nr, unsigned int type)
         return -1;
     }
     ASSERT(page_type_count(page) != 0);
-    if ( (ret = put_page_type(page)) == 0 ) page->flags &= ~PG_type_mask;
     put_page_tot(page);
-    return ret;
+    return put_page_type(page);
 }
 
 
@@ -374,6 +404,7 @@ static int get_l2_table(unsigned long page_nr)
     return ret;
 }
 
+
 static int get_l1_table(unsigned long page_nr)
 {
     l1_pgentry_t *p_l1_entry, l1_entry;
@@ -409,6 +440,7 @@ static int get_l1_table(unsigned long page_nr)
     return ret;
 }
 
+
 static int get_page(unsigned long page_nr, int writeable)
 {
     struct pfn_info *page;
@@ -439,8 +471,10 @@ static int get_page(unsigned long page_nr, int writeable)
                         page_type_count(page));
                 return(-1);
             }
+            page->flags &= ~PG_type_mask;
             page->flags |= PGT_writeable_page;
         }
+        page->flags |= PG_need_flush;
         get_page_type(page);
     }
 
@@ -448,6 +482,7 @@ static int get_page(unsigned long page_nr, int writeable)
     
     return(0);
 }
+
 
 static void put_l2_table(unsigned long page_nr)
 {
@@ -467,6 +502,7 @@ static void put_l2_table(unsigned long page_nr)
 
     unmap_domain_mem(p_l2_entry);
 }
+
 
 static void put_l1_table(unsigned long page_nr)
 {
@@ -491,6 +527,7 @@ static void put_l1_table(unsigned long page_nr)
     unmap_domain_mem(p_l1_entry-1);
 }
 
+
 static void put_page(unsigned long page_nr, int writeable)
 {
     struct pfn_info *page;
@@ -499,11 +536,21 @@ static void put_page(unsigned long page_nr, int writeable)
     ASSERT(DOMAIN_OKAY(page->flags));
     ASSERT((!writeable) || 
            ((page_type_count(page) != 0) && 
-            ((page->flags & PG_type_mask) == PGT_writeable_page)));
-    if ( writeable && (put_page_type(page) == 0) )
+            ((page->flags & PG_type_mask) == PGT_writeable_page) &&
+            ((page->flags & PG_need_flush) == PG_need_flush)));
+    if ( writeable )
     {
-        tlb_flush[smp_processor_id()] = 1;
-        page->flags &= ~PG_type_mask;
+        if ( put_page_type(page) == 0 )
+        {
+            flush_tlb[smp_processor_id()] = 1;
+            page->flags &= ~PG_need_flush;
+        }
+    }
+    else if ( unlikely(((page->flags & PG_type_mask) == PGT_ldt_page) &&
+                       (page_type_count(page) != 0)) )
+    {
+        /* We expect this is rare so we just blow the entire shadow LDT. */
+        invalidate_shadow_ldt();
     }
     put_page_tot(page);
 }
@@ -619,10 +666,15 @@ static int mod_l1_entry(unsigned long pa, l1_pgentry_t new_l1_entry)
 static int do_extended_command(unsigned long ptr, unsigned long val)
 {
     int err = 0;
+    unsigned int cmd = val & PGEXT_CMD_MASK;
     unsigned long pfn = ptr >> PAGE_SHIFT;
     struct pfn_info *page = frame_table + pfn;
 
-    switch ( (val & PGEXT_CMD_MASK) )
+    /* 'ptr' must be in range except where it isn't a machine address. */
+    if ( (pfn >= max_page) && (cmd != PGEXT_SET_LDT) )
+        return 1;
+
+    switch ( cmd )
     {
     case PGEXT_PIN_L1_TABLE:
         err = get_l1_table(pfn);
@@ -678,20 +730,48 @@ static int do_extended_command(unsigned long ptr, unsigned long val)
         {
             put_l2_table(pagetable_val(current->mm.pagetable) >> PAGE_SHIFT);
             current->mm.pagetable = mk_pagetable(pfn << PAGE_SHIFT);
+            invalidate_shadow_ldt();
+            flush_tlb[smp_processor_id()] = 1;
         }
         else
         {
             MEM_LOG("Error while installing new baseptr %08lx %d", ptr, err);
         }
-        /* fall through */
+        break;
         
     case PGEXT_TLB_FLUSH:
-        tlb_flush[smp_processor_id()] = 1;
+        flush_tlb[smp_processor_id()] = 1;
         break;
     
     case PGEXT_INVLPG:
         __flush_tlb_one(val & ~PGEXT_CMD_MASK);
         break;
+
+    case PGEXT_SET_LDT:
+    {
+        unsigned long ents = val >> PGEXT_CMD_SHIFT;
+        if ( ((ptr & (PAGE_SIZE-1)) != 0) || 
+             (ents > 8192) ||
+             ((ptr+ents*LDT_ENTRY_SIZE) < ptr) ||
+             ((ptr+ents*LDT_ENTRY_SIZE) > PAGE_OFFSET) )
+        {
+            err = 1;
+            MEM_LOG("Bad args to SET_LDT: ptr=%08lx, ents=%08lx", ptr, ents);
+        }
+        else if ( (current->mm.ldt_ents != ents) || 
+                  (current->mm.ldt_base != ptr) )
+        {
+            if ( current->mm.ldt_ents != 0 )
+            {
+                invalidate_shadow_ldt();
+                flush_tlb[smp_processor_id()] = 1;
+            }
+            current->mm.ldt_base = ptr;
+            current->mm.ldt_ents = ents;
+            load_LDT();
+        }
+        break;
+    }
 
     default:
         MEM_LOG("Invalid extended pt command 0x%08lx", val & PGEXT_CMD_MASK);
@@ -702,12 +782,14 @@ static int do_extended_command(unsigned long ptr, unsigned long val)
     return err;
 }
 
+
 int do_process_page_updates(page_update_request_t *ureqs, int count)
 {
     page_update_request_t req;
     unsigned long flags, pfn;
     struct pfn_info *page;
     int err = 0, i;
+    unsigned int cmd;
 
     for ( i = 0; i < count; i++ )
     {
@@ -716,8 +798,11 @@ int do_process_page_updates(page_update_request_t *ureqs, int count)
             kill_domain_with_errmsg("Cannot read page update request");
         } 
 
+        cmd = req.ptr & (sizeof(l1_pgentry_t)-1);
+
+        /* All normal commands must have 'ptr' in range. */
         pfn = req.ptr >> PAGE_SHIFT;
-        if ( pfn >= max_page )
+        if ( (pfn >= max_page) && (cmd != PGREQ_EXTENDED_COMMAND) )
         {
             MEM_LOG("Page out of range (%08lx > %08lx)", pfn, max_page);
             kill_domain_with_errmsg("Page update request out of range");
@@ -727,7 +812,7 @@ int do_process_page_updates(page_update_request_t *ureqs, int count)
 
         /* Least significant bits of 'ptr' demux the operation type. */
         spin_lock_irq(&current->page_lock);
-        switch ( req.ptr & (sizeof(l1_pgentry_t)-1) )
+        switch ( cmd )
         {
             /*
              * PGREQ_NORMAL: Normal update to any level of page table.
@@ -810,9 +895,9 @@ int do_process_page_updates(page_update_request_t *ureqs, int count)
         ureqs++;
     }
 
-    if ( tlb_flush[smp_processor_id()] )
+    if ( flush_tlb[smp_processor_id()] )
     {
-        tlb_flush[smp_processor_id()] = 0;
+        flush_tlb[smp_processor_id()] = 0;
         __write_cr3_counted(pagetable_val(current->mm.pagetable));
 
     }

@@ -49,6 +49,15 @@
 #define TX_RING_ADD(_i,_j) (((_i)+(_j)) & (TX_RING_SIZE-1))
 #define RX_RING_ADD(_i,_j) (((_i)+(_j)) & (RX_RING_SIZE-1))
 
+static void make_tx_response(net_vif_t *vif, 
+                             unsigned short id, 
+                             unsigned char  st);
+static void make_rx_response(net_vif_t     *vif, 
+                             unsigned short id, 
+                             unsigned short size,
+                             unsigned char  st,
+                             unsigned char  off);
+
 struct net_device *the_dev = NULL;
 
 /*
@@ -484,63 +493,79 @@ struct netif_rx_stats netdev_rx_stat[NR_CPUS];
 
 void deliver_packet(struct sk_buff *skb, net_vif_t *vif)
 {
-    net_shadow_ring_t *shadow_ring;
     rx_shadow_entry_t *rx;
-    unsigned long *g_pte; 
-    struct pfn_info *g_pfn, *h_pfn;
+    unsigned long *ptep; 
+    struct pfn_info *old_page, *new_page, *pte_page;
     unsigned int i; 
-    unsigned long flags;
+    unsigned short size;
+    unsigned char  offset, status = RING_STATUS_OK;
 
     memset(skb->mac.ethernet->h_dest, 0, ETH_ALEN);
     if ( ntohs(skb->mac.ethernet->h_proto) == ETH_P_ARP )
         memset(skb->nh.raw + 18, 0, ETH_ALEN);
-    shadow_ring = vif->shadow_ring;
 
-    if ( (i = shadow_ring->rx_idx) == shadow_ring->rx_prod )
+    if ( (i = vif->rx_cons) == vif->rx_prod )
         return;
 
-    if ( shadow_ring->rx_ring[i].status != RING_STATUS_OK )
+    rx = vif->rx_shadow_ring + i;
+
+    size   = (unsigned short)skb->len;
+    offset = (unsigned char)((unsigned long)skb->data & ~PAGE_MASK);
+
+    spin_lock(&vif->domain->page_lock);
+
+    /* Release the page-table page. */
+    pte_page = frame_table + (rx->pte_ptr >> PAGE_SHIFT);
+    put_page_type(pte_page);
+    put_page_tot(pte_page);
+
+    old_page = frame_table + rx->buf_pfn;
+    new_page = skb->pf;
+    
+    ptep = map_domain_mem(rx->pte_ptr);
+
+    if ( (*ptep & _PAGE_PRESENT) )
     {
-        DPRINTK("Bad buffer in deliver_packet()\n");
-        goto inc_and_out;
+        /* Bail out if the PTE has been reused under our feet. */
+        list_add(&old_page->list, &vif->domain->pg_head);
+        old_page->flags = vif->domain->domain;
+        status = RING_STATUS_BAD_PAGE;
+        goto out;
     }
 
-    rx = shadow_ring->rx_ring + i;
-    ASSERT(skb->len <= PAGE_SIZE);
-    rx->size   = skb->len;
-    rx->offset = (unsigned char)((unsigned long)skb->data & ~PAGE_MASK);
-
-    spin_lock_irqsave(&vif->domain->page_lock, flags);
-
-    g_pte = map_domain_mem(rx->addr);
-
-    g_pfn = frame_table + (*g_pte >> PAGE_SHIFT);
-    h_pfn = skb->pf;
-        
-    h_pfn->tot_count = h_pfn->type_count = 1;
-    g_pfn->tot_count = g_pfn->type_count = 0;
-    h_pfn->flags = g_pfn->flags & (~PG_type_mask);
-        
-    if (*g_pte & _PAGE_RW) h_pfn->flags |= PGT_writeable_page;
-    g_pfn->flags = 0;
-        
-    /* Point the guest at the new machine frame. */
-    machine_to_phys_mapping[h_pfn - frame_table] 
-        = machine_to_phys_mapping[g_pfn - frame_table];        
-    *g_pte = (*g_pte & ~PAGE_MASK) 
-        | (((h_pfn - frame_table) << PAGE_SHIFT) & PAGE_MASK);
-    *g_pte |= _PAGE_PRESENT;
+    /* Give the new page to the domain, marking it writeable. */
+    new_page->tot_count = new_page->type_count = 1;
+    new_page->flags = vif->domain->domain | PGT_writeable_page | PG_need_flush;
+    list_add(&new_page->list, &vif->domain->pg_head);
     
-    unmap_domain_mem(g_pte);
+    /* Patch the PTE to map the new page as writeable. */
+    machine_to_phys_mapping[new_page - frame_table] 
+        = machine_to_phys_mapping[old_page - frame_table];        
+    *ptep = (*ptep & ~PAGE_MASK) | _PAGE_RW | _PAGE_PRESENT |
+        (((new_page - frame_table) << PAGE_SHIFT) & PAGE_MASK);
+    
+    unmap_domain_mem(ptep);
 
-    spin_unlock_irqrestore(&vif->domain->page_lock, flags);
+    spin_unlock(&vif->domain->page_lock);
     
     /* Our skbuff now points at the guest's old frame. */
-    skb->pf = g_pfn;
+    skb->pf = old_page;
 
- inc_and_out:        
-    smp_wmb(); /* updates must happen before releasing the descriptor. */
-    shadow_ring->rx_idx = RX_RING_INC(i);
+    /* Updates must happen before releasing the descriptor. */
+    smp_wmb();
+
+    /*
+     * NB. The remote flush here should be safe, as we hold no locks. The 
+     * network driver that called us should also have no nasty locks.
+     */
+    rx = vif->rx_shadow_ring + vif->rx_cons;
+    if ( rx->flush_count == (unsigned short)
+         atomic_read(&tlb_flush_count[vif->domain->processor]) )
+        flush_tlb_cpu(vif->domain->processor);
+
+ out:
+    vif->rx_cons = RX_RING_INC(vif->rx_cons);
+    make_rx_response(vif, rx->id, size, status, offset);
 }
 
 /**
@@ -559,15 +584,12 @@ void deliver_packet(struct sk_buff *skb, net_vif_t *vif)
 
 int netif_rx(struct sk_buff *skb)
 {
-    unsigned long cpu_mask;
     int offset, this_cpu = smp_processor_id();
     unsigned long flags;
-    net_vif_t *vif;
 
     local_irq_save(flags);
 
     ASSERT(skb->skb_type == SKB_ZERO_COPY);
-    ASSERT((skb->data - skb->head) == (18 + ETH_HLEN));
 
     /*
      * Offset will include 16 bytes padding from dev_alloc_skb, 14 bytes for 
@@ -582,14 +604,10 @@ int netif_rx(struct sk_buff *skb)
 
     netdev_rx_stat[this_cpu].total++;
 
-    if ( skb->src_vif == VIF_UNKNOWN_INTERFACE )
-        skb->src_vif = VIF_PHYSICAL_INTERFACE;
-                
-    if ( skb->dst_vif == VIF_UNKNOWN_INTERFACE )
-        skb->dst_vif = __net_get_target_vif(skb->data, skb->len, skb->src_vif);
+    if ( skb->dst_vif == NULL )
+        skb->dst_vif = net_get_target_vif(skb->data, skb->len, skb->src_vif);
         
-    if ( ((vif = sys_vif_list[skb->dst_vif]) == NULL) ||
-         (skb->dst_vif <= VIF_PHYSICAL_INTERFACE) )
+    if ( (skb->dst_vif == VIF_PHYS) || (skb->dst_vif == VIF_DROP) )
     {
         netdev_rx_stat[this_cpu].dropped++;
         unmap_domain_mem(skb->head);
@@ -598,11 +616,11 @@ int netif_rx(struct sk_buff *skb)
         return NET_RX_DROP;
     }
 
-    deliver_packet(skb, vif);
-    cpu_mask = mark_hyp_event(vif->domain, _HYP_EVENT_NET_RX);
+    deliver_packet(skb, skb->dst_vif);
+    put_vif(skb->dst_vif);
+
     unmap_domain_mem(skb->head);
     kfree_skb(skb);
-    hyp_event_notify(cpu_mask);
     local_irq_restore(flags);
     return NET_RX_SUCCESS;
 }
@@ -637,13 +655,11 @@ static int __on_net_schedule_list(net_vif_t *vif)
 static void remove_from_net_schedule_list(net_vif_t *vif)
 {
     unsigned long flags;
-    if ( !__on_net_schedule_list(vif) ) return;
     spin_lock_irqsave(&net_schedule_list_lock, flags);
-    if ( __on_net_schedule_list(vif) )
-    {
-        list_del(&vif->list);
-        vif->list.next = NULL;
-    }
+    ASSERT(__on_net_schedule_list(vif));
+    list_del(&vif->list);
+    vif->list.next = NULL;
+    put_vif(vif);
     spin_unlock_irqrestore(&net_schedule_list_lock, flags);
 }
 
@@ -655,6 +671,7 @@ static void add_to_net_schedule_list_tail(net_vif_t *vif)
     if ( !__on_net_schedule_list(vif) )
     {
         list_add_tail(&vif->list, &net_schedule_list);
+        get_vif(vif);
     }
     spin_unlock_irqrestore(&net_schedule_list_lock, flags);
 }
@@ -663,11 +680,10 @@ static void add_to_net_schedule_list_tail(net_vif_t *vif)
 /* Destructor function for tx skbs. */
 static void tx_skb_release(struct sk_buff *skb)
 {
-    int i, send = 0;
-    net_vif_t *vif = sys_vif_list[skb->src_vif];
-    unsigned int idx;
+    int i;
+    net_vif_t *vif = skb->src_vif;
     tx_shadow_entry_t *tx;
-    unsigned long cpu_mask, flags;
+    unsigned long flags;
     
     spin_lock_irqsave(&vif->domain->page_lock, flags);
     for ( i = 0; i < skb_shinfo(skb)->nr_frags; i++ )
@@ -679,51 +695,11 @@ static void tx_skb_release(struct sk_buff *skb)
 
     skb_shinfo(skb)->nr_frags = 0; 
 
-    /* This would mean that the guest OS has fiddled with our index. */
-    if ( vif->shadow_ring->tx_cons != vif->net_ring->tx_cons )
-        DPRINTK("Shadow and shared rings out of sync (%d/%d)\n",
-                vif->shadow_ring->tx_cons, vif->net_ring->tx_cons);
+    tx = vif->tx_shadow_ring + vif->tx_cons;
+    vif->tx_cons = TX_RING_INC(vif->tx_cons);
+    make_tx_response(vif, tx->id, RING_STATUS_OK);
 
-    /*
-     * XXX This assumes that, per vif, SKBs are processed in-order!
-     * Also assumes no concurrency. This is safe because each vif
-     * maps to one NIC. This is executed in NIC interrupt code, so we have
-     * mutual exclusion from do_IRQ().
-     */
-
-    smp_wmb(); /* make sure any status updates occur before inc'ing tx_cons. */
-
-    /* Skip over a sequence of bad descriptors, plus the first good one. */
-    do {
-        idx = vif->shadow_ring->tx_cons;
-        /* There must be at least one good descriptor outstanding. */
-        if ( idx == vif->shadow_ring->tx_idx ) BUG();
-        tx  = &vif->shadow_ring->tx_ring[idx];
-        vif->shadow_ring->tx_cons = TX_RING_INC(idx);
-        if ( vif->shadow_ring->tx_cons == vif->net_ring->tx_event ) send = 1;
-    } while ( tx->status != RING_STATUS_OK );
-
-    /* Now skip over any more bad descriptors, up to the next good one. */
-    do {
-        idx = vif->shadow_ring->tx_cons;
-        tx  = &vif->shadow_ring->tx_ring[idx];
-        /* Carry on until we find a good descriptor, or reach scheduler idx. */
-        if ( (idx == vif->shadow_ring->tx_idx) || 
-             (tx->status == RING_STATUS_OK) )
-            break;
-        vif->shadow_ring->tx_cons = TX_RING_INC(idx);
-        if ( vif->shadow_ring->tx_cons == vif->net_ring->tx_event ) send = 1;
-    } while ( 1 );
-
-    /* Update shared consumer index to the new private value. */
-    vif->net_ring->tx_cons = vif->shadow_ring->tx_cons;
-
-    /* Send a transmit event if requested. */
-    if ( send )
-    {
-        cpu_mask = mark_guest_event(vif->domain, _EVENT_NET_TX);
-        guest_event_notify(cpu_mask);
-    }
+    put_vif(vif);
 }
 
     
@@ -742,34 +718,36 @@ static void net_tx_action(unsigned long unused)
         /* Get a vif from the list with work to do. */
         ent = net_schedule_list.next;
         vif = list_entry(ent, net_vif_t, list);
+        get_vif(vif);
         remove_from_net_schedule_list(vif);
-        if ( vif->shadow_ring->tx_idx == vif->shadow_ring->tx_prod )
+        if ( vif->tx_idx == vif->tx_prod )
+        {
+            put_vif(vif);
             continue;
-
-        /* Pick an entry from the transmit queue. */
-        tx = &vif->shadow_ring->tx_ring[vif->shadow_ring->tx_idx];
-        vif->shadow_ring->tx_idx = TX_RING_INC(vif->shadow_ring->tx_idx);
-        if ( vif->shadow_ring->tx_idx != vif->shadow_ring->tx_prod )
-            add_to_net_schedule_list_tail(vif);
-
-        /* Check the chosen entry is good. */
-        if ( tx->status != RING_STATUS_OK ) continue;
+        }
 
         if ( (skb = alloc_skb_nodata(GFP_ATOMIC)) == NULL )
         {
             printk("Out of memory in net_tx_action()!\n");
-            tx->status = RING_STATUS_BAD_PAGE;
+            add_to_net_schedule_list_tail(vif);
+            put_vif(vif);
             break;
         }
         
+        /* Pick an entry from the transmit queue. */
+        tx = &vif->tx_shadow_ring[vif->tx_idx];
+        vif->tx_idx = TX_RING_INC(vif->tx_idx);
+        if ( vif->tx_idx != vif->tx_prod )
+            add_to_net_schedule_list_tail(vif);
+
         skb->destructor = tx_skb_release;
         
         skb->head = skb->data = tx->header;
         skb->end  = skb->tail = skb->head + PKT_PROT_LEN;
         
         skb->dev      = the_dev;
-        skb->src_vif  = vif->id;
-        skb->dst_vif  = VIF_PHYSICAL_INTERFACE;
+        skb->src_vif  = vif;
+        skb->dst_vif  = NULL;
         skb->mac.raw  = skb->data; 
         
         skb_shinfo(skb)->frags[0].page        = frame_table +
@@ -800,55 +778,6 @@ static inline void maybe_schedule_tx_action(void)
     if ( !netif_queue_stopped(the_dev) &&
          !list_empty(&net_schedule_list) )
         tasklet_schedule(&net_tx_tasklet);
-}
-
-
-/*
- * update_shared_ring(void)
- * 
- * This replaces flush_rx_queue as the guest event handler to move packets
- * queued in the guest ring up to the guest.  Really, the packet is already
- * there, it was page flipped in deliver_packet, but this moves the ring
- * descriptor across from the shadow ring and increments the pointers.
- */
-
-void update_shared_ring(void)
-{
-    rx_shadow_entry_t *rx;
-    shared_info_t *s = current->shared_info;
-    net_ring_t *net_ring;
-    net_shadow_ring_t *shadow_ring;
-    unsigned int nvif;
-    
-    clear_bit(_HYP_EVENT_NET_RX, &current->hyp_events);
-
-    for ( nvif = 0; nvif < current->num_net_vifs; nvif++ )
-    {
-        net_ring = current->net_vif_list[nvif]->net_ring;
-        shadow_ring = current->net_vif_list[nvif]->shadow_ring;
-
-        /* This would mean that the guest OS has fiddled with our index. */
-        if ( shadow_ring->rx_cons != net_ring->rx_cons )
-            DPRINTK("Shadow and shared rings out of sync (%d/%d)\n",
-                    shadow_ring->rx_cons, net_ring->rx_cons);
-
-        while ( shadow_ring->rx_cons != shadow_ring->rx_idx )
-        {
-            rx = shadow_ring->rx_ring + shadow_ring->rx_cons;
-            copy_to_user(net_ring->rx_ring + shadow_ring->rx_cons, rx, 
-                         sizeof(rx_entry_t));
-
-            if ( rx->flush_count == tlb_flush_count[smp_processor_id()] )
-                __flush_tlb();
-
-            smp_wmb(); /* copy descriptor before inc'ing rx_cons */
-            shadow_ring->rx_cons = RX_RING_INC(shadow_ring->rx_cons);
-
-            if ( shadow_ring->rx_cons == net_ring->rx_event )
-                set_bit(_EVENT_NET_RX, &s->events);
-        }
-        net_ring->rx_cons = shadow_ring->rx_cons;
-    }
 }
 
 
@@ -1817,26 +1746,27 @@ inline int init_tx_header(u8 *data, unsigned int len, struct net_device *dev)
 
 long do_net_update(void)
 {
-    net_ring_t *net_ring;
-    net_shadow_ring_t *shadow_ring;
-    net_vif_t *current_vif;
-    unsigned int i, j;
+    net_ring_t *shared_rings;
+    net_vif_t *vif;
+    net_idx_t *shared_idxs;
+    unsigned int i, j, idx;
     struct sk_buff *skb;
-    tx_entry_t tx;
-    rx_shadow_entry_t *rx;
-    unsigned long pfn;
-    struct pfn_info *page;
-    unsigned long *g_pte;    
-    
-    for ( j = 0; j < current->num_net_vifs; j++)
-    {
-        int target;
-        u8 *g_data;
-        unsigned short protocol;
+    tx_req_entry_t tx;
+    rx_req_entry_t rx;
+    unsigned long pte_pfn, buf_pfn;
+    struct pfn_info *pte_page, *buf_page;
+    unsigned long *ptep;    
+    net_vif_t *target;
+    u8 *g_data;
+    unsigned short protocol;
 
-        current_vif = current->net_vif_list[j];
-        net_ring = current_vif->net_ring;
-        shadow_ring = current_vif->shadow_ring;
+    for ( idx = 0; idx < MAX_DOMAIN_VIFS; idx++ )
+    {
+        if ( (vif = current->net_vif_list[idx]) == NULL )
+            break;
+
+        shared_idxs  = vif->shared_idxs;
+        shared_rings = vif->shared_rings;
         
         /*
          * PHASE 1 -- TRANSMIT RING
@@ -1847,42 +1777,40 @@ long do_net_update(void)
          * new producer index, but take care not to catch up with our own
          * consumer index.
          */
-        for ( i = shadow_ring->tx_prod; 
-              (i != net_ring->tx_prod) && 
-                  (((shadow_ring->tx_cons-i) & (TX_RING_SIZE-1)) != 1); 
+        j = vif->tx_prod;
+        for ( i = vif->tx_req_cons; 
+              (i != shared_idxs->tx_req_prod) && 
+                  (((vif->tx_resp_prod-i) & (TX_RING_SIZE-1)) != 1); 
               i = TX_RING_INC(i) )
         {
-            if ( copy_from_user(&tx, net_ring->tx_ring+i, sizeof(tx)) )
-            {
-                DPRINTK("Bad copy_from_user for tx net descriptor\n");
-                shadow_ring->tx_ring[i].status = RING_STATUS_ERR_CFU;
-                continue;
-            }
+            tx     = shared_rings->tx_ring[i].req;
+            target = VIF_DROP;
 
-            shadow_ring->tx_ring[i].size   = tx.size;
-            shadow_ring->tx_ring[i].status = RING_STATUS_BAD_PAGE;
-
-            if ( tx.size < PKT_PROT_LEN )
+            if ( (tx.size < PKT_PROT_LEN) || (tx.size > ETH_FRAME_LEN) )
             {
-                DPRINTK("Runt packet %d\n", tx.size);
+                DPRINTK("Bad packet size: %d\n", tx.size);
+                make_tx_response(vif, tx.id, RING_STATUS_BAD_PAGE);
                 continue; 
             }
 
+            /* No crossing a page boundary as the payload mustn't fragment. */
             if ( ((tx.addr & ~PAGE_MASK) + tx.size) >= PAGE_SIZE ) 
             {
                 DPRINTK("tx.addr: %lx, size: %u, end: %lu\n", 
                         tx.addr, tx.size, (tx.addr &~PAGE_MASK) + tx.size);
+                make_tx_response(vif, tx.id, RING_STATUS_BAD_PAGE);
                 continue;
             }
 
-            pfn  = tx.addr >> PAGE_SHIFT;
-            page = frame_table + pfn;
+            buf_pfn  = tx.addr >> PAGE_SHIFT;
+            buf_page = frame_table + buf_pfn;
             spin_lock_irq(&current->page_lock);
-            if ( (pfn >= max_page) || 
-                 ((page->flags & PG_domain_mask) != current->domain) ) 
+            if ( (buf_pfn >= max_page) || 
+                 ((buf_page->flags & PG_domain_mask) != current->domain) ) 
             {
                 DPRINTK("Bad page frame\n");
                 spin_unlock_irq(&current->page_lock);
+                make_tx_response(vif, tx.id, RING_STATUS_BAD_PAGE);
                 continue;
             }
             
@@ -1891,44 +1819,61 @@ long do_net_update(void)
             protocol = __constant_htons(
                 init_tx_header(g_data, tx.size, the_dev));
             if ( protocol == 0 )
+            {
+                make_tx_response(vif, tx.id, RING_STATUS_BAD_PAGE);
                 goto tx_unmap_and_continue;
+            }
 
-            target = __net_get_target_vif(g_data, tx.size, current_vif->id);
+            target = net_get_target_vif(g_data, tx.size, vif);
 
-            if ( target > VIF_PHYSICAL_INTERFACE )
+            if ( target == VIF_PHYS )
+            {
+                vif->tx_shadow_ring[j].id     = tx.id;
+                vif->tx_shadow_ring[j].size   = tx.size;
+                vif->tx_shadow_ring[j].header = 
+                    kmem_cache_alloc(net_header_cachep, GFP_KERNEL);
+                if ( vif->tx_shadow_ring[j].header == NULL )
+                { 
+                    make_tx_response(vif, tx.id, RING_STATUS_OK);
+                    goto tx_unmap_and_continue;
+                }
+
+                memcpy(vif->tx_shadow_ring[j].header, g_data, PKT_PROT_LEN);
+                vif->tx_shadow_ring[j].payload = tx.addr + PKT_PROT_LEN;
+                get_page_tot(buf_page);
+                j = TX_RING_INC(j);
+            }
+            else if ( target != VIF_DROP )
             {
                 /* Local delivery */
-                if ( (skb = dev_alloc_skb(tx.size)) == NULL ) 
+                if ( (skb = dev_alloc_skb(ETH_FRAME_LEN + 32)) == NULL )
+                {
+                    make_tx_response(vif, tx.id, RING_STATUS_BAD_PAGE);
+                    put_vif(target);
                     goto tx_unmap_and_continue;
-                
-                skb->destructor = tx_skb_release;
+                }
 
-                shadow_ring->tx_ring[i].status = RING_STATUS_OK;
-
-                skb->src_vif = current_vif->id;
+                skb->src_vif = vif;
                 skb->dst_vif = target;
-                skb->protocol = protocol;
-                
+                skb->protocol = protocol;                
+
+                /*
+                 * We don't need a well-formed skb as netif_rx will fill these
+                 * fields in as necessary. All we actually need is the right
+                 * page offset in skb->data, and the right length in skb->len.
+                 * Note that the correct address/length *excludes* link header.
+                 */
                 skb->head = (u8 *)map_domain_mem(
                     ((skb->pf - frame_table) << PAGE_SHIFT));
-                skb->data = skb->head + 16;
-                skb_reserve(skb,2);
+                skb->data = skb->head + 18;
                 memcpy(skb->data, g_data, tx.size);
-                skb->len = tx.size;
-                unmap_domain_mem(skb->head);
                 skb->data += ETH_HLEN;
+                skb->len = tx.size - ETH_HLEN;
+                unmap_domain_mem(skb->head);
+
                 (void)netif_rx(skb);
-            }
-            else if ( target == VIF_PHYSICAL_INTERFACE )
-            {
-                shadow_ring->tx_ring[i].header = 
-                    kmem_cache_alloc(net_header_cachep, GFP_KERNEL);
-                if ( shadow_ring->tx_ring[i].header == NULL ) 
-                    goto tx_unmap_and_continue;
-                memcpy(shadow_ring->tx_ring[i].header, g_data, PKT_PROT_LEN);
-                shadow_ring->tx_ring[i].payload = tx.addr + PKT_PROT_LEN;
-                shadow_ring->tx_ring[i].status = RING_STATUS_OK;
-                get_page_tot(page);
+
+                make_tx_response(vif, tx.id, RING_STATUS_OK);
             }
 
         tx_unmap_and_continue:
@@ -1936,11 +1881,13 @@ long do_net_update(void)
             spin_unlock_irq(&current->page_lock);
         }
 
-        if ( shadow_ring->tx_prod != i )
+        vif->tx_req_cons = i;
+
+        if ( vif->tx_prod != j )
         {
             smp_mb(); /* Let other CPUs see new descriptors first. */
-            shadow_ring->tx_prod = i;
-            add_to_net_schedule_list_tail(current_vif);
+            vif->tx_prod = j;
+            add_to_net_schedule_list_tail(vif);
             maybe_schedule_tx_action();
         }
 
@@ -1953,75 +1900,137 @@ long do_net_update(void)
          * new producer index, but take care not to catch up with our own
          * consumer index.
          */
-        for ( i = shadow_ring->rx_prod; 
-              (i != net_ring->rx_prod) && 
-                  (((shadow_ring->rx_cons-i) & (RX_RING_SIZE-1)) != 1); 
+        j = vif->rx_prod;
+        for ( i = vif->rx_req_cons; 
+              (i != shared_idxs->rx_req_prod) && 
+                  (((vif->rx_resp_prod-i) & (RX_RING_SIZE-1)) != 1); 
               i = RX_RING_INC(i) )
         {
-            /* 
-             * This copy assumes that rx_shadow_entry_t is an extension of 
-             * rx_net_entry_t extra fields must be tacked on to the end.
-             */
-            if ( copy_from_user(shadow_ring->rx_ring+i, net_ring->rx_ring+i, 
-                                sizeof (rx_entry_t) ) )
-            {
-                DPRINTK("Bad copy_from_user for rx ring\n");
-                shadow_ring->rx_ring[i].status = RING_STATUS_ERR_CFU;
-                continue;
-            } 
+            rx = shared_rings->rx_ring[i].req;
 
-            rx = shadow_ring->rx_ring + i;
-            pfn = rx->addr >> PAGE_SHIFT;
-            page = frame_table + pfn;
-            
-            shadow_ring->rx_ring[i].status = RING_STATUS_BAD_PAGE;
+            pte_pfn = rx.addr >> PAGE_SHIFT;
+            pte_page = frame_table + pte_pfn;
             
             spin_lock_irq(&current->page_lock);
-            if ( (pfn >= max_page) || 
-                 (page->flags != (PGT_l1_page_table | current->domain)) ) 
+            if ( (pte_pfn >= max_page) || 
+                 ((pte_page->flags & (PG_type_mask | PG_domain_mask)) != 
+                  (PGT_l1_page_table | current->domain)) ) 
             {
-                DPRINTK("Bad page frame containing ppte\n");
+                DPRINTK("Bad page frame for ppte %d,%08lx,%08lx,%08lx\n",
+                        current->domain, pte_pfn, max_page, pte_page->flags);
                 spin_unlock_irq(&current->page_lock);
+                make_rx_response(vif, rx.id, 0, RING_STATUS_BAD_PAGE, 0);
                 continue;
             }
             
-            g_pte = map_domain_mem(rx->addr);
+            ptep = map_domain_mem(rx.addr);
             
-            if (!(*g_pte & _PAGE_PRESENT))
+            if ( !(*ptep & _PAGE_PRESENT) )
             {
-                DPRINTK("Inavlid PTE passed down (not present)\n");
+                DPRINTK("Invalid PTE passed down (not present)\n");
+                make_rx_response(vif, rx.id, 0, RING_STATUS_BAD_PAGE, 0);
                 goto rx_unmap_and_continue;
             }
             
-            page = (*g_pte >> PAGE_SHIFT) + frame_table;
-            
-            if (page->tot_count != 1) 
+            buf_pfn  = *ptep >> PAGE_SHIFT;
+            buf_page = frame_table + buf_pfn;
+
+            if ( ((buf_page->flags & (PG_type_mask | PG_domain_mask)) !=
+                  (PGT_writeable_page | current->domain)) || 
+                 (buf_page->tot_count != 1) )
             {
-		DPRINTK("RX page mapped multple times (%d/%d/%08x)\n",
-      		page->type_count, page->tot_count, page->flags);
-                
+		DPRINTK("Need a mapped-once writeable page (%d/%d/%08x)\n",
+      		buf_page->type_count, buf_page->tot_count, buf_page->flags);
+                make_rx_response(vif, rx.id, 0, RING_STATUS_BAD_PAGE, 0);
                 goto rx_unmap_and_continue;
             }
             
-            /* The pte they passed was good, so take it away from them. */
-            shadow_ring->rx_ring[i].status = RING_STATUS_OK;
-            *g_pte &= ~_PAGE_PRESENT;
-            page->flags = (page->flags & ~PG_type_mask) | PGT_net_rx_buf;
-            rx->flush_count = tlb_flush_count[smp_processor_id()];
+            /*
+             * The pte they passed was good, so take it away from them. We 
+             * also lock down the page-table page, so it doesn't go away.
+             */
+            get_page_type(pte_page);
+            get_page_tot(pte_page);
+            *ptep &= ~_PAGE_PRESENT;
+            buf_page->flags = buf_page->type_count = buf_page->tot_count = 0;
+            list_del(&buf_page->list);
+
+            vif->rx_shadow_ring[j].id          = rx.id;
+            vif->rx_shadow_ring[j].pte_ptr     = rx.addr;
+            vif->rx_shadow_ring[j].buf_pfn     = buf_pfn;
+            vif->rx_shadow_ring[j].flush_count = (unsigned short) 
+                atomic_read(&tlb_flush_count[smp_processor_id()]);
+            j = RX_RING_INC(j);
             
         rx_unmap_and_continue:
-            unmap_domain_mem(g_pte);
+            unmap_domain_mem(ptep);
             spin_unlock_irq(&current->page_lock);
         }
 
-        if ( shadow_ring->rx_prod != i )
+        vif->rx_req_cons = i;
+
+        if ( vif->rx_prod != j )
         {
             smp_mb(); /* Let other CPUs see new descriptors first. */
-            shadow_ring->rx_prod = i;
+            vif->rx_prod = j;
         }
     }
 
     return 0;
+}
+
+
+static void make_tx_response(net_vif_t     *vif, 
+                             unsigned short id, 
+                             unsigned char  st)
+{
+    unsigned long flags;
+    unsigned int pos;
+    tx_resp_entry_t *resp;
+
+    /* Place on the response ring for the relevant domain. */ 
+    spin_lock_irqsave(&vif->tx_lock, flags);
+    pos  = vif->tx_resp_prod;
+    resp = &vif->shared_rings->tx_ring[pos].resp;
+    resp->id     = id;
+    resp->status = st;
+    pos = TX_RING_INC(pos);
+    vif->tx_resp_prod = vif->shared_idxs->tx_resp_prod = pos;
+    if ( pos == vif->shared_idxs->rx_event )
+    {
+        unsigned long cpu_mask = mark_guest_event(vif->domain, _EVENT_NET_TX);
+        guest_event_notify(cpu_mask);    
+    }
+    spin_unlock_irqrestore(&vif->tx_lock, flags);
+}
+
+
+static void make_rx_response(net_vif_t     *vif, 
+                             unsigned short id, 
+                             unsigned short size,
+                             unsigned char  st,
+                             unsigned char  off)
+{
+    unsigned long flags;
+    unsigned int pos;
+    rx_resp_entry_t *resp;
+
+    /* Place on the response ring for the relevant domain. */ 
+    spin_lock_irqsave(&vif->rx_lock, flags);
+    pos  = vif->rx_resp_prod;
+    resp = &vif->shared_rings->rx_ring[pos].resp;
+    resp->id     = id;
+    resp->size   = size;
+    resp->status = st;
+    resp->offset = off;
+    pos = RX_RING_INC(pos);
+    vif->rx_resp_prod = vif->shared_idxs->rx_resp_prod = pos;
+    if ( pos == vif->shared_idxs->rx_event )
+    {
+        unsigned long cpu_mask = mark_guest_event(vif->domain, _EVENT_NET_RX);
+        guest_event_notify(cpu_mask);    
+    }
+    spin_unlock_irqrestore(&vif->rx_lock, flags);
 }
 
 

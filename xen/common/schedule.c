@@ -28,7 +28,7 @@
 #include <xeno/time.h>
 #include <xeno/ac_timer.h>
 #include <xeno/interrupt.h>
-
+#include <xeno/timer.h>
 #include <xeno/perfc.h>
 
 
@@ -107,7 +107,7 @@ static inline int __task_on_runqueue(struct task_struct *p)
 ******************************************************************************/
 void sched_add_domain(struct task_struct *p) 
 {
-    p->state       = TASK_UNINTERRUPTIBLE;
+    p->state       = TASK_SUSPENDED;
     p->mcu_advance = 10;
 
     if (p->domain == IDLE_DOMAIN_ID) {
@@ -394,7 +394,7 @@ asmlinkage void schedule(void)
 
 #ifndef NDEBUG
     if (r_time < ctx_allow) {
-        printk("[%02d]: %lx\n", this_cpu, r_time);
+        printk("[%02d]: %lx\n", this_cpu, (unsigned long)r_time);
         dump_rqueue(&schedule_data[this_cpu].runqueue, "foo");
     }
 #endif
@@ -440,7 +440,8 @@ asmlinkage void schedule(void)
     prev = schedule_data[this_cpu].prev;
     
     prev->policy &= ~SCHED_YIELD;
-    if ( prev->state == TASK_DYING ) release_task(prev);
+    if ( prev->state == TASK_DYING ) 
+        free_task_struct(prev);
 
  same_process:
     /* update the domains notion of time  */

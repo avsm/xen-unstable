@@ -14,50 +14,74 @@
 
 #include <linux/types.h>
 
-typedef struct tx_entry_st {
-    unsigned long  addr;   /* machine address of packet (IN VAR) */
-    unsigned short size;   /* in bytes (IN VAR) */
-    unsigned char  status; /* per descriptor status (OUT VAR) */
-    unsigned char  _unused;
+
+typedef struct tx_req_entry_st
+{
+    unsigned short id;
+    unsigned short size;   /* packet size in bytes */
+    unsigned long  addr;   /* machine address of packet */
+} tx_req_entry_t;
+
+typedef struct tx_resp_entry_st
+{
+    unsigned short id;
+    unsigned char  status;
+} tx_resp_entry_t;
+
+typedef union tx_entry_st
+{
+    tx_req_entry_t  req;
+    tx_resp_entry_t resp;
 } tx_entry_t;
 
-typedef struct rx_entry_st {
-    unsigned long  addr;   /* machine address of PTE to swizzle (IN VAR) */
-    unsigned short size;   /* in bytes (OUT VAR) */
-    unsigned char  status; /* per descriptor status (OUT VAR) */
-    unsigned char  offset; /* offset in page of received pkt (OUT VAR) */
+
+typedef struct rx_req_entry_st
+{
+    unsigned short id;
+    unsigned long  addr;   /* machine address of PTE to swizzle */
+} rx_req_entry_t;
+
+typedef struct rx_resp_entry_st
+{
+    unsigned short id;
+    unsigned short size;   /* received packet size in bytes */
+    unsigned char  status; /* per descriptor status */
+    unsigned char  offset; /* offset in page of received pkt */
+} rx_resp_entry_t;
+
+typedef union rx_entry_st
+{
+    rx_req_entry_t  req;
+    rx_resp_entry_t resp;
 } rx_entry_t;
+
 
 #define TX_RING_SIZE 256
 #define RX_RING_SIZE 256
-typedef struct net_ring_st {
-    /*
-     * Guest OS places packets into ring at tx_prod.
-     * Hypervisor removes at tx_cons.
-     * Ring is empty when tx_prod == tx_cons.
-     * Guest OS receives a DOMAIN_EVENT_NET_TX when tx_cons passes tx_event.
-     * Hypervisor may be prodded whenever tx_prod is updated, but this is
-     * only necessary when tx_cons == old_tx_prod (ie. transmitter stalled).
-     */
-    tx_entry_t	*tx_ring;
-    unsigned int tx_prod, tx_cons, tx_event;
 
-    /*
-     * Guest OS places empty buffers into ring at rx_prod.
-     * Hypervisor fills buffers as rx_cons.
-     * Ring is empty when rx_prod == rx_cons.
-     * Guest OS receives a DOMAIN_EVENT_NET_RX when rx_cons passes rx_event.
-     * Hypervisor may be prodded whenever rx_prod is updated, but this is
-     * only necessary when rx_cons == old_rx_prod (ie. receiver stalled).
-     */
-    rx_entry_t	*rx_ring;
-    unsigned int rx_prod, rx_cons, rx_event;
+#define MAX_DOMAIN_VIFS 8
+
+/* This structure must fit in a memory page. */
+typedef struct net_ring_st
+{
+    tx_entry_t tx_ring[TX_RING_SIZE];
+    rx_entry_t rx_ring[RX_RING_SIZE];
 } net_ring_t;
 
-/* Specify base of per-domain array. Get returned free slot in the array. */
-/*net_ring_t *create_net_vif(int domain);*/
+typedef struct net_idx_st
+{
+    /*
+     * Guest OS places packets into ring at tx_req_prod.
+     * Guest OS receives DOMAIN_EVENT_NET_TX when tx_resp_prod passes tx_event.
+     * Guest OS places empty buffers into ring at rx_req_prod.
+     * Guest OS receives DOMAIN_EVENT_NET_RX when rx_rssp_prod passes rx_event.
+     */
+    unsigned int tx_req_prod, tx_resp_prod, tx_event;
+    unsigned int rx_req_prod, rx_resp_prod, rx_event;
+} net_idx_t;
 
-/* Packet routing/filtering code follows:
+/*
+ * Packet routing/filtering code follows:
  */
 
 #define NETWORK_ACTION_ACCEPT   0
@@ -80,16 +104,26 @@ typedef struct net_rule_st
     u16  src_port_mask;
     u16  dst_port_mask;
     u16  proto;
-    
-    int  src_interface;
-    int  dst_interface;
+    unsigned long src_vif;
+    unsigned long dst_vif;
     u16  action;
 } net_rule_t;
+
+#define VIF_DOMAIN_MASK  0xfffff000UL
+#define VIF_DOMAIN_SHIFT 12
+#define VIF_INDEX_MASK   0x00000fffUL
+#define VIF_INDEX_SHIFT  0
+
+/* These are specified in the index if the dom is SPECIAL. */
+#define VIF_SPECIAL      0xfffff000UL
+#define VIF_UNKNOWN_INTERFACE   (VIF_SPECIAL | 0)
+#define VIF_PHYSICAL_INTERFACE  (VIF_SPECIAL | 1)
+#define VIF_ANY_INTERFACE       (VIF_SPECIAL | 2)
 
 typedef struct vif_query_st
 {
     unsigned int    domain;
-    char            *buf;   // where to put the reply -- guest virtual address
+    char            *buf;   /* reply buffer -- guest virtual address */
 } vif_query_t;
 
 /* Network trap operations and associated structure. 
@@ -124,7 +158,6 @@ int add_net_rule(net_rule_t *rule);
 
 /* Descriptor status values */
 #define RING_STATUS_OK               0  /* Everything is gravy. */
-#define RING_STATUS_ERR_CFU          1  /* Copy from user problems. */
-#define RING_STATUS_BAD_PAGE         2  /* What they gave us was pure evil */
+#define RING_STATUS_BAD_PAGE         1  /* What they gave us was pure evil */
 
 #endif

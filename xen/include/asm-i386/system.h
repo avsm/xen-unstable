@@ -4,8 +4,9 @@
 #include <xeno/config.h>
 #include <asm/bitops.h>
 
-struct task_struct;	/* one of the stranger aspects of C forward declarations.. */
-extern void FASTCALL(__switch_to(struct task_struct *prev, struct task_struct *next));
+struct task_struct;
+extern void FASTCALL(__switch_to(struct task_struct *prev, 
+                                 struct task_struct *next));
 
 #define prepare_to_switch()	do { } while(0)
 #define switch_to(prev,next) do {					\
@@ -33,74 +34,7 @@ extern void FASTCALL(__switch_to(struct task_struct *prev, struct task_struct *n
                      :"memory");                                        \
 } while (0)
 
-#define _set_base(addr,base) do { unsigned long __pr; \
-__asm__ __volatile__ ("movw %%dx,%1\n\t" \
-	"rorl $16,%%edx\n\t" \
-	"movb %%dl,%2\n\t" \
-	"movb %%dh,%3" \
-	:"=&d" (__pr) \
-	:"m" (*((addr)+2)), \
-	 "m" (*((addr)+4)), \
-	 "m" (*((addr)+7)), \
-         "0" (base) \
-        ); } while(0)
-
-#define _set_limit(addr,limit) do { unsigned long __lr; \
-__asm__ __volatile__ ("movw %%dx,%1\n\t" \
-	"rorl $16,%%edx\n\t" \
-	"movb %2,%%dh\n\t" \
-	"andb $0xf0,%%dh\n\t" \
-	"orb %%dh,%%dl\n\t" \
-	"movb %%dl,%2" \
-	:"=&d" (__lr) \
-	:"m" (*(addr)), \
-	 "m" (*((addr)+6)), \
-	 "0" (limit) \
-        ); } while(0)
-
-#define set_base(ldt,base) _set_base( ((char *)&(ldt)) , (base) )
-#define set_limit(ldt,limit) _set_limit( ((char *)&(ldt)) , ((limit)-1)>>12 )
-
-static inline unsigned long _get_base(char * addr)
-{
-	unsigned long __base;
-	__asm__("movb %3,%%dh\n\t"
-		"movb %2,%%dl\n\t"
-		"shll $16,%%edx\n\t"
-		"movw %1,%%dx"
-		:"=&d" (__base)
-		:"m" (*((addr)+2)),
-		 "m" (*((addr)+4)),
-		 "m" (*((addr)+7)));
-	return __base;
-}
-
-#define get_base(ldt) _get_base( ((char *)&(ldt)) )
-
-/*
- * Load a segment. Fall back on loading the zero
- * segment if something goes wrong..
- */
-#define loadsegment(seg,value)			\
-	asm volatile("\n"			\
-		"1:\t"				\
-		"movl %0,%%" #seg "\n"		\
-		"2:\n"				\
-		".section .fixup,\"ax\"\n"	\
-		"3:\t"				\
-		"pushl $0\n\t"			\
-		"popl %%" #seg "\n\t"		\
-		"jmp 2b\n"			\
-		".previous\n"			\
-		".section __ex_table,\"a\"\n\t"	\
-		".align 4\n\t"			\
-		".long 1b,3b\n"			\
-		".previous"			\
-		: :"m" (*(unsigned int *)&(value)))
-
-/*
- * Clear and set 'TS' bit respectively
- */
+/* Clear and set 'TS' bit respectively */
 #define clts() __asm__ __volatile__ ("clts")
 #define read_cr0() ({ \
 	unsigned int __dummy; \
@@ -196,7 +130,7 @@ static inline void __set_64bit_var (unsigned long long *ptr,
 /*
  * Note: no "lock" prefix even on SMP: xchg always implies lock anyway
  * Note 2: xchg has side effect, so that attribute volatile is necessary,
- *	  but generally the primitive is invalid, *ptr is output argument. --ANK
+ *   but generally the primitive is invalid, *ptr is output argument. --ANK
  */
 static inline unsigned long __xchg(unsigned long x, volatile void * ptr, int size)
 {

@@ -199,8 +199,9 @@ void show_regs(struct pt_regs * regs)
            regs->eax,regs->ebx,regs->ecx,regs->edx);
     printk("ESI: %08lx EDI: %08lx EBP: %08lx",
            regs->esi, regs->edi, regs->ebp);
-    printk(" DS: %04x ES: %04x\n",
-           0xffff & regs->xds,0xffff & regs->xes);
+    printk(" DS: %04x ES: %04x FS: %04x GS: %04x\n",
+           0xffff & regs->xds, 0xffff & regs->xes,
+           0xffff & regs->xfs, 0xffff & regs->xgs);
 
     __asm__("movl %%cr0, %0": "=r" (cr0));
     __asm__("movl %%cr2, %0": "=r" (cr2));
@@ -214,25 +215,6 @@ void show_regs(struct pt_regs * regs)
             : "=r" (cr4): "0" (0));
     printk("CR0: %08lx CR2: %08lx CR3: %08lx CR4: %08lx\n", cr0, cr2, cr3, cr4);
     show_trace(&regs->esp);
-}
-
-/*
- * No need to lock the MM as we are the last user
- */
-void release_segments(struct mm_struct *mm)
-{
-#if 0
-    void * ldt = mm.context.segments;
-
-    /*
-     * free the LDT
-     */
-    if (ldt) {
-        mm.context.segments = NULL;
-        clear_LDT();
-        vfree(ldt);
-    }
-#endif
 }
 
 
@@ -258,47 +240,7 @@ void flush_thread(void)
 
 void release_thread(struct task_struct *dead_task)
 {
-#if 0
-    if (dead_task->mm) {
-        void * ldt = dead_task->mm.context.segments;
-
-        // temporary debugging check
-        if (ldt) {
-            printk("WARNING: dead process %8s still has LDT? <%p>\n",
-                   dead_task->comm, ldt);
-            BUG();
-        }
-    }
-#endif
 }
-
-/*
- * we do not have to muck with descriptors here, that is
- * done in switch_mm() as needed.
- */
-void copy_segments(struct task_struct *p, struct mm_struct *new_mm)
-{
-#if 0
-    struct mm_struct * old_mm;
-    void *old_ldt, *ldt;
-
-    ldt = NULL;
-    old_mm = current->mm;
-    if (old_mm && (old_ldt = old_mm.context.segments) != NULL) {
-        /*
-         * Completely new LDT, we initialize it from the parent:
-         */
-        ldt = vmalloc(LDT_ENTRIES*LDT_ENTRY_SIZE);
-        if (!ldt)
-            printk(KERN_WARNING "ldt allocation failed\n");
-        else
-            memcpy(ldt, old_ldt, LDT_ENTRIES*LDT_ENTRY_SIZE);
-    }
-    new_mm.context.segments = ldt;
-    new_mm.context.cpuvalid = ~0UL;	/* valid on all CPU's - they can't have stale data */
-#endif
-}
-
 
 void new_thread(struct task_struct *p,
                 unsigned long start_pc,
@@ -312,15 +254,15 @@ void new_thread(struct task_struct *p,
 
     /*
      * Initial register values:
-     *  DS,ES,FS,GS = __GUEST_DS
-     *       CS:EIP = __GUEST_CS:start_pc
-     *       SS:ESP = __GUEST_DS:start_stack
+     *  DS,ES,FS,GS = FLAT_RING1_DS
+     *       CS:EIP = FLAT_RING1_CS:start_pc
+     *       SS:ESP = FLAT_RING1_DS:start_stack
      *          ESI = start_info
      *  [EAX,EBX,ECX,EDX,EDI,EBP are zero]
      */
-    p->thread.fs = p->thread.gs = __GUEST_DS;
-    regs->xds = regs->xes = regs->xss = __GUEST_DS;
-    regs->xcs = __GUEST_CS;
+    p->thread.fs = p->thread.gs = FLAT_RING1_DS;
+    regs->xds = regs->xes = regs->xfs = regs->xgs = regs->xss = FLAT_RING1_DS;
+    regs->xcs = FLAT_RING1_CS;
     regs->eip = start_pc;
     regs->esp = start_stack;
     regs->esi = start_info;
@@ -372,8 +314,7 @@ void new_thread(struct task_struct *p,
 /* NB. prev_p passed in %eax, next_p passed in %edx */
 void __switch_to(struct task_struct *prev_p, struct task_struct *next_p)
 {
-    struct thread_struct *prev = &prev_p->thread,
-        *next = &next_p->thread;
+    struct thread_struct *next = &next_p->thread;
     struct tss_struct *tss = init_tss + smp_processor_id();
 
     unlazy_fpu(prev_p);
@@ -386,22 +327,9 @@ void __switch_to(struct task_struct *prev_p, struct task_struct *next_p)
     tss->esp1 = next->esp1;
     tss->ss1  = next->ss1;
 
-    /*
-     * Save away %fs and %gs. No need to save %es and %ds, as
-     * those are always kernel segments while inside the kernel.
-     */
-    asm volatile("movl %%fs,%0":"=m" (*(int *)&prev->fs));
-    asm volatile("movl %%gs,%0":"=m" (*(int *)&prev->gs));
-
     /* Switch GDT and LDT. */
     __asm__ __volatile__ ("lgdt %0" : "=m" (*next_p->mm.gdt));
-    __load_LDT(next_p->mm.ldt_sel);
-
-    /*
-     * Restore %fs and %gs.
-     */
-    loadsegment(fs, next->fs);
-    loadsegment(gs, next->gs);
+    load_LDT();
 
     /*
      * Now maybe reload the debug registers

@@ -76,9 +76,9 @@ hal_entry:
 #endif
         
 continue_boot_cpu:
-        add     $__PAGE_OFFSET,%ebx
-	push 	%ebx /* Multiboot info struct */
-	push 	%eax /* Multiboot magic value */
+	add     $__PAGE_OFFSET,%ebx
+        push    %ebx /* Multiboot info struct */
+        push    %eax /* Multiboot magic value */
 
         /* Initialize BSS (no nasty surprises!) */
         mov     $__bss_start-__PAGE_OFFSET,%edi
@@ -86,6 +86,31 @@ continue_boot_cpu:
         sub     %edi,%ecx
         xor     %eax,%eax
         rep     stosb
+
+        /* Copy all modules (dom0 + initrd if present) out of the Xen heap */
+        mov     (%esp),%eax
+        cmp     $0x2BADB002,%eax
+        jne     skip_dom0_copy
+        sub     $__PAGE_OFFSET,%ebx          /* turn back into a phys addr */
+        mov     0x14(%ebx),%edi              /* mb->mods_count */
+        dec     %edi                         /* mbi->mods_count-- */
+        jb      skip_dom0_copy               /* skip if no modules */
+        mov     0x18(%ebx),%eax              /* mbi->mods_addr */
+        mov     (%eax),%ebx                  /* %ebx = mod[0]->mod_start */
+        shl     $4,%edi                    
+        add     %edi,%eax
+        mov     0x4(%eax),%eax               /* %eax = mod[mod_count-1]->end */
+        mov     %eax,%ecx
+        sub     %ebx,%ecx                    /* %ecx = byte len of all mods */
+        mov     $(MAX_DIRECTMAP_ADDRESS), %edi
+        add     %ecx, %edi                   /* %edi = src + length */        
+        shr     $2,%ecx                      /* %ecx = length/4 */
+1:      sub     $4,%eax                      /* %eax = src, %edi = dst */
+        sub     $4,%edi
+        mov     (%eax),%ebx
+        mov     %ebx,(%edi)
+        loop 1b
+skip_dom0_copy:              
 
         /* Initialize low and high mappings of all memory with 4MB pages */
         mov     $idle0_pg_table-__PAGE_OFFSET,%edi
@@ -208,28 +233,28 @@ SYMBOL_NAME(idt):
 
         .word   0
 gdt_descr:
-	.word	256*8-1
+	.word	(2*NR_CPUS+8)*8-1
 SYMBOL_NAME(gdt):       
         .long   SYMBOL_NAME(gdt_table)	/* gdt base */
 
         .word   0
 nopaging_gdt_descr:
-        .word   256*8-1
+        .word   (2*NR_CPUS+8)*8-1
         .long   SYMBOL_NAME(gdt_table)-__PAGE_OFFSET
         
         ALIGN
 /* NB. Rings != 0 get access up to 0xFC400000. This allows access to the */
 /*     machine->physical mapping table. Ring 0 can access all memory.    */
 ENTRY(gdt_table)
-        .quad 0x0000000000000000     /* NULL descriptor */
-        .quad 0x0000000000000000     /* not used */
-        .quad 0x00cfba000000c3ff     /* 0x11 ring 1 3.95GB code at 0x0 */
-        .quad 0x00cfb2000000c3ff     /* 0x19 ring 1 3.95GB data at 0x0 */
-        .quad 0x00cffa000000c3ff     /* 0x23 ring 3 3.95GB code at 0x0 */
-        .quad 0x00cff2000000c3ff     /* 0x2b ring 3 3.95GB data at 0x0 */
-        .quad 0x00cf9a000000ffff     /* 0x30 ring 0 4.00GB code at 0x0 */
-        .quad 0x00cf92000000ffff     /* 0x38 ring 0 4.00GB data at 0x0 */
-        .fill NR_CPUS,8,0             /* space for TSS's */
+        .quad 0x0000000000000000     /* 0x0000 NULL descriptor */
+        .quad 0x00cf9a000000ffff     /* 0x0008 ring 0 4.00GB code at 0x0 */
+        .quad 0x00cf92000000ffff     /* 0x0010 ring 0 4.00GB data at 0x0 */
+        .quad 0x00cfba000000c3ff     /* 0x0019 ring 1 3.95GB code at 0x0 */
+        .quad 0x00cfb2000000c3ff     /* 0x0021 ring 1 3.95GB data at 0x0 */
+        .quad 0x00cffa000000c3ff     /* 0x002b ring 3 3.95GB code at 0x0 */
+        .quad 0x00cff2000000c3ff     /* 0x0033 ring 3 3.95GB data at 0x0 */
+        .quad 0x0000000000000000     /* unused                           */
+        .fill 2*NR_CPUS,8,0          /* space for TSS and LDT per CPU    */
 
 # The following adds 12kB to the kernel file size.
         .org 0x1000

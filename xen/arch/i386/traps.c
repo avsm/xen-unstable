@@ -13,11 +13,12 @@
 #include <xeno/sched.h>
 #include <xeno/lib.h>
 #include <xeno/errno.h>
+#include <xeno/mm.h>
 #include <asm/ptrace.h>
 #include <xeno/delay.h>
 #include <xeno/spinlock.h>
 #include <xeno/irq.h>
-
+#include <asm/domain_page.h>
 #include <asm/system.h>
 #include <asm/io.h>
 #include <asm/atomic.h>
@@ -159,8 +160,9 @@ void show_registers(struct pt_regs *regs)
            regs->eax, regs->ebx, regs->ecx, regs->edx);
     printk("esi: %08lx   edi: %08lx   ebp: %08lx   esp: %08lx\n",
            regs->esi, regs->edi, regs->ebp, esp);
-    printk("ds: %04x   es: %04x   ss: %04x\n",
-           regs->xds & 0xffff, regs->xes & 0xffff, ss);
+    printk("ds: %04x   es: %04x   fs: %04x   gs: %04x   ss: %04x\n",
+           regs->xds & 0xffff, regs->xes & 0xffff, 
+           regs->xfs & 0xffff, regs->xgs & 0xffff, ss);
 
     show_stack(&regs->esp);
 }	
@@ -170,10 +172,11 @@ spinlock_t die_lock = SPIN_LOCK_UNLOCKED;
 
 void die(const char * str, struct pt_regs * regs, long err)
 {
-    spin_lock_irq(&die_lock);
+    unsigned long flags;
+    spin_lock_irqsave(&die_lock, flags);
     printk("%s: %04lx,%04lx\n", str, err >> 16, err & 0xffff);
     show_registers(regs);
-    spin_unlock_irq(&die_lock);
+    spin_unlock_irqrestore(&die_lock, flags);
     panic("HYPERVISOR DEATH!!\n");
 }
 
@@ -188,22 +191,13 @@ static void inline do_trap(int trapnr, char *str,
 {
     struct guest_trap_bounce *gtb = guest_trap_bounce+smp_processor_id();
     trap_info_t *ti;
-    unsigned long addr, fixup;
+    unsigned long fixup;
 
     if (!(regs->xcs & 3))
         goto fault_in_hypervisor;
 
     ti = current->thread.traps + trapnr;
-    if ( trapnr == 14 )
-    {
-        /* page fault pushes %cr2 */
-        gtb->flags = GTBF_TRAP_CR2;
-        __asm__ __volatile__ ("movl %%cr2,%0" : "=r" (gtb->cr2) : );
-    }
-    else
-    {
-        gtb->flags = use_error_code ? GTBF_TRAP : GTBF_TRAP_NOCODE;
-    }
+    gtb->flags = use_error_code ? GTBF_TRAP : GTBF_TRAP_NOCODE;
     gtb->error_code = error_code;
     gtb->cs         = ti->cs;
     gtb->eip        = ti->address;
@@ -214,32 +208,14 @@ static void inline do_trap(int trapnr, char *str,
     if ( (fixup = search_exception_table(regs->eip)) != 0 )
     {
         regs->eip = fixup;
+        regs->xfs = regs->xgs = 0;
         return;
-    }
-
-    __asm__ __volatile__ ("movl %%cr2,%0" : "=r" (addr) : );
-
-    if ( (trapnr == 14) && (addr >= PAGE_OFFSET) )
-    {
-        unsigned long page;
-        unsigned long *pde;
-        pde = (unsigned long *)idle_pg_table[smp_processor_id()];
-        page = pde[addr >> L2_PAGETABLE_SHIFT];
-        printk("*pde = %08lx\n", page);
-        if ( page & _PAGE_PRESENT )
-        {
-            page &= PAGE_MASK;
-            page = ((unsigned long *) __va(page))[(addr&0x3ff000)>>PAGE_SHIFT];
-            printk(" *pte = %08lx\n", page);
-        }
     }
 
     show_registers(regs);
     panic("CPU%d FATAL TRAP: vector = %d (%s)\n"
-          "[error_code=%08x]\n"
-          "Faulting linear address might be %08lx\n",
-          smp_processor_id(), trapnr, str,
-          error_code, addr);
+          "[error_code=%08x]\n",
+          smp_processor_id(), trapnr, str, error_code);
 }
 
 #define DO_ERROR_NOCODE(trapnr, str, name) \
@@ -265,14 +241,135 @@ DO_ERROR_NOCODE( 9, "coprocessor segment overrun", coprocessor_segment_overrun)
 DO_ERROR(10, "invalid TSS", invalid_TSS)
 DO_ERROR(11, "segment not present", segment_not_present)
 DO_ERROR(12, "stack segment", stack_segment)
-DO_ERROR(14, "page fault", page_fault)
 /* Vector 15 reserved by Intel */
 DO_ERROR_NOCODE(16, "fpu error", coprocessor_error)
 DO_ERROR(17, "alignment check", alignment_check)
 DO_ERROR_NOCODE(18, "machine check", machine_check)
 DO_ERROR_NOCODE(19, "simd error", simd_coprocessor_error)
 
-asmlinkage void do_general_protection(struct pt_regs * regs, long error_code)
+asmlinkage void do_page_fault(struct pt_regs *regs, long error_code)
+{
+    struct guest_trap_bounce *gtb = guest_trap_bounce+smp_processor_id();
+    trap_info_t *ti;
+    l2_pgentry_t *pl2e;
+    l1_pgentry_t *pl1e;
+    unsigned long addr, off, fixup, l2e, l1e, *ldt_page;
+    struct task_struct *p = current;
+    struct pfn_info *page;
+    int i;
+
+    __asm__ __volatile__ ("movl %%cr2,%0" : "=r" (addr) : );
+
+    if ( unlikely(addr > PAGE_OFFSET) )
+        goto fault_in_xen_space;
+
+ bounce_fault:
+
+    if ( unlikely(!(regs->xcs & 3)) )
+        goto fault_in_hypervisor;
+
+    ti = p->thread.traps + 14;
+    gtb->flags = GTBF_TRAP_CR2; /* page fault pushes %cr2 */
+    gtb->cr2        = addr;
+    gtb->error_code = error_code;
+    gtb->cs         = ti->cs;
+    gtb->eip        = ti->address;
+    return; 
+
+    /*
+     * FAULT IN XEN ADDRESS SPACE:
+     *  We only deal with one kind -- a fault in the shadow LDT mapping.
+     *  If this occurs we pull a mapping from the guest's LDT, if it is
+     *  valid. Otherwise we send the fault up to the guest OS to be handled.
+     */
+ fault_in_xen_space:
+
+    if ( (addr < LDT_VIRT_START) || 
+         (addr >= (LDT_VIRT_START + (p->mm.ldt_ents*LDT_ENTRY_SIZE))) )
+        goto bounce_fault;
+
+    off  = addr - LDT_VIRT_START;
+    addr = p->mm.ldt_base + off;
+
+    spin_lock(&p->page_lock);
+
+    pl2e  = map_domain_mem(pagetable_val(p->mm.pagetable));
+    l2e   = l2_pgentry_val(pl2e[l2_table_offset(addr)]);
+    unmap_domain_mem(pl2e);
+    if ( !(l2e & _PAGE_PRESENT) )
+        goto unlock_and_bounce_fault;
+
+    pl1e  = map_domain_mem(l2e & PAGE_MASK);
+    l1e   = l1_pgentry_val(pl1e[l1_table_offset(addr)]);
+    unmap_domain_mem(pl1e);
+    if ( !(l1e & _PAGE_PRESENT) )
+        goto unlock_and_bounce_fault;
+
+    page = frame_table + (l1e >> PAGE_SHIFT);
+    if ( (page->flags & PG_type_mask) != PGT_ldt_page )
+    {
+        if ( page->type_count != 0 )
+            goto unlock_and_bounce_fault;
+
+        /* Check all potential LDT entries in the page. */
+        ldt_page = map_domain_mem(l1e & PAGE_MASK);
+        for ( i = 0; i < 512; i++ )
+            if ( !check_descriptor(ldt_page[i*2], ldt_page[i*2+1]) )
+                goto unlock_and_bounce_fault;
+        unmap_domain_mem(ldt_page);
+
+        page->flags &= ~PG_type_mask;
+        page->flags |= PGT_ldt_page;
+    }
+
+    /* Success! */
+    get_page_type(page);
+    get_page_tot(page);
+    p->mm.perdomain_pt[l1_table_offset(off)+16] = mk_l1_pgentry(l1e|_PAGE_RW);
+    p->mm.shadow_ldt_mapcnt++;
+
+    spin_unlock(&p->page_lock);
+    return;
+
+
+ unlock_and_bounce_fault:
+
+    spin_unlock(&p->page_lock);
+    goto bounce_fault;
+
+
+ fault_in_hypervisor:
+
+    if ( (fixup = search_exception_table(regs->eip)) != 0 )
+    {
+        regs->eip = fixup;
+        regs->xfs = regs->xgs = 0;
+        return;
+    }
+
+    if ( addr >= PAGE_OFFSET )
+    {
+        unsigned long page;
+        unsigned long *pde;
+        pde = (unsigned long *)idle_pg_table[smp_processor_id()];
+        page = pde[addr >> L2_PAGETABLE_SHIFT];
+        printk("*pde = %08lx\n", page);
+        if ( page & _PAGE_PRESENT )
+        {
+            page &= PAGE_MASK;
+            page = ((unsigned long *) __va(page))[(addr&0x3ff000)>>PAGE_SHIFT];
+            printk(" *pte = %08lx\n", page);
+        }
+    }
+
+    show_registers(regs);
+    panic("CPU%d FATAL PAGE FAULT\n"
+          "[error_code=%08x]\n"
+          "Faulting linear address might be %08lx\n",
+          smp_processor_id(), error_code, addr);
+}
+
+asmlinkage void do_general_protection(struct pt_regs *regs, long error_code)
 {
     struct guest_trap_bounce *gtb = guest_trap_bounce+smp_processor_id();
     trap_info_t *ti;
@@ -315,7 +412,7 @@ asmlinkage void do_general_protection(struct pt_regs * regs, long error_code)
             return;
         }
     }
-
+    
     /* Pass on GPF as is. */
     ti = current->thread.traps + 13;
     gtb->flags      = GTBF_TRAP;
@@ -325,9 +422,11 @@ asmlinkage void do_general_protection(struct pt_regs * regs, long error_code)
     return;
 
  gp_in_kernel:
+
     if ( (fixup = search_exception_table(regs->eip)) != 0 )
     {
         regs->eip = fixup;
+        regs->xfs = regs->xgs = 0;
         return;
     }
 
@@ -471,31 +570,14 @@ do { \
 	 "3" ((char *) (addr)),"2" (__HYPERVISOR_CS << 16)); \
 } while (0)
 
-
-/*
- * This needs to use 'idt_table' rather than 'idt', and
- * thus use the _nonmapped_ version of the IDT, as the
- * Pentium F0 0F bugfix can have resulted in the mapped
- * IDT being write-protected.
- */
 void set_intr_gate(unsigned int n, void *addr)
 {
     _set_gate(idt_table+n,14,0,addr);
 }
 
-static void __init set_trap_gate(unsigned int n, void *addr)
-{
-    _set_gate(idt_table+n,15,0,addr);
-}
-
 static void __init set_system_gate(unsigned int n, void *addr)
 {
-    _set_gate(idt_table+n,15,3,addr);
-}
-
-static void __init set_call_gate(void *a, void *addr)
-{
-    _set_gate(a,12,3,addr);
+    _set_gate(idt_table+n,14,3,addr);
 }
 
 #define _set_seg_desc(gate_addr,type,dpl,base,limit) {\
@@ -526,29 +608,37 @@ void set_tss_desc(unsigned int n, void *addr)
 
 void __init trap_init(void)
 {
-    set_trap_gate(0,&divide_error);
-    set_trap_gate(1,&debug);
+    /*
+     * Note that interrupt gates are always used, rather than trap gates. We 
+     * must have interrupts disabled until DS/ES/FS/GS are saved because the 
+     * first activation must have the "bad" value(s) for these registers and 
+     * we may lose them if another activation is installed before they are 
+     * saved. The page-fault handler also needs interrupts disabled until %cr2 
+     * has been read and saved on the stack.
+     */
+    set_intr_gate(0,&divide_error);
+    set_intr_gate(1,&debug);
     set_intr_gate(2,&nmi);
     set_system_gate(3,&int3);     /* usable from all privilege levels */
     set_system_gate(4,&overflow); /* usable from all privilege levels */
-    set_trap_gate(5,&bounds);
-    set_trap_gate(6,&invalid_op);
-    set_trap_gate(7,&device_not_available);
-    set_trap_gate(8,&double_fault);
-    set_trap_gate(9,&coprocessor_segment_overrun);
-    set_trap_gate(10,&invalid_TSS);
-    set_trap_gate(11,&segment_not_present);
-    set_trap_gate(12,&stack_segment);
-    set_trap_gate(13,&general_protection);
+    set_intr_gate(5,&bounds);
+    set_intr_gate(6,&invalid_op);
+    set_intr_gate(7,&device_not_available);
+    set_intr_gate(8,&double_fault);
+    set_intr_gate(9,&coprocessor_segment_overrun);
+    set_intr_gate(10,&invalid_TSS);
+    set_intr_gate(11,&segment_not_present);
+    set_intr_gate(12,&stack_segment);
+    set_intr_gate(13,&general_protection);
     set_intr_gate(14,&page_fault);
-    set_trap_gate(15,&spurious_interrupt_bug);
-    set_trap_gate(16,&coprocessor_error);
-    set_trap_gate(17,&alignment_check);
-    set_trap_gate(18,&machine_check);
-    set_trap_gate(19,&simd_coprocessor_error);
+    set_intr_gate(15,&spurious_interrupt_bug);
+    set_intr_gate(16,&coprocessor_error);
+    set_intr_gate(17,&alignment_check);
+    set_intr_gate(18,&machine_check);
+    set_intr_gate(19,&simd_coprocessor_error);
 
     /* Only ring 1 can access monitor services. */
-    _set_gate(idt_table+HYPERVISOR_CALL_VECTOR,15,1,&hypervisor_call);
+    _set_gate(idt_table+HYPERVISOR_CALL_VECTOR,14,1,&hypervisor_call);
 
     /* CPU0 uses the master IDT. */
     idt_tables[0] = idt_table;
@@ -568,23 +658,38 @@ long do_set_trap_table(trap_info_t *traps)
     trap_info_t cur;
     trap_info_t *dst = current->thread.traps;
 
-    /*
-     * I'm removing the next line, since it seems more intuitive to use this 
-     * as an interface to incrementally update a domain's trap table. Clearing 
-     * out old entries automatically is rather antisocial!
-     */
-    /*memset(dst, 0, sizeof(*dst) * 256);*/
-
     for ( ; ; )
     {
         if ( copy_from_user(&cur, traps, sizeof(cur)) ) return -EFAULT;
-        if ( (cur.cs & 3) == 0 ) return -EPERM;
+
         if ( cur.address == 0 ) break;
+
+        if ( !VALID_CODESEL(cur.cs) ) return -EPERM;
+
         memcpy(dst+cur.vector, &cur, sizeof(cur));
         traps++;
     }
 
-    return(0);
+    return 0;
+}
+
+
+long do_set_callbacks(unsigned long event_selector,
+                      unsigned long event_address,
+                      unsigned long failsafe_selector,
+                      unsigned long failsafe_address)
+{
+    struct task_struct *p = current;
+
+    if ( !VALID_CODESEL(event_selector) || !VALID_CODESEL(failsafe_selector) )
+        return -EPERM;
+
+    p->event_selector    = event_selector;
+    p->event_address     = event_address;
+    p->failsafe_selector = failsafe_selector;
+    p->failsafe_address  = failsafe_address;
+
+    return 0;
 }
 
 

@@ -23,8 +23,13 @@
 #define GUEST_SIG   "XenoGues"
 #define SIG_LEN    8
 
-#define L1_PROT (_PAGE_PRESENT|_PAGE_RW|_PAGE_USER|_PAGE_ACCESSED)
-#define L2_PROT (_PAGE_PRESENT|_PAGE_RW|_PAGE_USER|_PAGE_ACCESSED|_PAGE_DIRTY)
+/*
+ * NB. No ring-3 access in initial guestOS pagetables. Note that we allow
+ * ring-3 privileges in the page directories, so that the guestOS may later
+ * decide to share a 4MB region with applications.
+ */
+#define L1_PROT (_PAGE_PRESENT|_PAGE_RW|_PAGE_ACCESSED)
+#define L2_PROT (_PAGE_PRESENT|_PAGE_RW|_PAGE_ACCESSED|_PAGE_DIRTY|_PAGE_USER)
 
 /* standardized error reporting function */
 static void dberr(char *msg)
@@ -36,6 +41,30 @@ static void dberr(char *msg)
 static void dbstatus(char * msg)
 {
     printf("Domain Builder: %s\n", msg);
+}
+
+static int do_kill_domain(int dom_id, int force)
+{
+    char cmd_path[MAX_PATH];
+    dom0_op_t dop;
+    int cmd_fd;
+
+    dop.cmd = DOM0_KILLDOMAIN;
+    dop.u.killdomain.domain = dom_id;
+    dop.u.killdomain.force  = force;
+
+    /* open the /proc command interface */
+    sprintf(cmd_path, "%s%s%s%s", "/proc/", PROC_XENO_ROOT, "/", PROC_CMD);
+    cmd_fd = open(cmd_path, O_WRONLY);
+    if(cmd_fd < 0){
+        perror(PERR_STRING);
+        return -1;
+    }
+
+    write(cmd_fd, &dop, sizeof(dom0_op_t));
+    close(cmd_fd);
+
+    return 0;
 }
 
 /* clean up domain's memory allocations */
@@ -157,7 +186,7 @@ static dom0_newdomain_t * create_new_domain(long req_mem)
 
     sprintf(dom_id_path, "%s%s%s%s", "/proc/", PROC_XENO_ROOT, "/", 
         PROC_DOM_DATA);
-    while((id_fd = open(dom_id_path, O_RDONLY)) < 0){}
+    while((id_fd = open(dom_id_path, O_RDONLY)) < 0) continue;
     dom_data = (dom0_newdomain_t *)malloc(sizeof(dom0_newdomain_t));
     read(id_fd, dom_data, sizeof(dom0_newdomain_t));
     close(id_fd);
@@ -233,7 +262,7 @@ out:
  * manner. this way, many potentially messy things are avoided...
  */ 
 #define PAGE_TO_VADDR(_pfn) ((void *)(dom_mem->vaddr + ((_pfn) * PAGE_SIZE)))
-static dom_meminfo_t *setup_guestos(int dom, int kernel_fd, 
+static dom_meminfo_t *setup_guestos(int dom, int kernel_fd, int initrd_fd,
     unsigned long virt_load_addr, size_t ksize, dom_mem_t *dom_mem)
 {
     dom_meminfo_t *meminfo;
@@ -254,6 +283,8 @@ static dom_meminfo_t *setup_guestos(int dom, int kernel_fd,
     page_array  = malloc(dom_mem->tot_pages * 4);
     pgt_updates = (page_update_request_t *)dom_mem->vaddr;
     alloc_index = dom_mem->tot_pages - 1;
+
+    memset(meminfo, 0, sizeof(meminfo));
 
     memcpy(page_array, (void *)dom_mem->vaddr, dom_mem->tot_pages * 4);
 
@@ -360,6 +391,31 @@ static dom_meminfo_t *setup_guestos(int dom, int kernel_fd,
         goto out;
     }
 
+    if( initrd_fd )
+      {
+	struct stat stat;
+	unsigned long isize;
+
+	if(fstat(initrd_fd, &stat) < 0){
+	  perror(PERR_STRING);
+	  close(initrd_fd);
+	  goto out;
+	}
+	isize = stat.st_size;
+
+	if( read(initrd_fd, ((char *)dom_mem->vaddr)+ksize, isize) != isize )
+	  {
+	    dberr("Error reading initrd image, could not"
+		  " read the whole image. Terminating.\n");
+	    goto out;
+	  }
+
+	meminfo->virt_mod_addr = virt_load_addr + ksize;
+	meminfo->virt_mod_len  = isize;
+
+      }
+
+
     ret = meminfo;
 out:
 
@@ -399,38 +455,54 @@ int main(int argc, char **argv)
     size_t ksize;
     unsigned long load_addr;
     char status[1024];
-    int kernel_fd;
+    int kernel_fd, initrd_fd = 0;
     int count;
     int cmd_len;
     int rc = -1;
+    int args_start = 4;
+    char initrd_name[1024];
 
     unsigned long addr;
 
+    /**** this argument parsing code is really _gross_. rewrite me! ****/
+
     if(argc < 4) {
         dberr("Usage: dom_builder <kbytes_mem> <image> <num_vifs> "
-	      "<boot_params>\n");
-        goto out;
+	      "[<initrd=initrd_name>] <boot_params>\n");
+        return -1;
     }
 
     /* create new domain and set up all the neccessary mappings */
 
     kernel_fd = do_kernel_chcks(argv[2], atol(argv[1]), &load_addr, &ksize);
-    if(kernel_fd < 0) {
-	rc = errno; 
-        goto out;
-    }
+    if(kernel_fd < 0)
+	return -1;
     
     /* request the creation of new domain */
     if(!(dom_data = create_new_domain(atol(argv[1])))) 
-        goto out;
+        return -1;
 
     /* map domain's memory */
     if(map_dom_mem(dom_data->pg_head, dom_data->memory_kb >> (PAGE_SHIFT-10), 
 		   dom_data->domain, &dom_os_image))
         goto out;
 
+    if( strncmp("initrd=", argv[args_start], 7) == 0 )
+      {
+	strncpy( initrd_name, argv[args_start]+7, sizeof(initrd_name) );
+	initrd_name[sizeof(initrd_name)-1] = 0;
+	printf("initrd present, name = %s\n", initrd_name );
+	args_start++;
+
+	initrd_fd = open(initrd_name, O_RDONLY);
+	if(initrd_fd < 0){
+	  perror(PERR_STRING);
+	  goto out;
+	}
+      }
+
     /* the following code does the actual domain building */
-    meminfo = setup_guestos(dom_data->domain, kernel_fd, load_addr, 
+    meminfo = setup_guestos(dom_data->domain, kernel_fd, initrd_fd, load_addr, 
 			    ksize, &dom_os_image); 
     
     /* and unmap the new domain's memory image since we no longer need it */
@@ -445,7 +517,7 @@ int main(int argc, char **argv)
     meminfo->num_vifs = atoi(argv[3]);
     meminfo->cmd_line[0] = '\0';
     cmd_len = 0;
-    for(count = 4; count < argc; count++){
+    for(count = args_start; count < argc; count++){
         if(cmd_len + strlen(argv[count]) > MAX_CMD_LEN - 1){
             dberr("Size of image boot params too big!\n");
             break;
@@ -470,7 +542,13 @@ int main(int argc, char **argv)
     
 out:
     if( rc >= 0 )
-       return meminfo->domain;
+    {
+        return meminfo->domain;
+    }
     else 
-       return rc;
+    {
+        if ( dom_data->domain != 0 )
+            do_kill_domain(dom_data->domain, 1);
+        return rc;
+    }
 }
