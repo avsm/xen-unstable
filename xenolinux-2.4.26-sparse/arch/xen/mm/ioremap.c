@@ -35,7 +35,7 @@ static inline int direct_remap_area_pte(pte_t *pte,
                                         domid_t  domid)
 {
     unsigned long end;
-#define MAX_DIRECTMAP_MMU_QUEUE 64
+#define MAX_DIRECTMAP_MMU_QUEUE 130
     mmu_update_t u[MAX_DIRECTMAP_MMU_QUEUE], *v;
 
     address &= ~PMD_MASK;
@@ -62,13 +62,15 @@ static inline int direct_remap_area_pte(pte_t *pte,
     }
 
     do {
+#if 0  /* thanks to new ioctl mmaping interface this is no longer a bug */
         if (!pte_none(*pte)) {
             printk("direct_remap_area_pte: page already exists\n");
             BUG();
         }
+#endif
         v->ptr = virt_to_machine(pte);
         v->val = (machine_addr & PAGE_MASK) | pgprot_val(prot) | _PAGE_IO;
-        if ( ++v == MAX_DIRECTMAP_MMU_QUEUE )
+        if ( ( ++v - u )== MAX_DIRECTMAP_MMU_QUEUE ) 
         {
             if ( HYPERVISOR_mmu_update(u, MAX_DIRECTMAP_MMU_QUEUE) < 0 )
                 return -EFAULT;
@@ -79,8 +81,12 @@ static inline int direct_remap_area_pte(pte_t *pte,
         pte++;
     } while (address && (address < end));
 
-    if ( ((v-u) != 0) && (HYPERVISOR_mmu_update(u, v-u) < 0) )
-        return -EFAULT;
+    if ( ((v-u) > 2) && (HYPERVISOR_mmu_update(u, v-u) < 0) )
+    {
+        printk(KERN_WARNING "Failed to ioremap %08lx->%08lx (%08lx)\n",
+               end-size, end, machine_addr-size);
+	return -EINVAL;
+    }
 
     return 0;
 }
@@ -107,6 +113,7 @@ static inline int direct_remap_area_pmd(struct mm_struct *mm,
         pte_t * pte = pte_alloc(mm, pmd, address);
         if (!pte)
             return -ENOMEM;
+
         error = direct_remap_area_pte(pte, address, end - address, 
                                       address + machine_addr, prot, domid);
         if ( error )
@@ -127,6 +134,9 @@ int direct_remap_area_pages(struct mm_struct *mm,
     int error = 0;
     pgd_t * dir;
     unsigned long end = address + size;
+
+/*printk("direct_remap_area_pages va=%08lx ma=%08lx size=%d\n",
+       address, machine_addr, size);*/
 
     machine_addr -= address;
     dir = pgd_offset(mm, address);

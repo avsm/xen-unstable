@@ -53,24 +53,19 @@ static void read_msr_for(void *unused)
 long do_dom0_op(dom0_op_t *u_dom0_op)
 {
     long ret = 0;
-    dom0_op_t *op;
+    dom0_op_t curop,*op=&curop;
 
     if ( !IS_PRIV(current) )
         return -EPERM;
 
-    if ( (op = kmalloc(sizeof(*op), GFP_KERNEL)) == NULL )
-        return -ENOMEM;
-
     if ( copy_from_user(op, u_dom0_op, sizeof(*op)) )
     {
-        ret = -EFAULT;
-        goto out;
+        return -EFAULT;
     }
 
     if ( op->interface_version != DOM0_INTERFACE_VERSION )
     {
-        ret = -EACCES;
-        goto out;
+        return -EACCES;
     }
 
     switch ( op->cmd )
@@ -269,12 +264,13 @@ long do_dom0_op(dom0_op_t *u_dom0_op)
         for_each_domain ( p )
         {
             if ( p->domain >= op->u.getdomaininfo.domain )
-                break;
+		break;
         }
 
         if ( p == NULL )
         {
             ret = -ESRCH;
+	    goto gdi_out;
         }
         else
         {
@@ -291,59 +287,80 @@ long do_dom0_op(dom0_op_t *u_dom0_op)
             op->u.getdomaininfo.cpu_time    = p->cpu_time;
             op->u.getdomaininfo.shared_info_frame = 
                 __pa(p->shared_info) >> PAGE_SHIFT;
-            if ( p->state == TASK_STOPPED )
+
+            if ( p->state == TASK_STOPPED && op->u.getdomaininfo.ctxt )
             {
+		full_execution_context_t *c=NULL;
+
+		if ( (c = kmalloc(sizeof(*c), GFP_KERNEL)) == NULL )
+		{
+		    ret= -ENOMEM;
+		    goto gdi_out;
+		}
+
                 rmb(); /* Ensure that we see saved register state. */
-                op->u.getdomaininfo.ctxt.flags = 0;
-                memcpy(&op->u.getdomaininfo.ctxt.cpu_ctxt, 
+                c->flags = 0;
+                memcpy(&c->cpu_ctxt, 
                        &p->shared_info->execution_context,
                        sizeof(p->shared_info->execution_context));
                 if ( test_bit(PF_DONEFPUINIT, &p->flags) )
-                    op->u.getdomaininfo.ctxt.flags |= ECF_I387_VALID;
-                memcpy(&op->u.getdomaininfo.ctxt.fpu_ctxt,
+                    c->flags |= ECF_I387_VALID;
+                memcpy(&c->fpu_ctxt,
                        &p->thread.i387,
                        sizeof(p->thread.i387));
-                memcpy(&op->u.getdomaininfo.ctxt.trap_ctxt,
+                memcpy(&c->trap_ctxt,
                        p->thread.traps,
                        sizeof(p->thread.traps));
 #ifdef ARCH_HAS_FAST_TRAP
                 if ( (p->thread.fast_trap_desc.a == 0) &&
                      (p->thread.fast_trap_desc.b == 0) )
-                    op->u.getdomaininfo.ctxt.fast_trap_idx = 0;
+                    c->fast_trap_idx = 0;
                 else
-                    op->u.getdomaininfo.ctxt.fast_trap_idx = 
+                    c->fast_trap_idx = 
                         p->thread.fast_trap_idx;
 #endif
-                op->u.getdomaininfo.ctxt.ldt_base = p->mm.ldt_base;
-                op->u.getdomaininfo.ctxt.ldt_ents = p->mm.ldt_ents;
-                op->u.getdomaininfo.ctxt.gdt_ents = 0;
+                c->ldt_base = p->mm.ldt_base;
+                c->ldt_ents = p->mm.ldt_ents;
+                c->gdt_ents = 0;
                 if ( GET_GDT_ADDRESS(p) == GDT_VIRT_START )
                 {
                     for ( i = 0; i < 16; i++ )
-                        op->u.getdomaininfo.ctxt.gdt_frames[i] = 
+                        c->gdt_frames[i] = 
                             l1_pgentry_to_pagenr(p->mm.perdomain_pt[i]);
-                    op->u.getdomaininfo.ctxt.gdt_ents = 
+                    c->gdt_ents = 
                         (GET_GDT_ENTRIES(p) + 1) >> 3;
                 }
-                op->u.getdomaininfo.ctxt.guestos_ss  = p->thread.guestos_ss;
-                op->u.getdomaininfo.ctxt.guestos_esp = p->thread.guestos_sp;
-                op->u.getdomaininfo.ctxt.pt_base   = 
+                c->guestos_ss  = p->thread.guestos_ss;
+                c->guestos_esp = p->thread.guestos_sp;
+                c->pt_base   = 
                     pagetable_val(p->mm.pagetable);
-                memcpy(op->u.getdomaininfo.ctxt.debugreg, 
+                memcpy(c->debugreg, 
                        p->thread.debugreg, 
                        sizeof(p->thread.debugreg));
-                op->u.getdomaininfo.ctxt.event_callback_cs  =
+                c->event_callback_cs  =
                     p->event_selector;
-                op->u.getdomaininfo.ctxt.event_callback_eip =
+                c->event_callback_eip =
                     p->event_address;
-                op->u.getdomaininfo.ctxt.failsafe_callback_cs  = 
+                c->failsafe_callback_cs  = 
                     p->failsafe_selector;
-                op->u.getdomaininfo.ctxt.failsafe_callback_eip = 
+                c->failsafe_callback_eip = 
                     p->failsafe_address;
+
+		if( copy_to_user(op->u.getdomaininfo.ctxt, c, sizeof(*c)) )
+		{
+		    ret = -EINVAL;
+		}
+
+		if (c) kfree(c);
             }
         }
+
+        if ( copy_to_user(u_dom0_op, op, sizeof(*op)) )	    
+	    ret = -EINVAL;
+
+    gdi_out:
         read_unlock_irqrestore(&tasklist_lock, flags);
-        copy_to_user(u_dom0_op, op, sizeof(*op));
+
     }
     break;
 
@@ -527,6 +544,7 @@ long do_dom0_op(dom0_op_t *u_dom0_op)
 	if ( p )
 	{
 	    strncpy(p->name, op->u.setdomainname.name, MAX_DOMAIN_NAME);
+	    put_task_struct(p);
 	}
 	else 
 	    ret = -ESRCH;
@@ -546,6 +564,7 @@ long do_dom0_op(dom0_op_t *u_dom0_op)
 		    p, op->u.setdomaininitialmem.initial_memkb );
 	    else
 		ret = -EINVAL;
+	    put_task_struct(p);
 	}
     }
     break;
@@ -558,9 +577,88 @@ long do_dom0_op(dom0_op_t *u_dom0_op)
 	{
 	    p->max_pages = 
 		(op->u.setdomainmaxmem.max_memkb+PAGE_SIZE-1)>> PAGE_SHIFT;
+	    put_task_struct(p);
 	}
 	else 
 	    ret = -ESRCH;
+    }
+    break;
+
+    case DOM0_GETPAGEFRAMEINFO2:
+    {
+#define GPF2_BATCH 128
+	int n,j;
+        int num = op->u.getpageframeinfo2.num;
+        domid_t dom = op->u.getpageframeinfo2.domain;
+	unsigned long *s_ptr = (unsigned long*) op->u.getpageframeinfo2.array;
+        struct task_struct *p;
+	unsigned long l_arr[GPF2_BATCH];
+        ret = -ESRCH;
+
+	if ( unlikely((p = find_domain_by_id(dom)) == NULL) )
+	    break;
+
+	if ( unlikely(num>1024) )
+	{
+	    ret = -E2BIG;
+	    break;
+	}
+	
+	ret = 0;    
+	for(n=0;n<num;)
+	{
+	    int k = ((num-n)>GPF2_BATCH)?GPF2_BATCH:(num-n);
+
+	    if( copy_from_user( l_arr, &s_ptr[n], k*sizeof(unsigned long) ) )
+	    {
+		ret = -EINVAL;
+		break;
+	    }
+	    
+	    for(j=0;j<k;j++)
+	    {		    
+		struct pfn_info *page;
+		unsigned long mfn = l_arr[j];
+
+		if ( unlikely(mfn >= max_page) )
+		    goto e2_err;
+
+		page = &frame_table[mfn];
+		
+		if ( likely(get_page(page, p)) )
+		{
+		    unsigned long type = 0;
+		    switch( page->type_and_flags & PGT_type_mask )
+		    {
+		    case PGT_l1_page_table:
+		    case PGT_l2_page_table:
+		    case PGT_l3_page_table:
+		    case PGT_l4_page_table:
+			type = page->type_and_flags & PGT_type_mask;
+
+		    }
+		    l_arr[j] |= type;
+		    put_page(page);
+		}
+		else
+		{
+		e2_err:
+		    l_arr[j] |= PGT_type_mask; /* error */
+		}
+
+	    }
+
+	    if( copy_to_user( &s_ptr[n], l_arr, k*sizeof(unsigned long) ) )
+	    {
+		ret = -EINVAL;
+		break;
+	    }
+
+	    n+=j;	    
+	}
+
+	put_task_struct(p);
+
     }
     break;
 
@@ -569,7 +667,5 @@ long do_dom0_op(dom0_op_t *u_dom0_op)
 
     }
 
- out:
-    kfree(op);
     return ret;
 }

@@ -16,14 +16,16 @@
 
 #include "xc.h"
 
-#include <asm-xen/proc_cmd.h>
-
 /* from xen/include/hypervisor-ifs */
 #include <hypervisor-if.h>
 #include <dom0_ops.h>
 #include <vbd.h>
 #include <event_channel.h>
 #include <sched_ctl.h>
+
+#include <asm-xen/proc_cmd.h>
+
+
 
 /* from xend/lib */
 #include <domain_controller.h>
@@ -108,6 +110,27 @@ static inline int do_dom0_op(int xc_handle, dom0_op_t *op)
  out1: return ret;
 }
 
+static inline int do_multicall_op(int xc_handle, 
+				  void *call_list, int nr_calls) 
+{
+    int ret = -1;
+    privcmd_hypercall_t hypercall;
+
+    hypercall.op     = __HYPERVISOR_multicall;
+    hypercall.arg[0] = (unsigned long)call_list;
+    hypercall.arg[1] = (unsigned long)nr_calls;
+
+    if ( (ret = do_xen_hypercall(xc_handle, &hypercall)) < 0 )
+    {
+        if ( errno == EACCES )
+            fprintf(stderr, "Dom0 operation failed -- need to"
+                    " rebuild the user-space tool set?\n");
+        goto out1;
+    }
+
+ out1: return ret;
+}
+
 static inline int do_network_op(int xc_handle, network_op_t *op)
 {
     int ret = -1;
@@ -173,5 +196,78 @@ mmu_t *init_mmu_updates(int xc_handle, domid_t dom);
 int add_mmu_update(int xc_handle, mmu_t *mmu, 
                    unsigned long ptr, unsigned long val);
 int finish_mmu_updates(int xc_handle, mmu_t *mmu);
+
+
+/*
+ * ioctl-based mfn mapping interface
+ */
+
+/*
+typedef struct privcmd_mmap_entry {
+    unsigned long va;
+    unsigned long mfn;
+    unsigned long npages;
+} privcmd_mmap_entry_t; 
+
+typedef struct privcmd_mmap {
+    int num;
+    domid_t dom;
+    privcmd_mmap_entry_t *entry;
+} privcmd_mmap_t; 
+*/
+
+#define mfn_mapper_queue_size 128
+
+typedef struct mfn_mapper {
+    int xc_handle;
+    int size;
+    int prot;
+    int error;
+    int max_queue_size;
+    void * addr;
+    privcmd_mmap_t ioctl; 
+    
+} mfn_mapper_t;
+
+void * mfn_mapper_map_single(int xc_handle, domid_t dom, int size, int prot, 
+			     unsigned long mfn );
+
+mfn_mapper_t * mfn_mapper_init(int xc_handle, domid_t dom, int size, int prot);
+
+void * mfn_mapper_base(mfn_mapper_t *t);
+
+void mfn_mapper_close(mfn_mapper_t *t);
+
+int mfn_mapper_flush_queue(mfn_mapper_t *t);
+
+void * mfn_mapper_queue_entry(mfn_mapper_t *t, int offset, 
+			      unsigned long mfn, int size );
+
+/*********************/
+
+
+#if 0
+typedef struct mfn_typer {
+    domid_t dom;
+    int xc_handle;
+    int max;
+    dom0_op_t op;
+} mfn_typer_t;
+
+
+mfn_typer_t *mfn_typer_init(int xc_handle, domid_t dom, int num );
+
+void mfn_typer_queue_entry(mfn_typer_t *t, unsigned long mfn );
+
+int mfn_typer_flush_queue(mfn_typer_t *t);
+#endif
+
+int get_pfn_type_batch(int xc_handle, 
+		       u64 dom, int num, unsigned long *arr);
+
+unsigned int get_pfn_type(int xc_handle, 
+			  unsigned long mfn, 
+			  u64 dom);
+    
 
 #endif /* __XC_PRIVATE_H__ */

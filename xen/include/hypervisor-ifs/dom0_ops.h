@@ -80,6 +80,7 @@ typedef struct dom0_getdomaininfo_st
 {
     /* IN variables. */
     domid_t domain;
+    full_execution_context_t *ctxt;
     /* OUT variables. */
     char name[MAX_DOMAIN_NAME];
     int processor;
@@ -91,7 +92,6 @@ typedef struct dom0_getdomaininfo_st
     unsigned int tot_pages, max_pages;
     long long cpu_time;
     unsigned long shared_info_frame;  /* MFN of shared_info struct */
-    full_execution_context_t ctxt;
 } dom0_getdomaininfo_t;
 
 #define DOM0_BUILDDOMAIN      13
@@ -100,7 +100,8 @@ typedef struct dom0_builddomain_st
     /* IN variables. */
     domid_t                  domain;
     unsigned int             num_vifs;
-    full_execution_context_t ctxt;
+    /* IN/OUT parameters */
+    full_execution_context_t *ctxt;
 } dom0_builddomain_t;
 
 #define DOM0_IOPL             14
@@ -152,7 +153,8 @@ typedef struct dom0_getpageframeinfo_st
     domid_t domain;        /* To which domain does the frame belong?    */
     /* OUT variables. */
     /* Is the page PINNED to a type? */
-    enum { NONE, L1TAB, L2TAB, L3TAB, L4TAB } type;
+    enum { NONE, L1TAB=(1<<29), L2TAB=(2<<29), L3TAB=(3<<29), L4TAB=(4<<29) } type;
+#define PGT_type_mask (7<<29)
 } dom0_getpageframeinfo_t;
 
 
@@ -266,6 +268,16 @@ typedef struct dom0_setdomainmaxmem_st
     unsigned int max_memkb;
 } dom0_setdomainmaxmem_t;
 
+#define DOM0_GETPAGEFRAMEINFO2 29   /* batched interface */
+typedef struct dom0_getpageframeinfo2_st
+{
+    /* IN variables. */
+    domid_t domain;        /* To which domain do frames belong?    */    
+    int num;
+    /* IN/OUT variables. */
+    unsigned long *array;
+} dom0_getpageframeinfo2_t;
+
 
 typedef struct dom0_op_st
 {
@@ -297,6 +309,7 @@ typedef struct dom0_op_st
 	dom0_setdomainname_t    setdomainname;
 	dom0_setdomaininitialmem_t setdomaininitialmem;
 	dom0_setdomainmaxmem_t  setdomainmaxmem;
+	dom0_getpageframeinfo2_t getpageframeinfo2;
     } u;
 } dom0_op_t;
 

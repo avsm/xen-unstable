@@ -13,6 +13,25 @@ typedef struct privcmd_hypercall
     unsigned long arg[5];
 } privcmd_hypercall_t;
 
+typedef struct privcmd_mmap_entry {
+    unsigned long va;
+    unsigned long mfn;
+    unsigned long npages;
+} privcmd_mmap_entry_t; 
+
+typedef struct privcmd_mmap {
+    int num;
+    domid_t dom; /* target domain */
+    privcmd_mmap_entry_t *entry;
+} privcmd_mmap_t; 
+
+typedef struct privcmd_blkmsg
+{
+    unsigned long op;
+    void         *buf;
+    int           buf_size;
+} privcmd_blkmsg_t;
+
 /*
  * @cmd: IOCTL_PRIVCMD_HYPERCALL
  * @arg: &privcmd_hypercall_t
@@ -29,5 +48,7 @@ typedef struct privcmd_hypercall
  */
 #define IOCTL_PRIVCMD_INITDOMAIN_EVTCHN \
     _IOC(_IOC_NONE, 'P', 1, 0)
+#define IOCTL_PRIVCMD_MMAP             \
+    _IOC(_IOC_NONE, 'P', 2, sizeof(privcmd_mmap_t))
 
 #endif /* __PROC_CMD_H__ */

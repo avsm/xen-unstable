@@ -466,7 +466,7 @@ static long pci_cfgreg_read(int bus, int dev, int func, int reg,
          * all 1s.  In this case the domain has no read access, which should
          * also look like the device is non-existent. */
         *val = 0xFFFFFFFF;
-        return 0;
+        return ret; /* KAF: error return seems to matter on my test machine. */
     }
 
     /* Fake out read requests for some registers. */
@@ -686,7 +686,6 @@ void physdev_init_dom0(struct task_struct *p)
             /* Skip bridges and other peculiarities for now. */
             if ( dev->hdr_type != PCI_HEADER_TYPE_NORMAL )
                 continue;
-            
             pdev = kmalloc(sizeof(phys_dev_t), GFP_KERNEL);
             pdev->dev = dev;
             pdev->flags = ACC_WRITE;
@@ -696,8 +695,7 @@ void physdev_init_dom0(struct task_struct *p)
         }
         else
         {
-            printk("Hiding PCI device %s from DOM0\n",
-                   dev->slot_name);
+            printk("Hiding PCI device %s from DOM0\n", dev->slot_name);
         }
     }
 

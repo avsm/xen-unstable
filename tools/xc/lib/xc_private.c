@@ -45,6 +45,234 @@ void unmap_pfn(int pm_handle, void *vaddr)
     (void)munmap(vaddr, PAGE_SIZE);
 }
 
+/*******************/
+
+void * mfn_mapper_map_single(int xc_handle, domid_t dom,
+			     int size, int prot,
+			     unsigned long mfn )
+{
+    privcmd_mmap_t ioctlx; 
+    privcmd_mmap_entry_t entry; 
+    void *addr;
+    addr = mmap( NULL, size, prot, MAP_SHARED, xc_handle, 0 );
+    if (addr)
+    {
+	ioctlx.num=1;
+	ioctlx.dom=dom;
+	ioctlx.entry=&entry;
+	entry.va=(unsigned long) addr;
+	entry.mfn=mfn;
+	entry.npages=(size+PAGE_SIZE-1)>>PAGE_SHIFT;
+	if ( ioctl( xc_handle, IOCTL_PRIVCMD_MMAP, &ioctlx ) <0 )
+	    return 0;
+    }
+    return addr;
+}
+
+mfn_mapper_t * mfn_mapper_init(int xc_handle, domid_t dom, int size, int prot)
+{
+    mfn_mapper_t * t;
+    t = calloc( 1, sizeof(mfn_mapper_t)+
+		mfn_mapper_queue_size*sizeof(privcmd_mmap_entry_t) );
+    if (!t) return NULL;
+    t->xc_handle = xc_handle;
+    t->size = size;
+    t->prot = prot;
+    t->error = 0;
+    t->max_queue_size = mfn_mapper_queue_size;
+    t->addr = mmap( NULL, size, prot, MAP_SHARED, xc_handle, 0 );
+    if (!t->addr)
+    {
+	free(t);
+	return NULL;
+    }
+    t->ioctl.num = 0;
+    t->ioctl.dom = dom;
+    t->ioctl.entry = (privcmd_mmap_entry_t *) &t[1];
+    return t;
+}
+
+void * mfn_mapper_base(mfn_mapper_t *t)
+{
+    return t->addr;
+}
+
+void mfn_mapper_close(mfn_mapper_t *t)
+{
+    if(t->addr) munmap( t->addr, t->size );
+    free(t);    
+}
+
+static int __mfn_mapper_flush_queue(mfn_mapper_t *t)
+{
+    int rc;
+    rc = ioctl( t->xc_handle, IOCTL_PRIVCMD_MMAP, &t->ioctl );
+    t->ioctl.num = 0;    
+    if(rc && !t->error) 
+	t->error = rc;
+    return rc;
+}
+
+int mfn_mapper_flush_queue(mfn_mapper_t *t)
+{
+    int rc;
+    
+    rc = __mfn_mapper_flush_queue(t);
+
+    if ( t->error )
+    {
+	rc = t->error;
+    }
+
+    t->error = 0;
+    return rc;
+}
+
+void * mfn_mapper_queue_entry(mfn_mapper_t *t, int offset, 
+			      unsigned long mfn, int size)
+{
+    privcmd_mmap_entry_t *entry, *prev;
+    int pages;
+
+    offset &= PAGE_MASK;
+    pages =(size+PAGE_SIZE-1)>>PAGE_SHIFT;
+    entry = &t->ioctl.entry[t->ioctl.num];       
+
+    if ( t->ioctl.num > 0 )
+    {
+	prev = &t->ioctl.entry[t->ioctl.num-1];       
+
+	if ( (prev->va+(prev->npages*PAGE_SIZE)) == 
+	     ((unsigned long)t->addr+offset) &&
+	     (prev->mfn+prev->npages) == mfn )
+	{
+	    prev->npages += pages;
+	    return t->addr+offset;
+	}
+    }
+     
+    entry->va = (unsigned long)t->addr+offset;
+    entry->mfn = mfn;
+    entry->npages = pages;
+    t->ioctl.num++;       
+
+    if(t->ioctl.num == t->max_queue_size)
+    {
+	if ( __mfn_mapper_flush_queue(t) )
+	    return 0;
+    }
+
+    return t->addr+offset;
+}
+
+
+/*******************/
+
+#if 0
+
+mfn_typer_t *mfn_typer_init(int xc_handle, domid_t dom, int num )
+{
+    mfn_typer_t *t;
+    multicall_entry_t *m;
+    dom0_op_compact_getpageframeinfo_t *d;
+
+    t = calloc(1, sizeof(mfn_typer_t) );
+    m = calloc(num, sizeof(multicall_entry_t));
+    d = calloc(num, sizeof(dom0_op_compact_getpageframeinfo_t));
+
+    if (!t || !m || !d)
+    {
+	if(t) free(t);	
+	if(m) free(m);
+	if(d) free(d);
+	return NULL;
+    }
+
+printf("sizeof(m)=%d sizeof(d)=%d m=%p d=%p\n",sizeof(multicall_entry_t), sizeof(dom0_op_compact_getpageframeinfo_t),m,d);
+
+    if ( (mlock(m, sizeof(multicall_entry_t)*num ) != 0) || 
+	 (mlock(d, sizeof(dom0_op_compact_getpageframeinfo_t)*num ) != 0) )
+    {
+        PERROR("Could not lock memory for Xen hypercall");
+        return NULL;
+    }
+    
+    t->xc_handle = xc_handle;
+    t->max = num;
+    t->nr_multicall_ents=0;
+    t->multicall_list=m;
+    t->gpf_list=d;
+    t->dom = dom;
+
+    return t;
+}
+
+void mfn_typer_queue_entry(mfn_typer_t *t, unsigned long mfn )
+{
+    int i = t->nr_multicall_ents;
+    multicall_entry_t *m = &t->multicall_list[i];
+    dom0_op_compact_getpageframeinfo_t *d = &t->gpf_list[i];
+
+    d->cmd = DOM0_GETPAGEFRAMEINFO;
+    d->interface_version = DOM0_INTERFACE_VERSION;
+    d->getpageframeinfo.pfn = mfn;
+    d->getpageframeinfo.domain = t->dom;
+    d->getpageframeinfo.type = 1000; //~0UL;
+      
+    m->op = __HYPERVISOR_dom0_op;
+    m->args[0] = (unsigned long)d;
+   
+    t->nr_multicall_ents++;
+}
+
+int mfn_typer_flush_queue(mfn_typer_t *t)
+{
+    if (t->nr_multicall_ents == 0) return 0;
+    do_multicall_op(t->xc_handle, t->multicall_list, t->nr_multicall_ents);
+    t->nr_multicall_ents = 0;
+}
+
+unsigned int mfn_typer_get_result(mfn_typer_t *t, int idx)
+{
+    return t->gpf_list[idx].getpageframeinfo.type;
+}
+
+#endif
+
+/* NB: arr must be mlock'ed */
+
+int get_pfn_type_batch(int xc_handle, 
+		       u64 dom, int num, unsigned long *arr)
+{
+    dom0_op_t op;
+    op.cmd = DOM0_GETPAGEFRAMEINFO2;
+    op.u.getpageframeinfo2.domain = (domid_t)dom;
+    op.u.getpageframeinfo2.num    = num;
+    op.u.getpageframeinfo2.array  = arr;
+    return do_dom0_op(xc_handle, &op);
+}
+
+#define GETPFN_ERR (~0U)
+unsigned int get_pfn_type(int xc_handle, 
+			  unsigned long mfn, 
+			  u64 dom)
+{
+    dom0_op_t op;
+    op.cmd = DOM0_GETPAGEFRAMEINFO;
+    op.u.getpageframeinfo.pfn    = mfn;
+    op.u.getpageframeinfo.domain = (domid_t)dom;
+    if ( do_dom0_op(xc_handle, &op) < 0 )
+    {
+        PERROR("Unexpected failure when getting page frame info!");
+        return GETPFN_ERR;
+    }
+    return op.u.getpageframeinfo.type;
+}
+
+
+
+/*******************/
+
 #define FIRST_MMU_UPDATE 2
 
 static int flush_mmu_updates(int xc_handle, mmu_t *mmu)

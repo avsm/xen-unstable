@@ -555,8 +555,11 @@ void deliver_packet(struct sk_buff *skb, net_vif_t *vif)
 
         /* Avoid the fault later. */
 	*sptr = new_pte;
-
 	unmap_domain_mem(sptr);
+
+	if( p->mm.shadow_mode == SHM_logdirty )
+		mark_dirty( &p->mm, new_page-frame_table );
+
 	put_shadow_status(&p->mm);
     }
 
@@ -2153,8 +2156,9 @@ static void get_rx_bufs(net_vif_t *vif)
                               0) != 
                       (PGC_allocated | PGC_tlb_flush_on_type_change | 2)) )
         {
-            DPRINTK("Page held more than once %08x\n", 
-                    buf_page->count_and_flags);
+            DPRINTK("Page held more than once %08x %s\n", 
+                    buf_page->count_and_flags,
+		    (buf_page->u.domain)?buf_page->u.domain->name:"None");
             if ( !get_page_type(buf_page, PGT_writeable_page) )
                 put_page(buf_page);
             else if ( cmpxchg(ptep, pte & ~_PAGE_PRESENT, pte) !=
