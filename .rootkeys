@@ -16,6 +16,7 @@
 3f9e7d63lTwQbp2fnx7yY93epWS-eQ docs/figs/dummy
 3f9e7d564bWFB-Czjv1qdmE6o0GqNg docs/interface.tex
 3f9e7d58t7N6hjjBMxSn-NMxBphchA docs/style.tex
+410144afnSd2Yw68AHGO5gXu2m3y6A docs/user.tex
 40d6ccbfKKBq8jE0ula4eHEzBiQuDA docs/xen_config.html
 3f9e7d5bz8BwYkNuwyiPVu7JJG441A docs/xenstyle.cls
 3f815144d1vI2777JI-dO4wk49Iw7g extras/mini-os/Makefile
@@ -135,6 +136,7 @@
 3f689063nhrIRsMMZjZxMFk7iEINqQ linux-2.4.26-xen-sparse/include/asm-xen/xen_proc.h
 40659defgWA92arexpMGn8X3QMDj3w linux-2.4.26-xen-sparse/include/asm-xen/xor.h
 3f056927gMHl7mWB89rb73JahbhQIA linux-2.4.26-xen-sparse/include/linux/blk.h
+41051ec1m6bJVjZocTG0C0V0O6RsVg linux-2.4.26-xen-sparse/include/linux/blkdev.h
 401c0590D_kwJDU59X8NyvqSv_Cl2A linux-2.4.26-xen-sparse/include/linux/sched.h
 40a248afgI0_JKthdYAe8beVfXSTpQ linux-2.4.26-xen-sparse/include/linux/skbuff.h
 3e5a4e686V0nioX2ZpFf056sgvdiQw linux-2.4.26-xen-sparse/include/linux/sunrpc/debug.h
@@ -442,6 +444,7 @@
 40fcefb38OTgsUKHBpwshLLIsiIaCA tools/sv/images/middle-no-highlight.jpg
 40fcefb32SPtrw36c4S6YGFlLvkKuw tools/sv/images/orb_01.jpg
 40fcefb3Ok5qkX3iM7ZEPVkRInrUpg tools/sv/images/orb_02.jpg
+4104ffca9_GhWOxRE-83uZIad2Z1gg tools/sv/images/pause.png
 41013a82ILk71xLqWFH5ZO5VmOIvBw tools/sv/images/reboot.png
 40fcefb3JnT5XeKTuVF4yUMGOtuNZg tools/sv/images/right-end-highlight.jpg
 40fcefb3-DuYOS7noo2W7b_0p7TOUg tools/sv/images/right-end-no-highlight.jpg
@@ -449,6 +452,7 @@
 40fcefb3dgsa24WLk_BJeYQHrDLuOg tools/sv/images/seperator-right-highlight.jpg
 40fcefb3FtiX4Pd2kT8wDlp8u8xRhQ tools/sv/images/seperator.jpg
 41013a82sUdUqBv8EoAUJii3gsZ-4g tools/sv/images/shutdown.png
+4104ffca-jPHLVOrW0n0VghEXXtKxg tools/sv/images/unpause.png
 40fcefb3yMSrZvApO9ToIi-iQwnchA tools/sv/images/xen.png
 41013a83z27rKvWIxAfUBMVZ1eDCDg tools/sv/inc/script.js
 40fcefb3zGC9XNBkSwTEobCoq8YClA tools/sv/inc/style.css
