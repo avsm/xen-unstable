@@ -20,6 +20,7 @@ PERFCOUNTER_CPU( calls_to_update_va, "calls_to_update_va_map" )
 PERFCOUNTER_CPU( page_faults, "page faults" )
 PERFCOUNTER_CPU( copy_user_faults, "copy_user faults" )
 PERFCOUNTER_CPU( map_domain_mem_count, "map_domain_mem count" )
+PERFCOUNTER_CPU( ptwr_emulations, "writable pt emulations" )
 
 PERFCOUNTER_CPU( shadow_l2_table_count, "shadow_l2_table count" )
 PERFCOUNTER_CPU( shadow_l1_table_count, "shadow_l1_table count" )
@@ -31,3 +32,20 @@ PERFCOUNTER_CPU( shadow_update_va_fail2, "shadow_update_va_fail2" )
 /* STATUS counters do not reset when 'P' is hit */
 PERFSTATUS( shadow_l2_pages, "current # shadow L2 pages" )
 PERFSTATUS( shadow_l1_pages, "current # shadow L1 pages" )
+PERFSTATUS( hl2_table_pages, "current # hl2 pages" )
+
+PERFCOUNTER_CPU( check_pagetable, "calls to check_pagetable" )
+PERFCOUNTER_CPU( check_all_pagetables, "calls to check_all_pagetables" )
+
+#define PERFC_MAX_PT_UPDATES 64
+#define PERFC_PT_UPDATES_BUCKET_SIZE 3
+PERFCOUNTER_ARRAY( wpt_updates, "writable pt updates", PERFC_MAX_PT_UPDATES )
+PERFCOUNTER_ARRAY( bpt_updates, "batched pt updates", PERFC_MAX_PT_UPDATES )
+
+PERFCOUNTER_ARRAY( hypercalls, "hypercalls", NR_hypercalls )
+PERFCOUNTER_ARRAY( exceptions, "exceptions", 32 )
+
+#define VMX_PERF_EXIT_REASON_SIZE 37
+#define VMX_PERF_VECTOR_SIZE 0x20
+PERFCOUNTER_ARRAY( vmexits, "vmexits", VMX_PERF_EXIT_REASON_SIZE )
+PERFCOUNTER_ARRAY( cause_vector, "cause vector", VMX_PERF_VECTOR_SIZE )
