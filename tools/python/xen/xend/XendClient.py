@@ -13,6 +13,8 @@ import types
 from StringIO import StringIO
 import urlparse
 
+from twisted.protocols import http
+
 from encode import *
 import sxp
 import PrettyPrint
@@ -121,9 +123,9 @@ def xend_request(url, method, data=None):
     resp = conn.getresponse()
     if DEBUG: print resp.status, resp.reason
     if DEBUG: print resp.msg.headers
-    if resp.status in [204, 404]:
+    if resp.status in [ http.NO_CONTENT ]:
         return None
-    if resp.status not in [200, 201, 202, 203]:
+    if resp.status not in [ http.OK, http.CREATED, http.ACCEPTED ]:
         raise XendError(resp.reason)
     pin = sxp.Parser()
     data = resp.read()
@@ -135,8 +137,8 @@ def xend_request(url, method, data=None):
     val = pin.get_val()
     #if isinstance(val, types.ListType) and sxp.name(val) == 'val':
     #    val = val[1]
-    if isinstance(val, types.ListType) and sxp.name(val) == 'err':
-        raise RuntimeError(val[1])
+    if isinstance(val, types.ListType) and sxp.name(val) == 'xend.err':
+        raise XendError(val[1])
     if DEBUG: print '**val='; sxp.show(val); print
     return val
 
@@ -213,12 +215,12 @@ class Xend:
     def xend_node_cpu_bvt_slice_set(self, ctx_allow):
         return xend_call(self.nodeurl(),
                          {'op'      : 'cpu_bvt_slice_set',
-                          'ctx_allow'   : ctx_allow })
+                          'ctx_allow' : ctx_allow })
     
     def xend_node_cpu_fbvt_slice_set(self, ctx_allow):
         return xend_call(self.nodeurl(),
                          {'op'      : 'cpu_fbvt_slice_set',
-                          'ctx_allow'   : ctx_allow })
+                          'ctx_allow' : ctx_allow })
 
     def xend_domains(self):
         return xend_get(self.domainurl())
@@ -228,21 +230,26 @@ class Xend:
                          {'op'      : 'create',
                           'config'  : fileof(conf) })
 
-    def xend_domain(self, id):
-        return xend_get(self.domainurl(id))
+    def xend_domain_restore(self, filename):
+        return xend_call(self.domainurl(),
+                         {'op'      : 'restore',
+                          'file'    : filename })
 
     def xend_domain_configure(self, id, config):
         return xend_call(self.domainurl(id),
                          {'op'      : 'configure',
                           'config'  : fileof(conf) })
 
+    def xend_domain(self, id):
+        return xend_get(self.domainurl(id))
+
     def xend_domain_unpause(self, id):
         return xend_call(self.domainurl(id),
-                         {'op'      : 'unpause'})
+                         {'op'      : 'unpause' })
 
     def xend_domain_pause(self, id):
         return xend_call(self.domainurl(id),
-                         {'op'      : 'pause'})
+                         {'op'      : 'pause' })
 
     def xend_domain_shutdown(self, id, reason):
         return xend_call(self.domainurl(id),
@@ -251,27 +258,22 @@ class Xend:
 
     def xend_domain_destroy(self, id):
         return xend_call(self.domainurl(id),
-                         {'op'      : 'destroy'})
+                         {'op'      : 'destroy' })
 
     def xend_domain_save(self, id, filename):
         return xend_call(self.domainurl(id),
                          {'op'      : 'save',
-                          'file'    : filename})
-
-    def xend_domain_restore(self, id, filename):
-        return xend_call(self.domainurl(id),
-                         {'op'      : 'restore',
                           'file'    : filename })
 
     def xend_domain_migrate(self, id, dst):
         return xend_call(self.domainurl(id),
                          {'op'      : 'migrate',
-                          'destination': dst})
+                          'destination': dst })
 
     def xend_domain_pincpu(self, id, cpu):
         return xend_call(self.domainurl(id),
                          {'op'      : 'pincpu',
-                          'cpu'     : cpu})
+                          'cpu'     : cpu })
 
     def xend_domain_cpu_bvt_set(self, id, mcuadv, warp, warpl, warpu):
         return xend_call(self.domainurl(id),
@@ -302,12 +304,11 @@ class Xend:
         return xend_get(self.domainurl(id),
                         { 'op'      : 'vifs' })
     
-    def xend_domain_vif_ip_add(self, id, vif, ipaddr):
-        return xend_call(self.domainurl(id),
-                         {'op'      : 'vif_ip_add',
-                          'vif'     : vif,
-                          'ip'      : ipaddr })
-        
+    def xend_domain_vif(self, id, vif):
+        return xend_get(self.domainurl(id),
+                        { 'op'      : 'vif',
+                          'vif'     : vif })
+    
     def xend_domain_vbds(self, id):
         return xend_get(self.domainurl(id),
                         {'op'       : 'vbds'})
@@ -315,7 +316,18 @@ class Xend:
     def xend_domain_vbd(self, id, vbd):
         return xend_get(self.domainurl(id),
                         {'op'       : 'vbd',
-                         'vbd'      : vbd})
+                         'vbd'      : vbd })
+
+    def xend_domain_device_create(self, id, config):
+        return xend_call(self.domainurl(id),
+                         {'op'      : 'device_create',
+                          'config'  : fileof(config) })
+
+    def xend_domain_device_destroy(self, id, type, idx):
+        return xend_call(self.domainurl(id),
+                         {'op'      : 'device_destroy',
+                          'type'    : type,
+                          'index'   : idx })
 
     def xend_consoles(self):
         return xend_get(self.consoleurl())
@@ -335,7 +347,7 @@ class Xend:
 
     def xend_vnet_delete(self, id):
         return xend_call(self.vneturl(id),
-                         {'op': 'delete'})
+                         {'op': 'delete' })
 
     def xend_event_inject(self, sxpr):
         val = xend_call(self.eventurl(),
