@@ -240,8 +240,8 @@ static inline int do_trap(int trapnr, char *str,
                           struct xen_regs *regs, 
                           int use_error_code)
 {
-    struct domain *d = current;
-    struct trap_bounce *tb = &d->thread.trap_bounce;
+    struct exec_domain *ed = current;
+    struct trap_bounce *tb = &ed->thread.trap_bounce;
     trap_info_t *ti;
     unsigned long fixup;
 
@@ -260,7 +260,7 @@ static inline int do_trap(int trapnr, char *str,
         tb->error_code = regs->error_code;
     }
     if ( TI_GET_IF(ti) )
-        d->shared_info->vcpu_data[0].evtchn_upcall_mask = 1;
+        ed->vcpu_info->evtchn_upcall_mask = 1;
     return 0;
 
  xen_fault:
@@ -307,8 +307,8 @@ DO_ERROR_NOCODE(19, "simd error", simd_coprocessor_error)
 
 asmlinkage int do_int3(struct xen_regs *regs)
 {
-    struct domain *d = current;
-    struct trap_bounce *tb = &d->thread.trap_bounce;
+    struct exec_domain *ed = current;
+    struct trap_bounce *tb = &ed->thread.trap_bounce;
     trap_info_t *ti;
 
     DEBUGGER_trap_entry(TRAP_int3, regs);
@@ -325,7 +325,7 @@ asmlinkage int do_int3(struct xen_regs *regs)
     tb->cs    = ti->cs;
     tb->eip   = ti->address;
     if ( TI_GET_IF(ti) )
-        d->shared_info->vcpu_data[0].evtchn_upcall_mask = 1;
+        ed->vcpu_info->evtchn_upcall_mask = 1;
 
     return 0;
 }
@@ -371,10 +371,12 @@ asmlinkage int do_page_fault(struct xen_regs *regs)
 {
     trap_info_t *ti;
     unsigned long off, addr, fixup;
-    struct domain *d = current;
+    struct exec_domain *ed = current;
+    struct domain *d = ed->domain;
     extern int map_ldt_shadow_page(unsigned int);
-    struct trap_bounce *tb = &d->thread.trap_bounce;
-    int cpu = d->processor;
+    struct trap_bounce *tb = &ed->thread.trap_bounce;
+    int cpu = ed->processor;
+    int ret;
 
     __asm__ __volatile__ ("movl %%cr2,%0" : "=r" (addr) : );
 
@@ -388,7 +390,9 @@ asmlinkage int do_page_fault(struct xen_regs *regs)
              unlikely((addr >> L2_PAGETABLE_SHIFT) ==
                       ptwr_info[cpu].ptinfo[PTWR_PT_ACTIVE].l2_idx) )
         {
+            LOCK_BIGLOCK(d);
             ptwr_flush(PTWR_PT_ACTIVE);
+            UNLOCK_BIGLOCK(d);
             return EXCRET_fault_fixed;
         }
 
@@ -396,40 +400,43 @@ asmlinkage int do_page_fault(struct xen_regs *regs)
              ((regs->error_code & 3) == 3) && /* write-protection fault */
              ptwr_do_page_fault(addr) )
         {
-            if ( unlikely(d->mm.shadow_mode) )
+            if ( unlikely(ed->mm.shadow_mode) )
                 (void)shadow_fault(addr, regs->error_code);
             return EXCRET_fault_fixed;
         }
     }
 
-    if ( unlikely(d->mm.shadow_mode) && 
+    if ( unlikely(ed->mm.shadow_mode) && 
          (addr < PAGE_OFFSET) && shadow_fault(addr, regs->error_code) )
         return EXCRET_fault_fixed;
 
-    if ( unlikely(addr >= LDT_VIRT_START) && 
-         (addr < (LDT_VIRT_START + (d->mm.ldt_ents*LDT_ENTRY_SIZE))) )
+    if ( unlikely(addr >= LDT_VIRT_START(ed)) && 
+         (addr < (LDT_VIRT_START(ed) + (ed->mm.ldt_ents*LDT_ENTRY_SIZE))) )
     {
         /*
          * Copy a mapping from the guest's LDT, if it is valid. Otherwise we
          * send the fault up to the guest OS to be handled.
          */
-        off  = addr - LDT_VIRT_START;
-        addr = d->mm.ldt_base + off;
-        if ( likely(map_ldt_shadow_page(off >> PAGE_SHIFT)) )
+        LOCK_BIGLOCK(d);
+        off  = addr - LDT_VIRT_START(ed);
+        addr = ed->mm.ldt_base + off;
+        ret = map_ldt_shadow_page(off >> PAGE_SHIFT);
+        UNLOCK_BIGLOCK(d);
+        if ( likely(ret) )
             return EXCRET_fault_fixed; /* successfully copied the mapping */
     }
 
     if ( unlikely(!(regs->cs & 3)) )
         goto xen_fault;
 
-    ti = d->thread.traps + 14;
+    ti = ed->thread.traps + 14;
     tb->flags = TBF_EXCEPTION | TBF_EXCEPTION_ERRCODE | TBF_EXCEPTION_CR2;
     tb->cr2        = addr;
     tb->error_code = regs->error_code;
     tb->cs         = ti->cs;
     tb->eip        = ti->address;
     if ( TI_GET_IF(ti) )
-        d->shared_info->vcpu_data[0].evtchn_upcall_mask = 1;
+        ed->vcpu_info->evtchn_upcall_mask = 1;
     return 0; 
 
  xen_fault:
@@ -437,7 +444,7 @@ asmlinkage int do_page_fault(struct xen_regs *regs)
     if ( likely((fixup = search_exception_table(regs->eip)) != 0) )
     {
         perfc_incrc(copy_user_faults);
-        if ( !d->mm.shadow_mode )
+        if ( !ed->mm.shadow_mode )
             DPRINTK("Page fault: %08x -> %08lx\n", regs->eip, fixup);
         regs->eip = fixup;
         return 0;
@@ -472,8 +479,9 @@ asmlinkage int do_page_fault(struct xen_regs *regs)
 
 asmlinkage int do_general_protection(struct xen_regs *regs)
 {
-    struct domain *d = current;
-    struct trap_bounce *tb = &d->thread.trap_bounce;
+    struct exec_domain *ed = current;
+    struct domain *d = ed->domain;
+    struct trap_bounce *tb = &ed->thread.trap_bounce;
     trap_info_t *ti;
     unsigned long fixup;
 
@@ -530,7 +538,7 @@ asmlinkage int do_general_protection(struct xen_regs *regs)
     tb->cs         = ti->cs;
     tb->eip        = ti->address;
     if ( TI_GET_IF(ti) )
-        d->shared_info->vcpu_data[0].evtchn_upcall_mask = 1;
+        ed->vcpu_info->evtchn_upcall_mask = 1;
     return 0;
 
  gp_in_kernel:
@@ -592,10 +600,10 @@ static void nmi_softirq(void)
         return;
 
     if ( test_and_clear_bit(0, &nmi_softirq_reason) )
-        send_guest_virq(dom0, VIRQ_PARITY_ERR);
+        send_guest_virq(dom0->exec_domain[0], VIRQ_PARITY_ERR);
 
     if ( test_and_clear_bit(1, &nmi_softirq_reason) )
-        send_guest_virq(dom0, VIRQ_IO_ERR);
+        send_guest_virq(dom0->exec_domain[0], VIRQ_IO_ERR);
 }
 
 asmlinkage int math_state_restore(struct xen_regs *regs)
@@ -603,16 +611,16 @@ asmlinkage int math_state_restore(struct xen_regs *regs)
     /* Prevent recursion. */
     clts();
 
-    if ( !test_bit(DF_USEDFPU, &current->flags) )
+    if ( !test_bit(EDF_USEDFPU, &current->ed_flags) )
     {
-        if ( test_bit(DF_DONEFPUINIT, &current->flags) )
+        if ( test_bit(EDF_DONEFPUINIT, &current->ed_flags) )
             restore_fpu(current);
         else
             init_fpu();
-        set_bit(DF_USEDFPU, &current->flags); /* so we fnsave on switch_to() */
+        set_bit(EDF_USEDFPU, &current->ed_flags); /* so we fnsave on switch_to() */
     }
 
-    if ( test_and_clear_bit(DF_GUEST_STTS, &current->flags) )
+    if ( test_and_clear_bit(EDF_GUEST_STTS, &current->ed_flags) )
     {
         struct trap_bounce *tb = &current->thread.trap_bounce;
         tb->flags      = TBF_EXCEPTION;
@@ -626,7 +634,7 @@ asmlinkage int math_state_restore(struct xen_regs *regs)
 asmlinkage int do_debug(struct xen_regs *regs)
 {
     unsigned int condition;
-    struct domain *d = current;
+    struct exec_domain *d = current;
     struct trap_bounce *tb = &d->thread.trap_bounce;
 
     DEBUGGER_trap_entry(TRAP_debug, regs);
@@ -802,9 +810,12 @@ long do_set_trap_table(trap_info_t *traps)
     trap_info_t cur;
     trap_info_t *dst = current->thread.traps;
 
+    LOCK_BIGLOCK(current->domain);
+
     for ( ; ; )
     {
-        hypercall_may_preempt(__HYPERVISOR_set_trap_table, 1, traps);
+        locked_hypercall_may_preempt(current->domain,
+                                     __HYPERVISOR_set_trap_table, 1, traps);
 
         if ( copy_from_user(&cur, traps, sizeof(cur)) ) return -EFAULT;
 
@@ -816,6 +827,8 @@ long do_set_trap_table(trap_info_t *traps)
         traps++;
     }
 
+    UNLOCK_BIGLOCK(current->domain);
+
     return 0;
 }
 
@@ -825,7 +838,7 @@ long do_set_callbacks(unsigned long event_selector,
                       unsigned long failsafe_selector,
                       unsigned long failsafe_address)
 {
-    struct domain *d = current;
+    struct exec_domain *d = current;
 
     if ( !VALID_CODESEL(event_selector) || !VALID_CODESEL(failsafe_selector) )
         return -EPERM;
@@ -839,7 +852,7 @@ long do_set_callbacks(unsigned long event_selector,
 }
 
 
-long set_fast_trap(struct domain *p, int idx)
+long set_fast_trap(struct exec_domain *p, int idx)
 {
     trap_info_t *ti;
 
@@ -892,13 +905,13 @@ long do_set_fast_trap(int idx)
 
 long do_fpu_taskswitch(void)
 {
-    set_bit(DF_GUEST_STTS, &current->flags);
+    set_bit(EDF_GUEST_STTS, &current->ed_flags);
     stts();
     return 0;
 }
 
 
-long set_debugreg(struct domain *p, int reg, unsigned long value)
+long set_debugreg(struct exec_domain *p, int reg, unsigned long value)
 {
     int i;
 

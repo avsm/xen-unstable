@@ -90,8 +90,8 @@ void continue_cpu_idle_loop(void)
 void startup_cpu_idle_loop(void)
 {
     /* Just some sanity to ensure that the scheduler is set up okay. */
-    ASSERT(current->id == IDLE_DOMAIN_ID);
-    domain_unpause_by_systemcontroller(current);
+    ASSERT(current->domain->id == IDLE_DOMAIN_ID);
+    domain_unpause_by_systemcontroller(current->domain);
     __enter_scheduler();
 
     /*
@@ -212,33 +212,36 @@ void machine_halt(void)
 
 void free_perdomain_pt(struct domain *d)
 {
-    free_xenheap_page((unsigned long)d->mm.perdomain_pt);
+    free_xenheap_page((unsigned long)d->mm_perdomain_pt);
 }
 
-void arch_do_createdomain(struct domain *d)
+void arch_do_createdomain(struct exec_domain *ed)
 {
+    struct domain *d = ed->domain;
     d->shared_info = (void *)alloc_xenheap_page();
     memset(d->shared_info, 0, PAGE_SIZE);
+    ed->vcpu_info = &d->shared_info->vcpu_data[ed->eid];
     d->shared_info->arch.mfn_to_pfn_start = 
 	virt_to_phys(&machine_to_phys_mapping[0])>>PAGE_SHIFT;
     SHARE_PFN_WITH_DOMAIN(virt_to_page(d->shared_info), d);
     machine_to_phys_mapping[virt_to_phys(d->shared_info) >> 
                            PAGE_SHIFT] = INVALID_P2M_ENTRY;
 
-    d->mm.perdomain_pt = (l1_pgentry_t *)alloc_xenheap_page();
-    memset(d->mm.perdomain_pt, 0, PAGE_SIZE);
-    machine_to_phys_mapping[virt_to_phys(d->mm.perdomain_pt) >> 
+    d->mm_perdomain_pt = (l1_pgentry_t *)alloc_xenheap_page();
+    memset(d->mm_perdomain_pt, 0, PAGE_SIZE);
+    machine_to_phys_mapping[virt_to_phys(d->mm_perdomain_pt) >> 
                            PAGE_SHIFT] = INVALID_P2M_ENTRY;
+    ed->mm.perdomain_ptes = d->mm_perdomain_pt;
 }
 
-int arch_final_setup_guestos(struct domain *d, full_execution_context_t *c)
+int arch_final_setup_guestos(struct exec_domain *d, full_execution_context_t *c)
 {
     unsigned long phys_basetab;
     int i, rc;
 
-    clear_bit(DF_DONEFPUINIT, &d->flags);
+    clear_bit(EDF_DONEFPUINIT, &d->ed_flags);
     if ( c->flags & ECF_I387_VALID )
-        set_bit(DF_DONEFPUINIT, &d->flags);
+        set_bit(EDF_DONEFPUINIT, &d->ed_flags);
 
     memcpy(&d->thread.user_ctxt,
            &c->cpu_ctxt,
@@ -283,7 +286,7 @@ int arch_final_setup_guestos(struct domain *d, full_execution_context_t *c)
     
     phys_basetab = c->pt_base;
     d->mm.pagetable = mk_pagetable(phys_basetab);
-    if ( !get_page_and_type(&frame_table[phys_basetab>>PAGE_SHIFT], d, 
+    if ( !get_page_and_type(&frame_table[phys_basetab>>PAGE_SHIFT], d->domain, 
                             PGT_base_page_table) )
         return -EINVAL;
 
@@ -304,7 +307,7 @@ int arch_final_setup_guestos(struct domain *d, full_execution_context_t *c)
 
 #if defined(__i386__)
 
-void new_thread(struct domain *d,
+void new_thread(struct exec_domain *d,
                 unsigned long start_pc,
                 unsigned long start_stack,
                 unsigned long start_info)
@@ -342,7 +345,7 @@ void new_thread(struct domain *d,
 			:"r" (thread->debugreg[register]))
 
 
-void switch_to(struct domain *prev_p, struct domain *next_p)
+void switch_to(struct exec_domain *prev_p, struct exec_domain *next_p)
 {
     struct thread_struct *next = &next_p->thread;
     struct tss_struct *tss = init_tss + smp_processor_id();
@@ -352,7 +355,7 @@ void switch_to(struct domain *prev_p, struct domain *next_p)
     __cli();
 
     /* Switch guest general-register state. */
-    if ( !is_idle_task(prev_p) )
+    if ( !is_idle_task(prev_p->domain) )
     {
         memcpy(&prev_p->thread.user_ctxt,
                stack_ec, 
@@ -361,7 +364,7 @@ void switch_to(struct domain *prev_p, struct domain *next_p)
         CLEAR_FAST_TRAP(&prev_p->thread);
     }
 
-    if ( !is_idle_task(next_p) )
+    if ( !is_idle_task(next_p->domain) )
     {
         memcpy(stack_ec,
                &next_p->thread.user_ctxt,
@@ -506,6 +509,8 @@ static void relinquish_list(struct domain *d, struct list_head *list)
 
 void domain_relinquish_memory(struct domain *d)
 {
+    struct exec_domain *ed;
+
     audit_domain(d);
 
     /* Ensure that noone is running over the dead domain's page tables. */
@@ -515,15 +520,18 @@ void domain_relinquish_memory(struct domain *d)
     shadow_mode_disable(d);
 
     /* Drop the in-use reference to the page-table base. */
-    if ( pagetable_val(d->mm.pagetable) != 0 )
-        put_page_and_type(&frame_table[pagetable_val(d->mm.pagetable) >>
-                                      PAGE_SHIFT]);
+    for_each_exec_domain(d, ed) {
+        if ( pagetable_val(ed->mm.pagetable) != 0 )
+            put_page_and_type(&frame_table[pagetable_val(ed->mm.pagetable) >>
+                                           PAGE_SHIFT]);
+    }
 
     /*
      * Relinquish GDT mappings. No need for explicit unmapping of the LDT as 
      * it automatically gets squashed when the guest's mappings go away.
      */
-    destroy_gdt(d);
+    for_each_exec_domain(d, ed)
+        destroy_gdt(ed);
 
     /* Relinquish every page of memory. */
     relinquish_list(d, &d->xenpage_list);
@@ -548,6 +556,7 @@ int construct_dom0(struct domain *p,
     l1_pgentry_t *l1tab = NULL, *l1start = NULL;
     struct pfn_info *page = NULL;
     start_info_t *si;
+    struct exec_domain *ed = p->exec_domain[0];
 
     /*
      * This fully describes the memory layout of the initial domain. All 
@@ -575,7 +584,7 @@ int construct_dom0(struct domain *p,
     /* Sanity! */
     if ( p->id != 0 ) 
         BUG();
-    if ( test_bit(DF_CONSTRUCTED, &p->flags) ) 
+    if ( test_bit(DF_CONSTRUCTED, &p->d_flags) ) 
         BUG();
 
     memset(&dsi, 0, sizeof(struct domain_setup_info));
@@ -713,18 +722,18 @@ int construct_dom0(struct domain *p,
 
     mpt_alloc = (vpt_start - dsi.v_start) + alloc_start;
 
-    SET_GDT_ENTRIES(p, DEFAULT_GDT_ENTRIES);
-    SET_GDT_ADDRESS(p, DEFAULT_GDT_ADDRESS);
+    SET_GDT_ENTRIES(ed, DEFAULT_GDT_ENTRIES);
+    SET_GDT_ADDRESS(ed, DEFAULT_GDT_ADDRESS);
 
     /*
      * We're basically forcing default RPLs to 1, so that our "what privilege
      * level are we returning to?" logic works.
      */
-    p->thread.failsafe_selector = FLAT_GUESTOS_CS;
-    p->thread.event_selector    = FLAT_GUESTOS_CS;
-    p->thread.guestos_ss = FLAT_GUESTOS_DS;
+    ed->thread.failsafe_selector = FLAT_GUESTOS_CS;
+    ed->thread.event_selector    = FLAT_GUESTOS_CS;
+    ed->thread.guestos_ss = FLAT_GUESTOS_DS;
     for ( i = 0; i < 256; i++ ) 
-        p->thread.traps[i].cs = FLAT_GUESTOS_CS;
+        ed->thread.traps[i].cs = FLAT_GUESTOS_CS;
 
     /* WARNING: The new domain must have its 'processor' field filled in! */
     l2start = l2tab = (l2_pgentry_t *)mpt_alloc; mpt_alloc += PAGE_SIZE;
@@ -732,8 +741,8 @@ int construct_dom0(struct domain *p,
     l2tab[LINEAR_PT_VIRT_START >> L2_PAGETABLE_SHIFT] =
         mk_l2_pgentry((unsigned long)l2start | __PAGE_HYPERVISOR);
     l2tab[PERDOMAIN_VIRT_START >> L2_PAGETABLE_SHIFT] =
-        mk_l2_pgentry(__pa(p->mm.perdomain_pt) | __PAGE_HYPERVISOR);
-    p->mm.pagetable = mk_pagetable((unsigned long)l2start);
+        mk_l2_pgentry(__pa(p->mm_perdomain_pt) | __PAGE_HYPERVISOR);
+    ed->mm.pagetable = mk_pagetable((unsigned long)l2start);
 
     l2tab += l2_table_offset(dsi.v_start);
     mfn = alloc_start >> PAGE_SHIFT;
@@ -804,15 +813,16 @@ int construct_dom0(struct domain *p,
     }
 
     /* Set up shared-info area. */
-    update_dom_time(p->shared_info);
+    update_dom_time(p);
     p->shared_info->domain_time = 0;
     /* Mask all upcalls... */
     for ( i = 0; i < MAX_VIRT_CPUS; i++ )
         p->shared_info->vcpu_data[i].evtchn_upcall_mask = 1;
+    p->shared_info->n_vcpu = 1;
 
     /* Install the new page tables. */
     __cli();
-    write_ptbase(&p->mm);
+    write_ptbase(&ed->mm);
 
     /* Copy the OS image. */
     (void)loadelfimage(image_start);
@@ -877,9 +887,9 @@ int construct_dom0(struct domain *p,
     /* DOM0 gets access to everything. */
     physdev_init_dom0(p);
 
-    set_bit(DF_CONSTRUCTED, &p->flags);
+    set_bit(DF_CONSTRUCTED, &p->d_flags);
 
-    new_thread(p, dsi.v_kernentry, vstack_end, vstartinfo_start);
+    new_thread(ed, dsi.v_kernentry, vstack_end, vstartinfo_start);
 
 #if 0 /* XXXXX DO NOT CHECK IN ENABLED !!! (but useful for testing so leave) */
     shadow_lock(&p->mm);

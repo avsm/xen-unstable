@@ -27,7 +27,7 @@ static long alloc_dom_mem(struct domain *d,
                              nr_extents*sizeof(*extent_list))) )
         return 0;
 
-    if ( (extent_order != 0) && !IS_CAPABLE_PHYSDEV(current) )
+    if ( (extent_order != 0) && !IS_CAPABLE_PHYSDEV(current->domain) )
     {
         DPRINTK("Only I/O-capable domains may allocate > order-0 memory.\n");
         return 0;
@@ -39,7 +39,7 @@ static long alloc_dom_mem(struct domain *d,
             __HYPERVISOR_dom_mem_op, 5,
             MEMOP_increase_reservation,
             &extent_list[i], nr_extents-i, extent_order,
-            (d == current) ? DOMID_SELF : d->id);
+            (d == current->domain) ? DOMID_SELF : d->id);
 
         if ( unlikely((page = alloc_domheap_pages(d, extent_order)) == NULL) )
         {
@@ -73,7 +73,7 @@ static long free_dom_mem(struct domain *d,
             __HYPERVISOR_dom_mem_op, 5,
             MEMOP_decrease_reservation,
             &extent_list[i], nr_extents-i, extent_order,
-            (d == current) ? DOMID_SELF : d->id);
+            (d == current->domain) ? DOMID_SELF : d->id);
 
         if ( unlikely(__get_user(mpfn, &extent_list[i]) != 0) )
             return i;
@@ -117,11 +117,13 @@ long do_dom_mem_op(unsigned int   op,
     long           rc;
 
     if ( likely(domid == DOMID_SELF) )
-        d = current;
-    else if ( unlikely(!IS_PRIV(current)) )
+        d = current->domain;
+    else if ( unlikely(!IS_PRIV(current->domain)) )
         return -EPERM;
     else if ( unlikely((d = find_domain_by_id(domid)) == NULL) )
 	return -ESRCH;
+
+    LOCK_BIGLOCK(d);
 
     switch ( op )
     {
@@ -138,6 +140,8 @@ long do_dom_mem_op(unsigned int   op,
 
     if ( unlikely(domid != DOMID_SELF) )
 	put_domain(d);
+
+    UNLOCK_BIGLOCK(d);
 
     return rc;
 }
