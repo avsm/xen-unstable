@@ -102,7 +102,7 @@ void startup_cpu_idle_loop(void)
 {
     /* Just some sanity to ensure that the scheduler is set up okay. */
     ASSERT(current->domain == IDLE_DOMAIN_ID);
-    domain_unpause_by_systemcontroller(current);
+    domain_unpause_by_systemcontroller(current->domain);
     __enter_scheduler();
 
     /*
@@ -248,6 +248,7 @@ void new_thread(struct exec_domain *ed,
 	regs->pr = 0;
 	sw->pr = 0;
 	regs->ar_pfs = 0;
+	sw->caller_unat = 0;
 	sw->ar_pfs = 0;
 	sw->ar_bspstore = new_rbs;
 	//regs->r13 = (unsigned long) ed;
@@ -670,6 +671,7 @@ void dummy(void)
 }
 
 
+#if 0
 void switch_to(struct exec_domain *prev, struct exec_domain *next)
 {
  	struct exec_domain *last;
@@ -677,6 +679,7 @@ void switch_to(struct exec_domain *prev, struct exec_domain *next)
 	__switch_to(prev,next,last);
 	//set_current(next);
 }
+#endif
 
 void domain_pend_keyboard_interrupt(int irq)
 {
