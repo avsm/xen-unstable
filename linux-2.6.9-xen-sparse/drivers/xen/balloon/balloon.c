@@ -60,6 +60,8 @@
 #include <asm/uaccess.h>
 #include <asm/tlb.h>
 
+#include <linux/list.h>
+
 /* USER DEFINES -- THESE SHOULD BE COPIED TO USER-SPACE TOOLS */
 #define USER_INFLATE_BALLOON  1   /* return mem to hypervisor */
 #define USER_DEFLATE_BALLOON  2   /* claim mem from hypervisor */
@@ -74,11 +76,47 @@ static struct proc_dir_entry *balloon_pde;
 unsigned long credit;
 static unsigned long current_pages, most_seen_pages;
 
-/*
- * Dead entry written into balloon-owned entries in the PMT.
- * It is deliberately different to INVALID_P2M_ENTRY.
- */
-#define DEAD 0xdead1234
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,0)
+/* Use the private and mapping fields of struct page as a list. */
+#define PAGE_TO_LIST(p) ( (struct list_head *)&p->private )
+#define LIST_TO_PAGE(l) ( list_entry( ((unsigned long *)l),   \
+				      struct page, private ) )
+#define UNLIST_PAGE(p)  do { list_del(PAGE_TO_LIST(p));       \
+                             p->mapping = NULL;               \
+                             p->private = 0; } while(0)
+#else
+/* There's a dedicated list field in struct page we can use.    */
+#define PAGE_TO_LIST(p) ( &p->list )
+#define LIST_TO_PAGE(l) ( list_entry(l, struct page, list) )
+#define UNLIST_PAGE(p)  ( list_del(&p->list) )
+#endif
+
+/* List of ballooned pages, threaded through the mem_map array. */
+LIST_HEAD(ballooned_pages);
+
+/** add_ballooned_page - remember we've ballooned a pfn */
+void add_ballooned_page(unsigned long pfn)
+{
+    struct page *p = mem_map + pfn;
+
+    list_add(PAGE_TO_LIST(p), &ballooned_pages);
+}
+
+/* rem_ballooned_page - recall a ballooned page and remove from list. */
+struct page *rem_ballooned_page(void)
+{
+    if(!list_empty(&ballooned_pages))
+    {
+        struct page *ret;
+
+        ret = LIST_TO_PAGE(ballooned_pages.next);
+	UNLIST_PAGE(ret);
+
+        return ret;
+    }
+    else
+        return NULL;
+}
 
 static inline pte_t *get_ptep(unsigned long addr)
 {
@@ -101,6 +139,7 @@ static inline pte_t *get_ptep(unsigned long addr)
 
 /* Main function for relinquishing memory. */
 static unsigned long inflate_balloon(unsigned long num_pages)
+
 {
     unsigned long *parray;
     unsigned long *currp;
@@ -130,6 +169,7 @@ static unsigned long inflate_balloon(unsigned long num_pages)
             currp = parray;
             for ( j = 0; j < i; j++, currp++ )
                 __free_page((struct page *) (mem_map + *currp));
+
             ret = -EFAULT;
             goto cleanup;
         }
@@ -156,7 +196,10 @@ static unsigned long inflate_balloon(unsigned long num_pages)
             kunmap(&mem_map[*currp]);
         }
 #endif
-        phys_to_machine_mapping[*currp] = DEAD;
+
+        add_ballooned_page(*currp);
+
+        phys_to_machine_mapping[*currp] = INVALID_P2M_ENTRY;
         *currp = mfn;
     }
 
@@ -195,28 +238,38 @@ static unsigned long process_returned_pages(unsigned long * parray,
      * incorporated here.
      */
      
-    unsigned long tot_pages = most_seen_pages;   
     unsigned long * curr = parray;
     unsigned long num_installed;
-    unsigned long i;
+
+    struct page *page;
 
     num_installed = 0;
-    for ( i = 0; (i < tot_pages) && (num_installed < num); i++ )
+    while ( (page = rem_ballooned_page()) != NULL )
     {
-        if ( phys_to_machine_mapping[i] == DEAD )
+        unsigned long pfn;
+
+        if ( num_installed == num )
+            break;
+
+        pfn = page - mem_map;
+
+        if(phys_to_machine_mapping[pfn] != INVALID_P2M_ENTRY)
         {
-            phys_to_machine_mapping[i] = *curr;
-            queue_machphys_update(*curr, i);
-            if (i<max_low_pfn)
-              queue_l1_entry_update(
-                get_ptep((unsigned long)__va(i << PAGE_SHIFT)),
-                ((*curr) << PAGE_SHIFT) | pgprot_val(PAGE_KERNEL));
-
-            __free_page(mem_map + i);
-
-            curr++;
-            num_installed++;
+            printk("BUG: Tried to unballoon existing page!");
+            BUG();
         }
+
+        phys_to_machine_mapping[pfn] = *curr;
+        queue_machphys_update(*curr, pfn);
+        if (pfn<max_low_pfn)
+            queue_l1_entry_update(
+                get_ptep((unsigned long)__va(pfn << PAGE_SHIFT)),
+                ((*curr) << PAGE_SHIFT) | pgprot_val(PAGE_KERNEL));
+        
+        __free_page(mem_map + pfn);
+
+        curr++;
+        num_installed++;
     }
 
     return num_installed;

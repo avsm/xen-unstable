@@ -5,7 +5,6 @@ include $(XEN_ROOT)/tools/Make.defs
 CC         = gcc
 CFLAGS     = -Wall -O3 
 
-INCLUDES += -I $(XEN_HYPERVISOR_IFS)
 INCLUDES += -I $(XEN_LINUX_INCLUDE)
 INCLUDES += -I $(XEN_XC)
 INCLUDES += -I $(XEN_LIBXC)
@@ -17,7 +16,7 @@ HDRS     = $(wildcard *.h)
 SRCS     = $(wildcard *.c)
 OBJS     = $(patsubst %.c,%.o,$(SRCS))
 
-TARGETS  = xen_cpuperf
+TARGETS  = 
 
 INSTALL_BIN  = $(TARGETS) xencons
 INSTALL_SBIN = netfix xm xend xensv

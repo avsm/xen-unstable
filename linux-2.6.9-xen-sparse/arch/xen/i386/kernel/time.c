@@ -627,6 +627,8 @@ void __init time_init(void)
 	wall_to_monotonic.tv_nsec = -xtime.tv_nsec;
 	processed_system_time = shadow_system_time;
 
+	if (cur_timer->init(NULL) != 0)
+		BUG();
 	printk(KERN_INFO "Using %s for high-res timesource\n",cur_timer->name);
 
 	time_irq = bind_virq_to_irq(VIRQ_TIMER);
@@ -673,21 +675,26 @@ int set_timeout_timer(void)
 
 void time_suspend(void)
 {
+	/* nothing */
 }
 
+/* No locking required. We are only CPU running, and interrupts are off. */
 void time_resume(void)
 {
-    unsigned long flags;
-    write_seqlock_irqsave(&xtime_lock, flags);
-    /* Get timebases for new environment. */ 
-    __get_time_values_from_xen();
-    /* Reset our own concept of passage of system time. */
-    processed_system_time = shadow_system_time;
-    /* Accept a warp in UTC (wall-clock) time. */
-    last_seen_tv.tv_sec = 0;
-    /* Make sure we resync UTC time with Xen on next timer interrupt. */
-    last_update_from_xen = 0;
-    write_sequnlock_irqrestore(&xtime_lock, flags);
+	if (cur_timer->init(NULL) != 0)
+		BUG();
+
+	/* Get timebases for new environment. */ 
+	__get_time_values_from_xen();
+
+	/* Reset our own concept of passage of system time. */
+	processed_system_time = shadow_system_time;
+
+	/* Accept a warp in UTC (wall-clock) time. */
+	last_seen_tv.tv_sec = 0;
+
+	/* Make sure we resync UTC time with Xen on next timer interrupt. */
+	last_update_from_xen = 0;
 }
 
 /*
