@@ -12,6 +12,7 @@
 
 #include "common.h"
 #include <asm-xen/balloon.h>
+#include <asm-xen/evtchn.h>
 
 static void netif_page_release(struct page *page);
 static void netif_skb_release(struct sk_buff *skb);

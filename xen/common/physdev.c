@@ -125,10 +125,11 @@ int physdev_pci_access_modify(
     domid_t dom, int bus, int dev, int func, int enable)
 {
     struct domain *p;
+    struct exec_domain *ed, *edc;
     struct pci_dev *pdev;
     int i, j, rc = 0;
- 
-    if ( !IS_PRIV(current) )
+
+    if ( !IS_PRIV(current->domain) )
         BUG();
 
     if ( (bus > PCI_BUSMAX) || (dev > PCI_DEVMAX) || (func > PCI_FUNCMAX) )
@@ -145,11 +146,13 @@ int physdev_pci_access_modify(
     if ( (p = find_domain_by_id(dom)) == NULL ) 
         return -ESRCH;
 
+    ed = p->exec_domain[0];     /* XXX */
+
     /* Make the domain privileged. */
-    set_bit(DF_PHYSDEV, &p->flags);
+    set_bit(DF_PHYSDEV, &p->d_flags);
 	/* FIXME: MAW for now make the domain REALLY privileged so that it
 	 * can run a backend driver (hw access should work OK otherwise) */
-	set_bit(DF_PRIVILEGED, &p->flags);
+	set_bit(DF_PRIVILEGED, &p->d_flags);
 
     /* Grant write access to the specified device. */
     if ( (pdev = pci_find_slot(bus, PCI_DEVFN(dev, func))) == NULL )
@@ -169,16 +172,22 @@ int physdev_pci_access_modify(
 
     /* Now, setup access to the IO ports and memory regions for the device. */
 
-    if ( p->thread.io_bitmap == NULL )
+    if ( ed->thread.io_bitmap == NULL )
     {
-        if ( (p->thread.io_bitmap = xmalloc(IOBMP_BYTES)) == NULL )
+        if ( (ed->thread.io_bitmap = xmalloc(IOBMP_BYTES)) == NULL )
         {
             rc = -ENOMEM;
             goto out;
         }
-        memset(p->thread.io_bitmap, 0xFF, IOBMP_BYTES);
+        memset(ed->thread.io_bitmap, 0xFF, IOBMP_BYTES);
 
-        p->thread.io_bitmap_sel = ~0ULL;
+        ed->thread.io_bitmap_sel = ~0ULL;
+
+        for_each_exec_domain(p, edc) {
+            if (edc == ed)
+                continue;
+            edc->thread.io_bitmap = ed->thread.io_bitmap;
+        }
     }
 
     for ( i = 0; i < DEVICE_COUNT_RESOURCE; i++ )
@@ -195,13 +204,20 @@ int physdev_pci_access_modify(
                  "for device %s\n", dom, r->start, r->end, pdev->slot_name);
             for ( j = r->start; j < r->end + 1; j++ )
             {
-                clear_bit(j, p->thread.io_bitmap);
-                clear_bit(j / IOBMP_BITS_PER_SELBIT, &p->thread.io_bitmap_sel);
+                clear_bit(j, ed->thread.io_bitmap);
+                clear_bit(j / IOBMP_BITS_PER_SELBIT, &ed->thread.io_bitmap_sel);
             }
         }
 
         /* rights to IO memory regions are checked when the domain maps them */
     }
+
+    for_each_exec_domain(p, edc) {
+        if (edc == ed)
+            continue;
+        edc->thread.io_bitmap_sel = ed->thread.io_bitmap_sel;
+    }
+
  out:
     put_domain(p);
     return rc;
@@ -489,7 +505,7 @@ static long pci_cfgreg_read(int bus, int dev, int func, int reg,
     int ret;
     phys_dev_t *pdev;
 
-    if ( (ret = check_dev_acc(current, bus, dev, func, &pdev)) != 0 )
+    if ( (ret = check_dev_acc(current->domain, bus, dev, func, &pdev)) != 0 )
     {
         /* PCI spec states that reads from non-existent devices should return
          * all 1s.  In this case the domain has no read access, which should
@@ -554,7 +570,7 @@ static long pci_cfgreg_write(int bus, int dev, int func, int reg,
     int ret;
     phys_dev_t *pdev;
 
-    if ( (ret = check_dev_acc(current, bus, dev, func, &pdev)) != 0 )
+    if ( (ret = check_dev_acc(current->domain, bus, dev, func, &pdev)) != 0 )
         return ret;
 
     /* special treatment for some registers */
@@ -616,7 +632,7 @@ static long pci_probe_root_buses(u32 *busmask)
 
     memset(busmask, 0, 256/8);
 
-    list_for_each ( tmp, &current->pcidev_list )
+    list_for_each ( tmp, &current->domain->pcidev_list )
     {
         pdev = list_entry(tmp, phys_dev_t, node);
         set_bit(pdev->dev->bus->number, busmask);
@@ -660,7 +676,7 @@ long do_physdev_op(physdev_op_t *uop)
         break;
 
     case PHYSDEVOP_PCI_INITIALISE_DEVICE:
-        if ( (ret = check_dev_acc(current, 
+        if ( (ret = check_dev_acc(current->domain, 
                                   op.u.pci_initialise_device.bus, 
                                   op.u.pci_initialise_device.dev, 
                                   op.u.pci_initialise_device.func, 
@@ -673,7 +689,7 @@ long do_physdev_op(physdev_op_t *uop)
         break;
 
     case PHYSDEVOP_IRQ_UNMASK_NOTIFY:
-        ret = pirq_guest_unmask(current);
+        ret = pirq_guest_unmask(current->domain);
         break;
 
     case PHYSDEVOP_IRQ_STATUS_QUERY:
@@ -752,6 +768,6 @@ void physdev_init_dom0(struct domain *p)
         list_add(&pdev->node, &p->pcidev_list);
     }
 
-    set_bit(DF_PHYSDEV, &p->flags);
+    set_bit(DF_PHYSDEV, &p->d_flags);
 }
 
