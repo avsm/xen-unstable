@@ -51,6 +51,7 @@
 #define __HYPERVISOR_vm_assist            21
 #define __HYPERVISOR_update_va_mapping_otherdomain 22
 #define __HYPERVISOR_switch_vm86          23
+#define __HYPERVISOR_boot_vcpu            24
 
 /*
  * MULTICALLS
@@ -67,13 +68,12 @@
  * 
  * Virtual interrupts that a guest OS may receive from Xen.
  */
-#define VIRQ_MISDIRECT  0  /* Catch-all interrupt for unbound VIRQs.      */
-#define VIRQ_TIMER      1  /* Timebase update, and/or requested timeout.  */
-#define VIRQ_DEBUG      2  /* Request guest to dump debug info.           */
-#define VIRQ_CONSOLE    3  /* (DOM0) bytes received on emergency console. */
-#define VIRQ_DOM_EXC    4  /* (DOM0) Exceptional event for some domain.   */
-#define VIRQ_PARITY_ERR 5  /* (DOM0) NMI parity error.                    */
-#define VIRQ_IO_ERR     6  /* (DOM0) NMI I/O error.                       */
+#define VIRQ_TIMER      0  /* Timebase update, and/or requested timeout.  */
+#define VIRQ_DEBUG      1  /* Request guest to dump debug info.           */
+#define VIRQ_CONSOLE    2  /* (DOM0) bytes received on emergency console. */
+#define VIRQ_DOM_EXC    3  /* (DOM0) Exceptional event for some domain.   */
+#define VIRQ_PARITY_ERR 4  /* (DOM0) NMI parity error.                    */
+#define VIRQ_IO_ERR     5  /* (DOM0) NMI I/O error.                       */
 #define NR_VIRQS        7
 
 /*
@@ -253,8 +253,45 @@ typedef struct
 /* Event channel endpoints per domain. */
 #define NR_EVENT_CHANNELS 1024
 
-/* No support for multi-processor guests. */
-#define MAX_VIRT_CPUS 1
+/* Support for multi-processor guests. */
+#define MAX_VIRT_CPUS 32
+
+/*
+ * Per-VCPU information goes here. This will be cleaned up more when Xen 
+ * actually supports multi-VCPU guests.
+ */
+typedef struct vcpu_info_st
+{
+    /*
+     * 'evtchn_upcall_pending' is written non-zero by Xen to indicate
+     * a pending notification for a particular VCPU. It is then cleared 
+     * by the guest OS /before/ checking for pending work, thus avoiding
+     * a set-and-check race. Note that the mask is only accessed by Xen
+     * on the CPU that is currently hosting the VCPU. This means that the
+     * pending and mask flags can be updated by the guest without special
+     * synchronisation (i.e., no need for the x86 LOCK prefix).
+     * This may seem suboptimal because if the pending flag is set by
+     * a different CPU then an IPI may be scheduled even when the mask
+     * is set. However, note:
+     *  1. The task of 'interrupt holdoff' is covered by the per-event-
+     *     channel mask bits. A 'noisy' event that is continually being
+     *     triggered can be masked at source at this very precise
+     *     granularity.
+     *  2. The main purpose of the per-VCPU mask is therefore to restrict
+     *     reentrant execution: whether for concurrency control, or to
+     *     prevent unbounded stack usage. Whatever the purpose, we expect
+     *     that the mask will be asserted only for short periods at a time,
+     *     and so the likelihood of a 'spurious' IPI is suitably small.
+     * The mask is read before making an event upcall to the guest: a
+     * non-zero mask therefore guarantees that the VCPU will not receive
+     * an upcall activation. The mask is cleared when the VCPU requests
+     * to block: this avoids wakeup-waiting races.
+     */
+    u8 evtchn_upcall_pending;
+    u8 evtchn_upcall_mask;
+    u8 pad0, pad1;
+    u32 evtchn_pending_sel;             /* 4 */
+} PACKED vcpu_info_t;                   /* 8 */
 
 /*
  * Xen/guestos shared data -- pointer provided in start_info.
@@ -262,40 +299,9 @@ typedef struct
  */
 typedef struct shared_info_st
 {
-    /*
-     * Per-VCPU information goes here. This will be cleaned up more when Xen 
-     * actually supports multi-VCPU guests.
-     */
-    struct {
-        /*
-         * 'evtchn_upcall_pending' is written non-zero by Xen to indicate
-         * a pending notification for a particular VCPU. It is then cleared 
-         * by the guest OS /before/ checking for pending work, thus avoiding
-         * a set-and-check race. Note that the mask is only accessed by Xen
-         * on the CPU that is currently hosting the VCPU. This means that the
-         * pending and mask flags can be updated by the guest without special
-         * synchronisation (i.e., no need for the x86 LOCK prefix).
-         * This may seem suboptimal because if the pending flag is set by
-         * a different CPU then an IPI may be scheduled even when the mask
-         * is set. However, note:
-         *  1. The task of 'interrupt holdoff' is covered by the per-event-
-         *     channel mask bits. A 'noisy' event that is continually being
-         *     triggered can be masked at source at this very precise
-         *     granularity.
-         *  2. The main purpose of the per-VCPU mask is therefore to restrict
-         *     reentrant execution: whether for concurrency control, or to
-         *     prevent unbounded stack usage. Whatever the purpose, we expect
-         *     that the mask will be asserted only for short periods at a time,
-         *     and so the likelihood of a 'spurious' IPI is suitably small.
-         * The mask is read before making an event upcall to the guest: a
-         * non-zero mask therefore guarantees that the VCPU will not receive
-         * an upcall activation. The mask is cleared when the VCPU requests
-         * to block: this avoids wakeup-waiting races.
-         */
-        u8 evtchn_upcall_pending;
-        u8 evtchn_upcall_mask;
-        u8 pad0, pad1;
-    } PACKED vcpu_data[MAX_VIRT_CPUS];  /*   0 */
+    vcpu_info_t vcpu_data[MAX_VIRT_CPUS];  /*   0 */
+
+    u32 n_vcpu;
 
     /*
      * A domain can have up to 1024 "event channels" on which it can send
@@ -329,7 +335,6 @@ typedef struct shared_info_st
      * word in the PENDING bitfield array.
      */
     u32 evtchn_pending[32];             /*   4 */
-    u32 evtchn_pending_sel;             /* 132 */
     u32 evtchn_mask[32];                /* 136 */
 
     /*
