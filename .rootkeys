@@ -18,6 +18,7 @@
 41c0c4116itF389v0CEWcmzue6zJkA docs/misc/VMX_changes.txt
 4022a73cgxX1ryj1HgS-IwwB6NUi2A docs/misc/XenDebugger-HOWTO
 412f4bd9sm5mCQ8BkrgKcAKZGadq7Q docs/misc/blkif-drivers-explained.txt
+420b949cy9ZGzED74Fz_DaWlK7tT4g docs/misc/crashdb.txt
 40d6ccbfKKBq8jE0ula4eHEzBiQuDA docs/misc/xen_config.html
 410a4c2bAO_m_l4RsiiPHnZ4ixHWbQ docs/misc/xend.tex
 3f9e7d564bWFB-Czjv1qdmE6o0GqNg docs/src/interface.tex
@@ -881,6 +882,7 @@
 3ddb79c4yGZ7_22QAFFwPzqP4NSHwA xen/arch/x86/boot/mkelf32.c
 3ddb79bcSC_LvnmFlX-T5iTgaR0SKg xen/arch/x86/boot/x86_32.S
 40e42bdbNu4MjI750THP_8J1S-Sa0g xen/arch/x86/boot/x86_64.S
+4107c15e-VmEcLsE-7JCXZaabI8C7A xen/arch/x86/cdb.c
 3ddb79bcUrk2EIaM5VsT6wUudH1kkg xen/arch/x86/delay.c
 40e34414WiQO4h2m3tcpaCPn7SyYyg xen/arch/x86/dom0_ops.c
 3ddb79bc1_2bAt67x9MFCP4AZrQnvQ xen/arch/x86/domain.c
@@ -921,6 +923,7 @@
 41f97ef5139vN42cOYHfX_Ac8WOOjA xen/arch/x86/vmx_platform.c
 41c0c4128URE0dxcO15JME_MuKBPfg xen/arch/x86/vmx_vmcs.c
 419cbedeQDg8IrO3izo3o5rQNlo0kQ xen/arch/x86/x86_32/asm-offsets.c
+4107c15e_NqNYew2EXroXz2mgTAMWQ xen/arch/x86/x86_32/cdb_trap.S
 4202391dkvdTZ8GhWXe3Gqf9EOgWXg xen/arch/x86/x86_32/domain_build.c
 3e32af9aRnYGl4GMOaDKp7JdfhOGhg xen/arch/x86/x86_32/domain_page.c
 3ddb79bcecupHj56ZbTa3B0FxDowMg xen/arch/x86/x86_32/entry.S

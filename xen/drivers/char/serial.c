@@ -436,6 +436,7 @@ unsigned char irq_serial_getc(int handle)
     uart_t *uart = &com[handle & SERHND_IDX];
     unsigned char c;
 
+
     while ( uart->rxbufp != uart->rxbufc )
     {
         c = uart->rxbuf[MASK_RXBUF_IDX(uart->rxbufc++)];
