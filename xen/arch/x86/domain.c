@@ -275,6 +275,8 @@ void arch_do_createdomain(struct exec_domain *ed)
             mk_l3_pgentry(__pa(d->arch.mm_perdomain_l2) | __PAGE_HYPERVISOR);
 #endif
 
+        (void)ptwr_init(d);
+
         shadow_lock_init(d);        
     }
 }
@@ -573,7 +575,7 @@ void new_thread(struct exec_domain *d,
 void toggle_guest_mode(struct exec_domain *ed)
 {
     ed->arch.flags ^= TF_kernel_mode;
-    __asm__ __volatile__ ( "swapgs" );
+    __asm__ __volatile__ ( "mfence; swapgs" ); /* AMD erratum #88 */
     update_pagetables(ed);
     write_ptbase(ed);
 }
@@ -657,7 +659,7 @@ static void load_segments(struct exec_domain *p, struct exec_domain *n)
 
     /* If in kernel mode then switch the GS bases around. */
     if ( n->arch.flags & TF_kernel_mode )
-        __asm__ __volatile__ ( "swapgs" );
+        __asm__ __volatile__ ( "mfence; swapgs" ); /* AMD erratum #88 */
 
     if ( unlikely(!all_segs_okay) )
     {
@@ -711,7 +713,9 @@ static void clear_segments(void)
         "movl %0,%%ds; "
         "movl %0,%%es; "
         "movl %0,%%fs; "
-        "movl %0,%%gs; swapgs; movl %0,%%gs"
+        "movl %0,%%gs; "
+        "mfence; swapgs; " /* AMD erratum #88 */
+        "movl %0,%%gs"
         : : "r" (0) );
 }
 
@@ -806,10 +810,14 @@ static void __context_switch(void)
         }
     }
 
-    set_bit(cpu, &n->domain->cpuset);
+    if ( p->domain != n->domain )
+        set_bit(cpu, &n->domain->cpuset);
+
     write_ptbase(n);
     __asm__ __volatile__ ( "lgdt %0" : "=m" (*n->arch.gdt) );
-    clear_bit(cpu, &p->domain->cpuset);
+
+    if ( p->domain != n->domain )
+        clear_bit(cpu, &p->domain->cpuset);
 
     percpu_ctxt[cpu].curr_ed = n;
 }
@@ -934,7 +942,24 @@ unsigned long __hypercall_create_continuation(
     return op;
 }
 
-static void relinquish_list(struct domain *d, struct list_head *list)
+#ifdef CONFIG_VMX
+static void vmx_relinquish_resources(struct exec_domain *ed)
+{
+    if ( !VMX_DOMAIN(ed) )
+        return;
+
+    BUG_ON(ed->arch.arch_vmx.vmcs == NULL);
+    free_vmcs(ed->arch.arch_vmx.vmcs);
+    ed->arch.arch_vmx.vmcs = 0;
+    
+    free_monitor_pagetable(ed);
+    rem_ac_timer(&ed->arch.arch_vmx.vmx_platform.vmx_pit.pit_timer);
+}
+#else
+#define vmx_relinquish_resources(_ed) ((void)0)
+#endif
+
+static void relinquish_memory(struct domain *d, struct list_head *list)
 {
     struct list_head *ent;
     struct pfn_info  *page;
@@ -992,30 +1017,16 @@ static void relinquish_list(struct domain *d, struct list_head *list)
     spin_unlock_recursive(&d->page_alloc_lock);
 }
 
-#ifdef CONFIG_VMX
-static void vmx_domain_relinquish_memory(struct exec_domain *ed)
-{
-    struct vmx_virpit_t *vpit = &(ed->arch.arch_vmx.vmx_platform.vmx_pit);
-    /*
-     * Free VMCS
-     */
-    ASSERT(ed->arch.arch_vmx.vmcs);
-    free_vmcs(ed->arch.arch_vmx.vmcs);
-    ed->arch.arch_vmx.vmcs = 0;
-    
-    free_monitor_pagetable(ed);
-    rem_ac_timer(&(vpit->pit_timer));
-}
-#endif
-
-void domain_relinquish_memory(struct domain *d)
+void domain_relinquish_resources(struct domain *d)
 {
     struct exec_domain *ed;
 
     BUG_ON(d->cpuset != 0);
 
+    ptwr_destroy(d);
+
     /* Release device mappings of other domains */
-    gnttab_release_dev_mappings( d->grant_table );
+    gnttab_release_dev_mappings(d->grant_table);
 
     /* Exit shadow mode before deconstructing final guest page table. */
     shadow_mode_disable(d);
@@ -1036,13 +1047,9 @@ void domain_relinquish_memory(struct domain *d)
                 pagetable_val(ed->arch.guest_table_user) >> PAGE_SHIFT]);
             ed->arch.guest_table_user = mk_pagetable(0);
         }
-    }
 
-#ifdef CONFIG_VMX
-    if ( VMX_DOMAIN(d->exec_domain[0]) )
-        for_each_exec_domain ( d, ed )
-            vmx_domain_relinquish_memory(ed);
-#endif
+        vmx_relinquish_resources(ed);
+    }
 
     /*
      * Relinquish GDT mappings. No need for explicit unmapping of the LDT as 
@@ -1052,8 +1059,8 @@ void domain_relinquish_memory(struct domain *d)
         destroy_gdt(ed);
 
     /* Relinquish every page of memory. */
-    relinquish_list(d, &d->xenpage_list);
-    relinquish_list(d, &d->page_list);
+    relinquish_memory(d, &d->xenpage_list);
+    relinquish_memory(d, &d->page_list);
 }
 
 
