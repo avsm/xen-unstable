@@ -101,9 +101,10 @@ gopts.var('memory', val='MEMORY',
           fn=set_value, default=128,
           use="Domain memory in MB.")
 
-gopts.var('cpu_weight', val='CPU_WEIGHT',
-          fn=set_value, default=1,
-          use="CPU weight.")
+gopts.var('cpu_weight', val='WEIGHT',
+          fn=set_float, default=1,
+          use="""Set the new domain's cpu weight. WEIGHT is a float that controls the
+domain's share of the cpu.""")
 
 gopts.var('console', val='PORT',
           fn=set_int, default=None,
@@ -124,6 +125,14 @@ gopts.var('blkif', val='no|yes',
 gopts.var('netif', val='no|yes',
           fn=set_bool, default=0,
           use="Make the domain a network interface backend.")
+
+gopts.var('vbd_backend', val='DOM',
+          fn=set_value, default=None,
+          use='Set the domain to use for the vbd backend.')
+
+gopts.var('vif_backend', val='DOM',
+          fn=set_value, default=None,
+          use='Set the domain to use for the vif backend.')
 
 gopts.var('disk', val='phy:DEV,VDEV,MODE',
           fn=append_value, default=[],
@@ -311,6 +320,10 @@ def make_config(vals):
         config.append(['backend', ['blkif']])
     if vals.netif:
         config.append(['backend', ['netif']])
+    if vals.vbd_backend:
+        config.append(['backend', ['vbd', ['dom', vals.vbd_backend]]])
+    if vals.vif_backend:
+        config.append(['backend', ['vif', ['dom', vals.vif_backend]]])
     if vals.restart:
         config.append(['restart', vals.restart])
     if vals.console:
