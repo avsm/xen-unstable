@@ -33,318 +33,143 @@
 #include <linux/vmalloc.h>
 #include <asm/page.h>
 #include <asm/pgtable.h>
+#include <asm/tlbflush.h>
 #include <asm-xen/hypervisor.h>
-#include <asm-xen/multicall.h>
 #include <asm-xen/balloon.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,0)
+#include <linux/percpu.h>
+#endif
 
-/*
- * This suffices to protect us if we ever move to SMP domains.
- * Further, it protects us against interrupts. At the very least, this is
- * required for the network driver which flushes the update queue before
- * pushing new receive buffers.
- */
-static spinlock_t update_lock = SPIN_LOCK_UNLOCKED;
-
-/* Linux 2.6 isn't using the traditional batched interface. */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,0)
-#define QUEUE_SIZE 2048
 #define pte_offset_kernel pte_offset
-#define pmd_val_ma(v) (v).pmd;
 #define pud_t pgd_t
 #define pud_offset(d, va) d
 #else
-#define QUEUE_SIZE 128
 #define pmd_val_ma(v) (v).pud.pgd.pgd;
 #endif
 
-static mmu_update_t update_queue[QUEUE_SIZE];
-unsigned int mmu_update_queue_idx = 0;
-#define idx mmu_update_queue_idx
-
-/*
- * MULTICALL_flush_page_update_queue:
- *   This is a version of the flush which queues as part of a multicall.
- */
-void MULTICALL_flush_page_update_queue(void)
-{
-    unsigned long flags;
-    unsigned int _idx;
-    spin_lock_irqsave(&update_lock, flags);
-    if ( (_idx = idx) != 0 ) 
-    {
-        idx = 0;
-        wmb(); /* Make sure index is cleared first to avoid double updates. */
-        queue_multicall3(__HYPERVISOR_mmu_update, 
-                         (unsigned long)update_queue, 
-                         (unsigned long)_idx, 
-                         (unsigned long)NULL);
-    }
-    spin_unlock_irqrestore(&update_lock, flags);
-}
-
-static inline void __flush_page_update_queue(void)
-{
-    unsigned int _idx = idx;
-    idx = 0;
-    wmb(); /* Make sure index is cleared first to avoid double updates. */
-    if ( unlikely(HYPERVISOR_mmu_update(update_queue, _idx, NULL) < 0) )
-    {
-        printk(KERN_ALERT "Failed to execute MMU updates.\n");
-        BUG();
-    }
-}
-
-void _flush_page_update_queue(void)
-{
-    unsigned long flags;
-    spin_lock_irqsave(&update_lock, flags);
-    if ( idx != 0 ) __flush_page_update_queue();
-    spin_unlock_irqrestore(&update_lock, flags);
-}
-
-static inline void increment_index(void)
-{
-    idx++;
-    if ( unlikely(idx == QUEUE_SIZE) ) __flush_page_update_queue();
-}
-
-static inline void increment_index_and_flush(void)
-{
-    idx++;
-    __flush_page_update_queue();
-}
-
-void queue_l1_entry_update(pte_t *ptr, unsigned long val)
-{
-    unsigned long flags;
-    spin_lock_irqsave(&update_lock, flags);
-    update_queue[idx].ptr = virt_to_machine(ptr);
-    update_queue[idx].val = val;
-    increment_index();
-    spin_unlock_irqrestore(&update_lock, flags);
-}
-
-void queue_l2_entry_update(pmd_t *ptr, pmd_t val)
-{
-    unsigned long flags;
-    spin_lock_irqsave(&update_lock, flags);
-    update_queue[idx].ptr = virt_to_machine(ptr);
-    update_queue[idx].val = pmd_val_ma(val);
-    increment_index();
-    spin_unlock_irqrestore(&update_lock, flags);
-}
-
-void queue_pt_switch(unsigned long ptr)
-{
-    unsigned long flags;
-    spin_lock_irqsave(&update_lock, flags);
-    update_queue[idx].ptr  = phys_to_machine(ptr);
-    update_queue[idx].ptr |= MMU_EXTENDED_COMMAND;
-    update_queue[idx].val  = MMUEXT_NEW_BASEPTR;
-    increment_index();
-    spin_unlock_irqrestore(&update_lock, flags);
-}
-
-void queue_tlb_flush(void)
-{
-    unsigned long flags;
-    spin_lock_irqsave(&update_lock, flags);
-    update_queue[idx].ptr  = MMU_EXTENDED_COMMAND;
-    update_queue[idx].val  = MMUEXT_TLB_FLUSH;
-    increment_index();
-    spin_unlock_irqrestore(&update_lock, flags);
-}
-
-void queue_invlpg(unsigned long ptr)
-{
-    unsigned long flags;
-    spin_lock_irqsave(&update_lock, flags);
-    update_queue[idx].ptr  = MMU_EXTENDED_COMMAND;
-    update_queue[idx].ptr |= ptr & PAGE_MASK;
-    update_queue[idx].val  = MMUEXT_INVLPG;
-    increment_index();
-    spin_unlock_irqrestore(&update_lock, flags);
-}
-
-void queue_pgd_pin(unsigned long ptr)
-{
-    unsigned long flags;
-    spin_lock_irqsave(&update_lock, flags);
-    update_queue[idx].ptr  = phys_to_machine(ptr);
-    update_queue[idx].ptr |= MMU_EXTENDED_COMMAND;
-    update_queue[idx].val  = MMUEXT_PIN_L2_TABLE;
-    increment_index();
-    spin_unlock_irqrestore(&update_lock, flags);
-}
-
-void queue_pgd_unpin(unsigned long ptr)
-{
-    unsigned long flags;
-    spin_lock_irqsave(&update_lock, flags);
-    update_queue[idx].ptr  = phys_to_machine(ptr);
-    update_queue[idx].ptr |= MMU_EXTENDED_COMMAND;
-    update_queue[idx].val  = MMUEXT_UNPIN_TABLE;
-    increment_index();
-    spin_unlock_irqrestore(&update_lock, flags);
-}
-
-void queue_pte_pin(unsigned long ptr)
-{
-    unsigned long flags;
-    spin_lock_irqsave(&update_lock, flags);
-    update_queue[idx].ptr  = phys_to_machine(ptr);
-    update_queue[idx].ptr |= MMU_EXTENDED_COMMAND;
-    update_queue[idx].val  = MMUEXT_PIN_L1_TABLE;
-    increment_index();
-    spin_unlock_irqrestore(&update_lock, flags);
-}
-
-void queue_pte_unpin(unsigned long ptr)
-{
-    unsigned long flags;
-    spin_lock_irqsave(&update_lock, flags);
-    update_queue[idx].ptr  = phys_to_machine(ptr);
-    update_queue[idx].ptr |= MMU_EXTENDED_COMMAND;
-    update_queue[idx].val  = MMUEXT_UNPIN_TABLE;
-    increment_index();
-    spin_unlock_irqrestore(&update_lock, flags);
-}
-
-void queue_set_ldt(unsigned long ptr, unsigned long len)
-{
-    unsigned long flags;
-    spin_lock_irqsave(&update_lock, flags);
-    update_queue[idx].ptr  = MMU_EXTENDED_COMMAND | ptr;
-    update_queue[idx].val  = MMUEXT_SET_LDT | (len << MMUEXT_CMD_SHIFT);
-    increment_index();
-    spin_unlock_irqrestore(&update_lock, flags);
-}
-
-void queue_machphys_update(unsigned long mfn, unsigned long pfn)
-{
-    unsigned long flags;
-    spin_lock_irqsave(&update_lock, flags);
-    update_queue[idx].ptr = (mfn << PAGE_SHIFT) | MMU_MACHPHYS_UPDATE;
-    update_queue[idx].val = pfn;
-    increment_index();
-    spin_unlock_irqrestore(&update_lock, flags);
-}
-
-/* queue and flush versions of the above */
 void xen_l1_entry_update(pte_t *ptr, unsigned long val)
 {
-    unsigned long flags;
-    spin_lock_irqsave(&update_lock, flags);
-    update_queue[idx].ptr = virt_to_machine(ptr);
-    update_queue[idx].val = val;
-    increment_index_and_flush();
-    spin_unlock_irqrestore(&update_lock, flags);
+    mmu_update_t u;
+    u.ptr = virt_to_machine(ptr);
+    u.val = val;
+    BUG_ON(HYPERVISOR_mmu_update(&u, 1, NULL, DOMID_SELF) < 0);
 }
 
 void xen_l2_entry_update(pmd_t *ptr, pmd_t val)
 {
-    unsigned long flags;
-    spin_lock_irqsave(&update_lock, flags);
-    update_queue[idx].ptr = virt_to_machine(ptr);
-    update_queue[idx].val = pmd_val_ma(val);
-    increment_index_and_flush();
-    spin_unlock_irqrestore(&update_lock, flags);
-}
-
-void xen_pt_switch(unsigned long ptr)
-{
-    unsigned long flags;
-    spin_lock_irqsave(&update_lock, flags);
-    update_queue[idx].ptr  = phys_to_machine(ptr);
-    update_queue[idx].ptr |= MMU_EXTENDED_COMMAND;
-    update_queue[idx].val  = MMUEXT_NEW_BASEPTR;
-    increment_index_and_flush();
-    spin_unlock_irqrestore(&update_lock, flags);
-}
-
-void xen_tlb_flush(void)
-{
-    unsigned long flags;
-    spin_lock_irqsave(&update_lock, flags);
-    update_queue[idx].ptr  = MMU_EXTENDED_COMMAND;
-    update_queue[idx].val  = MMUEXT_TLB_FLUSH;
-    increment_index_and_flush();
-    spin_unlock_irqrestore(&update_lock, flags);
-}
-
-void xen_invlpg(unsigned long ptr)
-{
-    unsigned long flags;
-    spin_lock_irqsave(&update_lock, flags);
-    update_queue[idx].ptr  = MMU_EXTENDED_COMMAND;
-    update_queue[idx].ptr |= ptr & PAGE_MASK;
-    update_queue[idx].val  = MMUEXT_INVLPG;
-    increment_index_and_flush();
-    spin_unlock_irqrestore(&update_lock, flags);
-}
-
-void xen_pgd_pin(unsigned long ptr)
-{
-    unsigned long flags;
-    spin_lock_irqsave(&update_lock, flags);
-    update_queue[idx].ptr  = phys_to_machine(ptr);
-    update_queue[idx].ptr |= MMU_EXTENDED_COMMAND;
-    update_queue[idx].val  = MMUEXT_PIN_L2_TABLE;
-    increment_index_and_flush();
-    spin_unlock_irqrestore(&update_lock, flags);
-}
-
-void xen_pgd_unpin(unsigned long ptr)
-{
-    unsigned long flags;
-    spin_lock_irqsave(&update_lock, flags);
-    update_queue[idx].ptr  = phys_to_machine(ptr);
-    update_queue[idx].ptr |= MMU_EXTENDED_COMMAND;
-    update_queue[idx].val  = MMUEXT_UNPIN_TABLE;
-    increment_index_and_flush();
-    spin_unlock_irqrestore(&update_lock, flags);
-}
-
-void xen_pte_pin(unsigned long ptr)
-{
-    unsigned long flags;
-    spin_lock_irqsave(&update_lock, flags);
-    update_queue[idx].ptr  = phys_to_machine(ptr);
-    update_queue[idx].ptr |= MMU_EXTENDED_COMMAND;
-    update_queue[idx].val  = MMUEXT_PIN_L1_TABLE;
-    increment_index_and_flush();
-    spin_unlock_irqrestore(&update_lock, flags);
-}
-
-void xen_pte_unpin(unsigned long ptr)
-{
-    unsigned long flags;
-    spin_lock_irqsave(&update_lock, flags);
-    update_queue[idx].ptr  = phys_to_machine(ptr);
-    update_queue[idx].ptr |= MMU_EXTENDED_COMMAND;
-    update_queue[idx].val  = MMUEXT_UNPIN_TABLE;
-    increment_index_and_flush();
-    spin_unlock_irqrestore(&update_lock, flags);
-}
-
-void xen_set_ldt(unsigned long ptr, unsigned long len)
-{
-    unsigned long flags;
-    spin_lock_irqsave(&update_lock, flags);
-    update_queue[idx].ptr  = MMU_EXTENDED_COMMAND | ptr;
-    update_queue[idx].val  = MMUEXT_SET_LDT | (len << MMUEXT_CMD_SHIFT);
-    increment_index_and_flush();
-    spin_unlock_irqrestore(&update_lock, flags);
+    mmu_update_t u;
+    u.ptr = virt_to_machine(ptr);
+    u.val = pmd_val_ma(val);
+    BUG_ON(HYPERVISOR_mmu_update(&u, 1, NULL, DOMID_SELF) < 0);
 }
 
 void xen_machphys_update(unsigned long mfn, unsigned long pfn)
 {
-    unsigned long flags;
-    spin_lock_irqsave(&update_lock, flags);
-    update_queue[idx].ptr = (mfn << PAGE_SHIFT) | MMU_MACHPHYS_UPDATE;
-    update_queue[idx].val = pfn;
-    increment_index_and_flush();
-    spin_unlock_irqrestore(&update_lock, flags);
+    mmu_update_t u;
+    u.ptr = (mfn << PAGE_SHIFT) | MMU_MACHPHYS_UPDATE;
+    u.val = pfn;
+    BUG_ON(HYPERVISOR_mmu_update(&u, 1, NULL, DOMID_SELF) < 0);
+}
+
+void xen_pt_switch(unsigned long ptr)
+{
+    struct mmuext_op op;
+    op.cmd = MMUEXT_NEW_BASEPTR;
+    op.mfn = pfn_to_mfn(ptr >> PAGE_SHIFT);
+    BUG_ON(HYPERVISOR_mmuext_op(&op, 1, NULL, DOMID_SELF) < 0);
+}
+
+void xen_tlb_flush(void)
+{
+    struct mmuext_op op;
+    op.cmd = MMUEXT_TLB_FLUSH_LOCAL;
+    BUG_ON(HYPERVISOR_mmuext_op(&op, 1, NULL, DOMID_SELF) < 0);
+}
+
+void xen_invlpg(unsigned long ptr)
+{
+    struct mmuext_op op;
+    op.cmd = MMUEXT_INVLPG_LOCAL;
+    op.linear_addr = ptr & PAGE_MASK;
+    BUG_ON(HYPERVISOR_mmuext_op(&op, 1, NULL, DOMID_SELF) < 0);
+}
+
+#ifdef CONFIG_SMP
+
+void xen_tlb_flush_all(void)
+{
+    struct mmuext_op op;
+    op.cmd = MMUEXT_TLB_FLUSH_ALL;
+    BUG_ON(HYPERVISOR_mmuext_op(&op, 1, NULL, DOMID_SELF) < 0);
+}
+
+void xen_tlb_flush_mask(cpumask_t mask)
+{
+    struct mmuext_op op;
+    op.cmd = MMUEXT_TLB_FLUSH_MULTI;
+    op.cpuset = mask.bits[0];
+    BUG_ON(HYPERVISOR_mmuext_op(&op, 1, NULL, DOMID_SELF) < 0);
+}
+
+void xen_invlpg_all(unsigned long ptr)
+{
+    struct mmuext_op op;
+    op.cmd = MMUEXT_INVLPG_ALL;
+    op.linear_addr = ptr & PAGE_MASK;
+    BUG_ON(HYPERVISOR_mmuext_op(&op, 1, NULL, DOMID_SELF) < 0);
+}
+
+void xen_invlpg_mask(cpumask_t mask, unsigned long ptr)
+{
+    struct mmuext_op op;
+    op.cmd = MMUEXT_INVLPG_MULTI;
+    op.cpuset = mask.bits[0];
+    op.linear_addr = ptr & PAGE_MASK;
+    BUG_ON(HYPERVISOR_mmuext_op(&op, 1, NULL, DOMID_SELF) < 0);
+}
+
+#endif /* CONFIG_SMP */
+
+void xen_pgd_pin(unsigned long ptr)
+{
+    struct mmuext_op op;
+    op.cmd = MMUEXT_PIN_L2_TABLE;
+    op.mfn = pfn_to_mfn(ptr >> PAGE_SHIFT);
+    BUG_ON(HYPERVISOR_mmuext_op(&op, 1, NULL, DOMID_SELF) < 0);
+}
+
+void xen_pgd_unpin(unsigned long ptr)
+{
+    struct mmuext_op op;
+    op.cmd = MMUEXT_UNPIN_TABLE;
+    op.mfn = pfn_to_mfn(ptr >> PAGE_SHIFT);
+    BUG_ON(HYPERVISOR_mmuext_op(&op, 1, NULL, DOMID_SELF) < 0);
+}
+
+void xen_pte_pin(unsigned long ptr)
+{
+    struct mmuext_op op;
+    op.cmd = MMUEXT_PIN_L1_TABLE;
+    op.mfn = pfn_to_mfn(ptr >> PAGE_SHIFT);
+    BUG_ON(HYPERVISOR_mmuext_op(&op, 1, NULL, DOMID_SELF) < 0);
+}
+
+void xen_pte_unpin(unsigned long ptr)
+{
+    struct mmuext_op op;
+    op.cmd = MMUEXT_UNPIN_TABLE;
+    op.mfn = pfn_to_mfn(ptr >> PAGE_SHIFT);
+    BUG_ON(HYPERVISOR_mmuext_op(&op, 1, NULL, DOMID_SELF) < 0);
+}
+
+void xen_set_ldt(unsigned long ptr, unsigned long len)
+{
+    struct mmuext_op op;
+    op.cmd = MMUEXT_SET_LDT;
+    op.linear_addr = ptr;
+    op.nr_ents = len;
+    BUG_ON(HYPERVISOR_mmuext_op(&op, 1, NULL, DOMID_SELF) < 0);
 }
 
 #ifdef CONFIG_XEN_PHYSDEV_ACCESS
@@ -377,12 +202,11 @@ unsigned long allocate_empty_lowmem_region(unsigned long pages)
         pmd = pmd_offset(pud, (vstart + (i*PAGE_SIZE)));
         pte = pte_offset_kernel(pmd, (vstart + (i*PAGE_SIZE))); 
         pfn_array[i] = pte->pte_low >> PAGE_SHIFT;
-        queue_l1_entry_update(pte, 0);
+        HYPERVISOR_update_va_mapping(vstart + (i*PAGE_SIZE), __pte_ma(0), 0);
         phys_to_machine_mapping[__pa(vstart)>>PAGE_SHIFT] = INVALID_P2M_ENTRY;
     }
 
-    /* Flush updates through and flush the TLB. */
-    xen_tlb_flush();
+    flush_tlb_all();
 
     balloon_put_pages(pfn_array, 1 << order);
 

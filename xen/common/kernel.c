@@ -16,7 +16,7 @@
 
 void cmdline_parse(char *cmdline)
 {
-    unsigned char *opt_end, *opt;
+    char *opt_end, *opt;
     struct kernel_param *param;
     
     if ( cmdline == NULL )
@@ -75,10 +75,9 @@ long do_xen_version(int cmd)
     return (XEN_VERSION<<16) | (XEN_SUBVERSION);
 }
 
-vm_assist_info_t vm_assist_info[MAX_VMASST_TYPE + 1];
 long do_vm_assist(unsigned int cmd, unsigned int type)
 {
-    return vm_assist(current, cmd, type);
+    return vm_assist(current->domain, cmd, type);
 }
 
 long do_ni_hypercall(void)
@@ -86,3 +85,13 @@ long do_ni_hypercall(void)
     /* No-op hypercall. */
     return -ENOSYS;
 }
+
+/*
+ * Local variables:
+ * mode: C
+ * c-set-style: "BSD"
+ * c-basic-offset: 4
+ * tab-width: 4
+ * indent-tabs-mode: nil
+ * End:
+ */

@@ -365,6 +365,20 @@ class BlkDev(controller.SplitDev):
         Blkctl.block('unbind', self.type, self.node)
 
     def setNode(self, node):
+    
+        # NOTE: 
+        # This clause is testing code for storage system experiments.
+        # Add a new disk type that will just pass an opaque id in the
+        # start_sector and use an experimental device type.
+        # Please contact andrew.warfield@cl.cam.ac.uk with any concerns.
+        if self.type == 'parallax':
+            self.node   = node
+            self.device =  61440 # (240,0)
+            self.start_sector = long(self.params)
+            self.nr_sectors = long(0)
+            return
+        # done.
+            
         mounted_mode = check_mounted(self, node)
         if not '!' in self.mode and mounted_mode:
             if mounted_mode is "w":
@@ -435,46 +449,17 @@ class BlkDev(controller.SplitDev):
         msg = packMsg('blkif_be_vbd_create_t',
                       { 'domid'        : self.controller.dom,
                         'blkif_handle' : backend.handle,
+                        'pdevice'      : self.device,
                         'vdevice'      : self.vdev,
                         'readonly'     : self.readonly() })
         backend.writeRequest(msg, response=d)
         return d
         
     def respond_be_vbd_create(self, msg):
-        """Response handler for a be_vbd_create message.
-        Tries to grow the vbd.
-
-        @param msg: message
-        @type  msg: xu message
-        """
         val = unpackMsg('blkif_be_vbd_create_t', msg)
-        d = self.send_be_vbd_grow()
-        d.addCallback(self.respond_be_vbd_grow)
-        return d
-    
-    def send_be_vbd_grow(self):
-        d = defer.Deferred()
-        backend = self.getBackendInterface()
-        msg = packMsg('blkif_be_vbd_grow_t',
-                      { 'domid'                : self.controller.dom,
-                        'blkif_handle'         : backend.handle,
-                        'vdevice'              : self.vdev,
-                        'extent.device'        : self.device,
-                        'extent.sector_start'  : self.start_sector,
-                        'extent.sector_length' : self.nr_sectors })
-        backend.writeRequest(msg, response=d)
-        return d
-
-    def respond_be_vbd_grow(self, msg):
-        """Response handler for a be_vbd_grow message.
-
-        @param msg: message
-        @type  msg: xu message
-        """
-        val = unpackMsg('blkif_be_vbd_grow_t', msg)
 	status = val['status']
 	if status != BLKIF_BE_STATUS_OKAY:
-            raise XendError("Adding extent to vbd failed: device %s, error %d"
+            raise XendError("Creating vbd failed: device %s, error %d"
                             % (sxp.to_string(self.config), status))
         return self
 

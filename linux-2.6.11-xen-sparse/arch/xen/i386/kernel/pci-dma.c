@@ -13,6 +13,7 @@
 #include <linux/pci.h>
 #include <linux/version.h>
 #include <asm/io.h>
+#include <asm/tlbflush.h>
 #include <asm-xen/balloon.h>
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,0)
@@ -54,10 +55,10 @@ xen_contig_memory(unsigned long vstart, unsigned int order)
 		pmd = pmd_offset(pud, (vstart + (i*PAGE_SIZE)));
 		pte = pte_offset_kernel(pmd, (vstart + (i*PAGE_SIZE)));
 		pfn = pte->pte_low >> PAGE_SHIFT;
-		queue_l1_entry_update(pte, 0);
+		HYPERVISOR_update_va_mapping(
+			vstart + (i*PAGE_SIZE), __pte_ma(0), 0);
 		phys_to_machine_mapping[(__pa(vstart)>>PAGE_SHIFT)+i] =
 			INVALID_P2M_ENTRY;
-		flush_page_update_queue();
 		if (HYPERVISOR_dom_mem_op(MEMOP_decrease_reservation, 
 					  &pfn, 1, 0) != 1) BUG();
 	}
@@ -70,17 +71,17 @@ xen_contig_memory(unsigned long vstart, unsigned int order)
 		pud = pud_offset(pgd, (vstart + (i*PAGE_SIZE)));
 		pmd = pmd_offset(pud, (vstart + (i*PAGE_SIZE)));
 		pte = pte_offset_kernel(pmd, (vstart + (i*PAGE_SIZE)));
-		queue_l1_entry_update(
-			pte, ((pfn+i)<<PAGE_SHIFT)|__PAGE_KERNEL);
-		queue_machphys_update(
+		HYPERVISOR_update_va_mapping(
+			vstart + (i*PAGE_SIZE),
+			__pte_ma(((pfn+i)<<PAGE_SHIFT)|__PAGE_KERNEL), 0);
+		xen_machphys_update(
 			pfn+i, (__pa(vstart)>>PAGE_SHIFT)+i);
 		phys_to_machine_mapping[(__pa(vstart)>>PAGE_SHIFT)+i] =
 			pfn+i;
 	}
-	/* Flush updates through and flush the TLB. */
-	xen_tlb_flush();
+	flush_tlb_all();
 
-        balloon_unlock(flags);
+	balloon_unlock(flags);
 }
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,0)
