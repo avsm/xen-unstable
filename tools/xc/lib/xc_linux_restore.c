@@ -116,8 +116,6 @@ int xc_linux_restore(int xc_handle,
 
     if ( (*readerfn)(readerst, name,                  sizeof(name)) ||
          (*readerfn)(readerst, &nr_pfns,              sizeof(unsigned long)) ||
-         (*readerfn)(readerst, &ctxt,                 sizeof(ctxt)) ||
-         (*readerfn)(readerst, shared_info,           PAGE_SIZE) ||
          (*readerfn)(readerst, pfn_to_mfn_frame_list, PAGE_SIZE) )
     {
         ERROR("Error when reading from state file");
@@ -181,10 +179,7 @@ int xc_linux_restore(int xc_handle,
     if ( (pm_handle = init_pfn_mapper((domid_t)dom)) < 0 )
         goto out;
 
-    /* Copy saved contents of shared-info page. No checking needed. */
-    ppage = map_pfn_writeable(pm_handle, shared_info_frame);
-    memcpy(ppage, shared_info, PAGE_SIZE);
-    unmap_pfn(pm_handle, ppage);
+
 
     /* Build the pfn-to-mfn table. We choose MFN ordering returned by Xen. */
     if ( get_pfn_list(xc_handle, dom, pfn_to_mfn_table, nr_pfns) != nr_pfns )
@@ -235,9 +230,16 @@ int xc_linux_restore(int xc_handle,
             goto out;
         }
 
-	//printf("batch=%d\n",j);
+	printf("batch %d\n",j);
 	
-	if(j==0) break;  // our work here is done
+	if (j == 0) 
+	    break;  // our work here is done
+
+	if( j > MAX_BATCH_SIZE )
+	{
+	    ERROR("Max batch size exceeded. Giving up.");
+	    goto out;
+	}
 	
         if ( (*readerfn)(readerst, region_pfn_type, j*sizeof(unsigned long)) )
         {
@@ -247,6 +249,9 @@ int xc_linux_restore(int xc_handle,
 
 	for(i=0;i<j;i++)
 	{
+            if ((region_pfn_type[i]>>29) == 7)
+		continue;
+
 	    pfn = region_pfn_type[i] & ~PGT_type_mask;
 	    mfn = pfn_to_mfn_table[pfn];
 	    
@@ -266,8 +271,14 @@ int xc_linux_restore(int xc_handle,
 	    unsigned long *ppage;
 
 	    pfn = region_pfn_type[i] & ~PGT_type_mask;
+
+//if(n>=nr_pfns || ((region_pfn_type[i] & PGT_type_mask) == L2TAB) ) printf("pfn=%08lx mfn=%x\n",region_pfn_type[i],pfn_to_mfn_table[pfn]);
+
 	    	  	    
 //if(pfn_type[i])printf("^pfn=%d %08lx\n",pfn,pfn_type[i]);
+
+            if ((region_pfn_type[i]>>29) == 7)
+		continue;
 
             if (pfn>nr_pfns)
 	    {
@@ -309,7 +320,7 @@ int xc_linux_restore(int xc_handle,
 
 			if ( xpfn >= nr_pfns )
 			{
-			    ERROR("Frame number in type %d page table is out of range. i=%d k=%d pfn=%d nr_pfns=%d",region_pfn_type[i]>>29,i,k,xpfn,nr_pfns);
+			    ERROR("Frame number in type %d page table is out of range. i=%d k=%d pfn=0x%x nr_pfns=%d",region_pfn_type[i]>>29,i,k,xpfn,nr_pfns);
 			    goto out;
 			}
 #if 0
@@ -360,17 +371,19 @@ int xc_linux_restore(int xc_handle,
 	    default:
 		ERROR("Bogus page type %x page table is out of range. i=%d nr_pfns=%d",region_pfn_type[i],i,nr_pfns);
 		goto out;
-	    }
+
+	    } // end of page type switch statement
 
 	    if ( add_mmu_update(xc_handle, mmu,
 				(mfn<<PAGE_SHIFT) | MMU_MACHPHYS_UPDATE, pfn) )
 		goto out;
 
-	}
+	} // end of 'batch' for loop
 
 	n+=j; // crude stats
 
     }
+printf("RECEIVED ALL PAGES\n");
 
     mfn_mapper_close( region_mapper );
 
@@ -386,7 +399,10 @@ int xc_linux_restore(int xc_handle,
                                 (pfn_to_mfn_table[i]<<PAGE_SHIFT) | 
                                 MMU_EXTENDED_COMMAND,
                                 MMUEXT_PIN_L1_TABLE) )
+	    {
+		printf("ERR pin L1 pfn=%lx mfn=%lx\n");
                 goto out;
+	    }
         }
         else if ( pfn_type[i] == L2TAB )
         {
@@ -394,7 +410,10 @@ int xc_linux_restore(int xc_handle,
                                 (pfn_to_mfn_table[i]<<PAGE_SHIFT) | 
                                 MMU_EXTENDED_COMMAND,
                                 MMUEXT_PIN_L2_TABLE) )
+	    {
+		printf("ERR pin L2 pfn=%lx mfn=%lx\n");
                 goto out;
+	    }
         }
     }
 
@@ -402,6 +421,15 @@ int xc_linux_restore(int xc_handle,
         goto out;
 
     verbose_printf("\b\b\b\b100%%\nMemory reloaded.\n");
+
+
+    if ( (*readerfn)(readerst, &ctxt,                 sizeof(ctxt)) ||
+         (*readerfn)(readerst, shared_info,           PAGE_SIZE) )
+    {
+        ERROR("Error when reading from state file");
+        goto out;
+    }
+
 
     /* Uncanonicalise the suspend-record frame number and poke resume rec. */
     pfn = ctxt.cpu_ctxt.esi;
@@ -416,6 +444,8 @@ int xc_linux_restore(int xc_handle,
     p_srec->resume_info.shared_info = shared_info_frame << PAGE_SHIFT;
     p_srec->resume_info.flags       = 0;
     unmap_pfn(pm_handle, p_srec);
+
+printf("new shared info is %lx\n", shared_info_frame);
 
     /* Uncanonicalise each GDT frame number. */
     if ( ctxt.gdt_ents > 8192 )
@@ -445,9 +475,13 @@ int xc_linux_restore(int xc_handle,
     }
     ctxt.pt_base = pfn_to_mfn_table[pfn] << PAGE_SHIFT;
 
+    /* Copy saved contents of shared-info page. No checking needed. */
+    ppage = map_pfn_writeable(pm_handle, shared_info_frame);
+    memcpy(ppage, shared_info, sizeof(shared_info_t));
+    unmap_pfn(pm_handle, ppage);
+
+
     /* Uncanonicalise the pfn-to-mfn table frame-number list. */
-
-
     if ( (mapper_handle1 = mfn_mapper_init(xc_handle, dom,
 					   1024*1024, PROT_WRITE )) 
 	 == NULL )
@@ -520,7 +554,9 @@ int xc_linux_restore(int xc_handle,
     op.u.builddomain.ctxt = &ctxt;
     rc = do_dom0_op(xc_handle, &op);
 
+printf("NORMAL EXIT RESTORE\n");
  out:
+printf("EXIT RESTORE\n");
     if ( mmu != NULL )
         free(mmu);
 
