@@ -5,19 +5,19 @@ import time
 from xenmgr.XendClient import server
 from xenmgr.xm.opts import *
 
-opts = Opts(use="""[options] [DOM]
+gopts = Opts(use="""[options] [DOM]
 
 Shutdown one or more domains gracefully.""")
 
-opts.opt('help', short='h',
-         fn=set_value, default=0,
+gopts.opt('help', short='h',
+         fn=set_true, default=0,
          use="Print this help.")
 
-opts.opt('all', short='a',
+gopts.opt('all', short='a',
          fn=set_true, default=0,
          use="Shutdown all domains.")
 
-opts.opt('wait', short='w',
+gopts.opt('wait', short='w',
          fn=set_true, default=0,
          use='Wait for shutdown to complete.')
 
@@ -28,7 +28,7 @@ def shutdown(opts, doms, wait):
     if 0 in doms:
         doms.remove(0)
     for d in doms:
-        server.xend_domain_shutdown(dom)
+        server.xend_domain_shutdown(d)
     if wait:
         while doms:
             alive = domains()
@@ -46,8 +46,8 @@ def main_all(opts, args):
     shutdown(opts, None, opts.wait)
 
 def main_dom(opts, args):
-    if len(args) < 2: opts.err('Missing domain')
-    dom = argv[1]
+    if len(args) < 1: opts.err('Missing domain')
+    dom = args[0]
     try:
         domid = int(dom)
     except:
@@ -55,9 +55,12 @@ def main_dom(opts, args):
     shutdown(opts, [ domid ], opts.wait)
     
 def main(argv):
+    opts = gopts
     args = opts.parse(argv)
     if opts.help:
         opts.usage()
+        return
+    print 'shutdown.main>', len(args), args
     if opts.all:
         main_all(opts, args)
     else:

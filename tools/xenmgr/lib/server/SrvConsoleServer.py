@@ -21,6 +21,8 @@ from twisted.internet import protocol
 from twisted.internet import abstract
 from twisted.internet import defer
 
+import Xc; xc = Xc.new()
+
 import xend.utils
 
 from xenmgr import sxp
@@ -34,6 +36,7 @@ import channel
 import blkif
 import netif
 import console
+import domain
 from params import *
 
 DEBUG = 1
@@ -289,6 +292,12 @@ class EventProtocol(protocol.Protocol):
             else:
                 self.send_error()
 
+    def loseConnection(self):
+        if self.transport:
+            self.transport.loseConnection()
+        if self.connected:
+            reactor.callLater(0, self.connectionLost)
+
     def connectionLost(self, reason=None):
         self.unsubscribe()
 
@@ -400,6 +409,16 @@ class EventFactory(protocol.Factory):
         proto.factory = self
         return proto
 
+class VirqClient:
+    def __init__(self, daemon):
+        self.daemon = daemon
+
+    def virqReceived(self, virq):
+        print 'VirqClient.virqReceived>', virq
+
+    def lostChannel(self, channel):
+        print 'VirqClient.lostChannel>', channel
+        
 class Daemon:
     """The xend daemon.
     """
@@ -529,11 +548,13 @@ class Daemon:
         self.listenMgmt()
         self.listenEvent()
         self.listenNotifier()
+        self.listenVirq()
         SrvServer.create()
         reactor.run()
 
     def createFactories(self):
         self.channelF = channel.channelFactory()
+        self.domainCF = domain.DomainControllerFactory()
         self.blkifCF = blkif.BlkifControllerFactory()
         self.netifCF = netif.NetifControllerFactory()
         self.consoleCF = console.ConsoleControllerFactory()
@@ -555,10 +576,24 @@ class Daemon:
         p.startListening()
         return p
 
+    def listenVirq(self):
+        virqChan = self.channelF.virqChannel(channel.VIRQ_DOM_EXC)
+        virqChan.registerClient(VirqClient(self))
+
     def exit(self):
         reactor.diconnectAll()
         sys.exit(0)
 
+    def blkif_set_control_domain(self, dom):
+        """Set the block device backend control domain.
+        """
+        return self.blkifCF.setControlDomain(dom)
+    
+    def blkif_get_control_domain(self, dom):
+        """Get the block device backend control domain.
+        """
+        return self.blkifCF.getControlDomain()
+    
     def blkif_create(self, dom):
         """Create a block device interface controller.
         
@@ -579,6 +614,16 @@ class Daemon:
         d = ctrl.attach_device(vdev, mode, segment)
         return d
 
+    def netif_set_control_domain(self, dom):
+        """Set the network interface backend control domain.
+        """
+        return self.netifCF.setControlDomain(dom)
+
+    def netif_get_control_domain(self, dom):
+        """Get the network interface backend control domain.
+        """
+        return self.netifCF.getControlDomain()
+    
     def netif_create(self, dom):
         """Create a network interface controller.
         
@@ -622,6 +667,15 @@ class Daemon:
         if console.conn:
             console.conn.loseConnection()
 
+    def domain_shutdown(self, dom, reason):
+        """Shutdown a domain.
+        """
+        ctrl = self.domainCF.getInstanceByDom(dom)
+        if not ctrl:
+            raise ValueError('No domain controller: %d' % dom)
+        ctrl.shutdown(reason)
+        return 0
+        
 def instance():
     global inst
     try:
