@@ -16,7 +16,6 @@ import os
 import time
 
 from twisted.internet import defer
-#defer.Deferred.debug = 1
 
 import xen.lowlevel.xc; xc = xen.lowlevel.xc.new()
 import xen.util.ip
@@ -132,8 +131,11 @@ def lookup_raw_partn(name):
 
 def lookup_disk_uname(uname):
     """Lookup a list of segments for a physical device.
-    uname [string]:  name of the device in the format \'phy:dev\' for a physical device
-    returns [list of dicts]: list of extents that make up the named device
+    
+    @param uname: name of the device in the format \'phy:dev\' for a physical device
+    @type  uname: string
+    @return: list of extents that make up the named device
+    @rtype: [dict]
     """
     ( type, d_name ) = string.split( uname, ':' )
 
@@ -159,14 +161,17 @@ def make_disk(vm, config, uname, dev, mode, recreate=0):
     if len(segments) > 1:
         raise VmError("vbd: Multi-segment vdisk: uname=%s" % uname)
     segment = segments[0]
+    # todo: The 'dev' should be looked up in the context of the domain.
     vdev = blkdev_name_to_number(dev)
+    if not vdev:
+        raise VmError("vbd: Device not found: uname=%s dev=%s" % (uname, dev))
     ctrl = xend.blkif_create(vm.dom, recreate=recreate)
     return ctrl.attachDevice(config, vdev, mode, segment, recreate=recreate)
         
 def vif_up(iplist):
     """send an unsolicited ARP reply for all non link-local IP addresses.
 
-    iplist IP addresses
+    @param iplist: IP addresses
     """
 
     IP_NONLOCAL_BIND = '/proc/sys/net/ipv4/ip_nonlocal_bind'
@@ -182,7 +187,7 @@ def vif_up(iplist):
 
     def arping(ip, gw):
         cmd = '/usr/sbin/arping -A -b -I eth0 -c 1 -s %s %s' % (ip, gw)
-        print cmd
+        log.debug(cmd)
         os.system(cmd)
         
     gateway = xen.util.ip.get_current_ipgw() or '255.255.255.255'
@@ -466,7 +471,6 @@ class XendDomainInfo:
         # my domain id.
         if not dominfo:
             return
-        #print 'check_name>', 'dom=', dominfo.name, dominfo.dom, 'self=', name, self.dom
         if dominfo.is_terminated():
             return
         if not self.dom or (dominfo.dom != self.dom):
@@ -827,6 +831,14 @@ class XendDomainInfo:
             self.config.remove(['device', dev_config])
         dev.destroy()
 
+    def configure_memory(self):
+        """Configure vm memory limit.
+        """
+        maxmem = sxp.get_child_value(self.config, "maxmem")
+        if maxmem is None:
+            maxmem = self.memory
+        xc.domain_setmaxmem(self.dom, maxmem_kb = maxmem * 1024)
+
     def configure_console(self):
         """Configure the vm console port.
         """
@@ -1136,10 +1148,27 @@ def vm_field_ignore(vm, config, val, index):
 
     @param vm:        virtual machine
     @param config:    vm config
-    @param val:       vfr field
+    @param val:       config field
     @param index:     field index
     """
     pass
+
+def vm_field_maxmem(vm, config, val, index):
+    """Configure vm memory limit.
+
+    @param vm:        virtual machine
+    @param config:    vm config
+    @param val:       config field
+    @param index:     field index
+    """
+    maxmem = sxp.child0(val)
+    if maxmem is None:
+        maxmem = vm.memory
+    try:
+        maxmem = int(maxmem)
+    except:
+        raise VmError("invalid maxmem: " + str(maxmem))
+    xc.domain_setmaxmem(vm.dom, maxmem_kb = maxmem * 1024)
 
 # Register image handlers.
 add_image_handler('linux',  vm_image_linux)
@@ -1161,3 +1190,4 @@ add_config_handler('device',     vm_field_ignore)
 add_config_handler('backend',    vm_field_ignore)
 
 # Register other config handlers.
+add_config_handler('maxmem',     vm_field_maxmem)
