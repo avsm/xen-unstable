@@ -1,4 +1,3 @@
-/* -*-  Mode:C; c-basic-offset:4; tab-width:4; indent-tabs-mode:nil -*- */
 
 #ifndef _XEN_SHADOW_H
 #define _XEN_SHADOW_H
@@ -279,7 +278,8 @@ static inline void l1pte_propagate_from_guest(
     unsigned long old_spte = spte;
 #endif
 
-    if ( shadow_mode_external(d) && mmio_space(gpte & 0xFFFFF000) ) {
+    /* Use 1:1 page table to identify MMIO address space */
+    if ( shadow_mode_external(d) && mmio_space(gpte) ) {
         *spte_p = 0;
         return;
     }
@@ -812,3 +812,12 @@ extern int _check_all_pagetables(struct domain *d, char *s);
 #endif
 
 #endif /* XEN_SHADOW_H */
+
+/*
+ * Local variables:
+ * mode: C
+ * c-set-style: "BSD"
+ * c-basic-offset: 4
+ * tab-width: 4
+ * indent-tabs-mode: nil
+ */

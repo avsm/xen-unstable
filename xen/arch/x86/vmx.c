@@ -1,4 +1,3 @@
-/* -*-  Mode:C; c-basic-offset:4; tab-width:4; indent-tabs-mode:nil -*- */
 /*
  * vmx.c: handling VMX architecture-related VM exits
  * Copyright (c) 2004, Intel Corporation.
@@ -108,7 +107,7 @@ static void inline __update_guest_eip(unsigned long inst_len)
 static int vmx_do_page_fault(unsigned long va, struct xen_regs *regs) 
 {
     unsigned long eip;
-    unsigned long gpa;
+    unsigned long gpte, gpa;
     int result;
 
 #if VMX_DEBUG
@@ -130,10 +129,12 @@ static int vmx_do_page_fault(unsigned long va, struct xen_regs *regs)
         return 0;
     }
 
-    gpa = gva_to_gpa(va);
-    if (!gpa)
-        return 0;
+    gpte = gva_to_gpte(va);
+    if (!(gpte & _PAGE_PRESENT) )
+            return 0;
+    gpa = (gpte & PAGE_MASK) + (va & ~PAGE_MASK);
 
+    /* Use 1:1 page table to identify MMIO address space */
     if (mmio_space(gpa))
         handle_mmio(va, gpa);
 
@@ -703,9 +704,6 @@ void restore_xen_regs(struct xen_regs *regs)
 }
 #endif
 
-#define TRC_VMX_VMEXIT 0x00040001
-#define TRC_VMX_VECTOR 0x00040002
-
 asmlinkage void vmx_vmexit_handler(struct xen_regs regs)
 {
     unsigned int exit_reason, idtv_info_field;
@@ -810,6 +808,7 @@ asmlinkage void vmx_vmexit_handler(struct xen_regs regs)
                 __vmwrite(VM_ENTRY_INTR_INFO_FIELD, intr_fields);
                 __vmwrite(VM_ENTRY_EXCEPTION_ERROR_CODE, regs.error_code);
                 ed->arch.arch_vmx.cpu_cr2 = va;
+                TRACE_3D(TRC_VMX_INT, ed->domain->id, TRAP_page_fault, va);
             }
             break;
         }
@@ -941,3 +940,12 @@ asmlinkage void load_cr2(void)
 }
 
 #endif /* CONFIG_VMX */
+
+/*
+ * Local variables:
+ * mode: C
+ * c-set-style: "BSD"
+ * c-basic-offset: 4
+ * tab-width: 4
+ * indent-tabs-mode: nil
+ */

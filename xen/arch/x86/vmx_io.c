@@ -1,4 +1,3 @@
-/* -*-  Mode:C; c-basic-offset:4; tab-width:4; indent-tabs-mode:nil -*- */
 /*
  * vmx_io.c: handling I/O, interrupts related VMX entry/exit 
  * Copyright (c) 2004, Intel Corporation.
@@ -22,6 +21,7 @@
 #include <xen/mm.h>
 #include <xen/lib.h>
 #include <xen/errno.h>
+#include <xen/trace.h>
 
 #include <asm/cpufeature.h>
 #include <asm/processor.h>
@@ -367,11 +367,18 @@ void vmx_intr_assist(struct exec_domain *d)
     else
         clear_highest_bit(d, highest_vector); 
 
+    /* close the window between guest PIT initialization and sti */
+    if (highest_vector == vpit->vector && !vpit->first_injected){
+        vpit->first_injected = 1;
+        vpit->pending_intr_nr = 0;
+    }
+
     intr_fields = (INTR_INFO_VALID_MASK | INTR_TYPE_EXT_INTR | highest_vector);
     __vmwrite(VM_ENTRY_INTR_INFO_FIELD, intr_fields);
 
     __vmwrite(GUEST_INTERRUPTIBILITY_INFO, 0);
 
+    TRACE_2D(TRC_VMX_INT, d, highest_vector);
     if (highest_vector == vpit->vector)
         vpit->inject_point = NOW();
 
@@ -409,3 +416,12 @@ void vmx_do_resume(struct exec_domain *d)
 }
 
 #endif /* CONFIG_VMX */
+
+/*
+ * Local variables:
+ * mode: C
+ * c-set-style: "BSD"
+ * c-basic-offset: 4
+ * tab-width: 4
+ * indent-tabs-mode: nil
+ */
