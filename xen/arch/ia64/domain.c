@@ -50,7 +50,7 @@ unsigned long initrd_start = 0, initrd_end = 0;
 
 #define IS_XEN_ADDRESS(d,a) ((a >= d->xen_vastart) && (a <= d->xen_vaend))
 
-extern int loadelfimage(char *);
+//extern int loadelfimage(char *);
 extern int readelfimage_base_and_size(char *, unsigned long,
 	              unsigned long *, unsigned long *, unsigned long *);
 
@@ -236,13 +236,14 @@ void new_thread(struct exec_domain *ed,
 #endif
 	regs = (struct pt_regs *) ((unsigned long) ed + IA64_STK_OFFSET) - 1;
 	sw = (struct switch_stack *) regs - 1;
+	memset(sw,0,sizeof(struct switch_stack)+sizeof(struct pt_regs));
 	new_rbs = (unsigned long) ed + IA64_RBS_OFFSET;
 	regs->cr_ipsr = ia64_getreg(_IA64_REG_PSR)
 		| IA64_PSR_BITS_TO_SET | IA64_PSR_BN
 		& ~(IA64_PSR_BITS_TO_CLEAR | IA64_PSR_RI | IA64_PSR_IS);
 	regs->cr_ipsr |= 2UL << IA64_PSR_CPL0_BIT; // domain runs at PL2
 	regs->cr_iip = start_pc;
-	regs->ar_rsc = 0xf;		/* eager mode, privilege level 1 */
+	regs->ar_rsc = 0;		/* lazy mode */
 	regs->ar_rnat = 0;
 	regs->ar_fpsr = sw->ar_fpsr = FPSR_DEFAULT;
 	regs->loadrs = 0;
@@ -626,7 +627,9 @@ int construct_dom0(struct domain *d,
 //printk("First word of image: %lx\n",*(unsigned long *)image_start);
 
 //printf("construct_dom0: about to call parseelfimage\n");
-	rc = parseelfimage(image_start, image_len, &dsi);
+	dsi.image_addr = (unsigned long)image_start;
+	dsi.image_len  = image_len;
+	rc = parseelfimage(&dsi);
 	if ( rc != 0 )
 	    return rc;
 
