@@ -38,7 +38,7 @@
 #define rtnl_lock() ((void)0)
 #define rtnl_unlock() ((void)0)
 
-#if 1
+#if 0
 #define DPRINTK(_f, _a...) printk(_f , ## _a)
 #else 
 #define DPRINTK(_f, _a...) ((void)0)
@@ -533,6 +533,7 @@ void deliver_packet(struct sk_buff *skb, net_vif_t *vif)
     skb->pf = g_pfn;
 
  inc_and_out:        
+    smp_wmb(); /* updates must happen before releasing the descriptor. */
     shadow_ring->rx_idx = RX_RING_INC(i);
 }
 
@@ -656,10 +657,11 @@ static void add_to_net_schedule_list_tail(net_vif_t *vif)
 /* Destructor function for tx skbs. */
 static void tx_skb_release(struct sk_buff *skb)
 {
-    int i;
+    int i, send = 0;
     net_vif_t *vif = sys_vif_list[skb->src_vif];
     unsigned int idx;
     tx_shadow_entry_t *tx;
+    unsigned long cpu_mask;
     
     for ( i = 0; i < skb_shinfo(skb)->nr_frags; i++ )
         put_page_tot(skb_shinfo(skb)->frags[i].page);
@@ -681,6 +683,8 @@ static void tx_skb_release(struct sk_buff *skb)
      * mutual exclusion from do_IRQ().
      */
 
+    smp_wmb(); /* make sure any status updates occur before inc'ing tx_cons. */
+
     /* Skip over a sequence of bad descriptors, plus the first good one. */
     do {
         idx = vif->shadow_ring->tx_cons;
@@ -688,9 +692,7 @@ static void tx_skb_release(struct sk_buff *skb)
         if ( idx == vif->shadow_ring->tx_idx ) BUG();
         tx  = &vif->shadow_ring->tx_ring[idx];
         vif->shadow_ring->tx_cons = TX_RING_INC(idx);
-        if ( vif->shadow_ring->tx_cons == vif->net_ring->tx_event )
-            set_bit(_EVENT_NET_TX, 
-                    &sys_vif_list[skb->src_vif]->domain->shared_info->events);
+        if ( vif->shadow_ring->tx_cons == vif->net_ring->tx_event ) send = 1;
     } while ( tx->status != RING_STATUS_OK );
 
     /* Now skip over any more bad descriptors, up to the next good one. */
@@ -702,13 +704,19 @@ static void tx_skb_release(struct sk_buff *skb)
              (tx->status == RING_STATUS_OK) )
             break;
         vif->shadow_ring->tx_cons = TX_RING_INC(idx);
-        if ( vif->shadow_ring->tx_cons == vif->net_ring->tx_event )
-            set_bit(_EVENT_NET_TX, 
-                    &sys_vif_list[skb->src_vif]->domain->shared_info->events);
+        if ( vif->shadow_ring->tx_cons == vif->net_ring->tx_event ) send = 1;
     } while ( 1 );
 
-    /* Finally, update shared consumer index to the new private value. */
+    /* Update shared consumer index to the new private value. */
     vif->net_ring->tx_cons = vif->shadow_ring->tx_cons;
+
+    /* Send a transmit event if requested. */
+    if ( send )
+    {
+        cpu_mask = mark_guest_event(
+            sys_vif_list[skb->src_vif]->domain, _EVENT_NET_TX);
+        guest_event_notify(cpu_mask);
+    }
 }
 
     
@@ -742,8 +750,8 @@ static void net_tx_action(unsigned long unused)
 
         if ( (skb = alloc_skb_nodata(GFP_ATOMIC)) == NULL )
         {
-            add_to_net_schedule_list_tail(vif);
             printk("Out of memory in net_tx_action()!\n");
+            tx->status = RING_STATUS_BAD_PAGE;
             break;
         }
         
@@ -769,8 +777,8 @@ static void net_tx_action(unsigned long unused)
         /* Transmit should always work, or the queue would be stopped. */
         if ( dev->hard_start_xmit(skb, dev) != 0 )
         {
-            add_to_net_schedule_list_tail(vif);
             printk("Weird failure in hard_start_xmit!\n");
+            kfree_skb(skb);
             break;
         }
     }
@@ -826,6 +834,7 @@ void update_shared_ring(void)
             if ( rx->flush_count == tlb_flush_count[smp_processor_id()] )
                 __flush_tlb();
 
+            smp_wmb(); /* copy descriptor before inc'ing rx_cons */
             shadow_ring->rx_cons = RX_RING_INC(shadow_ring->rx_cons);
 
             if ( shadow_ring->rx_cons == net_ring->rx_event )
