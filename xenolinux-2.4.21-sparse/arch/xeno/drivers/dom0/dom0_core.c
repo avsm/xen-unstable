@@ -47,7 +47,6 @@ static struct proc_dir_entry *dom_list_intf;
 
 unsigned long direct_mmap(unsigned long, unsigned long, pgprot_t, int);
 int direct_unmap(unsigned long, unsigned long);
-int direct_disc_unmap(unsigned long, unsigned long, int);
 
 static ssize_t dom_usage_read(struct file * file, char * buff, size_t size, loff_t * off)
 {
