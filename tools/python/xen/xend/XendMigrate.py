@@ -1,5 +1,7 @@
 # Copyright (C) 2004 Mike Wray <mike.wray@hp.com>
 
+import traceback
+
 import errno
 import sys
 import socket
@@ -14,7 +16,8 @@ from twisted.internet.protocol import ClientFactory
 import sxp
 import XendDB
 import EventServer; eserver = EventServer.instance()
-
+from XendError import XendError
+        
 """The port for the migrate/save daemon xfrd."""
 XFRD_PORT = 8002
 
@@ -77,11 +80,16 @@ class XfrdClientFactory(ClientFactory):
 
     def clientConnectionFailed(self, connector, reason):
         print 'clientConnectionFailed>', 'connector=', connector, 'reason=', reason
+        self.xinfo.error(reason)
 
 class XfrdInfo:
     """Abstract class for info about a session with xfrd.
     Has subclasses for save and migrate.
     """
+
+    """Suspend timeout (seconds).
+    We set a timeout because suspending a domain can hang."""
+    timeout = 30
 
     def __init__(self):
         from xen.xend import XendDomain
@@ -91,19 +99,18 @@ class XfrdInfo:
         self.paused = {}
         
     def vmconfig(self):
-        print 'vmconfig>'
         dominfo = self.xd.domain_get(self.src_dom)
-        print 'vmconfig>', type(dominfo), dominfo
         if dominfo:
             val = sxp.to_string(dominfo.sxpr())
         else:
             val = None
-        print 'vmconfig<', 'val=', type(val), val
         return val
 
     def error(self, err):
+        print 'Error>', err
         self.state = 'error'
         if not self.deferred.called:
+            print 'Error> calling errback'
             self.deferred.errback(err)
 
     def dispatch(self, xfrd, val):
@@ -115,6 +122,7 @@ class XfrdInfo:
         def cberr(err):
             v = ['xfr.err', errno.EINVAL]
             sxp.show(v, out=xfrd.transport)
+            self.error(err)
 
         op = sxp.name(val)
         op = op.replace('.', '_')
@@ -144,16 +152,25 @@ class XfrdInfo:
         if not err: return
         self.error(err);
         xfrd.loseConnection()
-        #try:
-        #    self.xd.domain_unpause(self.src_dom)
-        #except:
-        #    print >>sys.stdout, "Error unpausing domain:", self.src_dom
         return None
 
     def xfr_progress(self, xfrd, val):
         print 'xfr_progress>', val
         return None
 
+    def xfr_vm_destroy(self, xfrd, val):
+        print 'xfr_vm_destroy>', val
+        try:
+            vmid = sxp.child0(val)
+            val = self.xd.domain_destroy(vmid)
+            if vmid in self.paused:
+                del self.paused[vmid]
+            if vmid in self.suspended:
+                del self.suspended[vmid]
+        except:
+            val = errno.EINVAL
+        return ['xfr.err', val]
+    
     def xfr_vm_pause(self, xfrd, val):
         print 'xfr_vm_pause>', val
         try:
@@ -178,6 +195,8 @@ class XfrdInfo:
     def xfr_vm_suspend(self, xfrd, val):
         """Suspend a domain. Suspending takes time, so we return
         a Deferred that is called when the suspend completes.
+        Suspending can hang, so we set a timeout and fail if it
+        takes too long.
         """
         print 'xfr_vm_suspend>', val
         try:
@@ -185,17 +204,17 @@ class XfrdInfo:
             d = defer.Deferred()
             # Subscribe to 'suspended' events so we can tell when the
             # suspend completes. Subscribe to 'died' events so we can tell if
-            # the domain died.
+            # the domain died. Set a timeout and error handler so the subscriptions
+            # will be cleaned up if suspending hangs or there is an error.
             def onSuspended(e, v):
-                print 'onSuspended>', e, v
+                print 'xfr_vm_suspend>onSuspended>', e, v
                 if v[1] != vmid: return
                 subscribe(on=0)
                 d.callback(v)
                 
             def onDied(e, v):
-                print 'onDied>', e, v
+                print 'xfr_vm_suspend>onDied>', e, v
                 if v[1] != vmid: return
-                subscribe(on=0)
                 d.errback(XendError('Domain died'))
                 
             def subscribe(on=1):
@@ -206,11 +225,20 @@ class XfrdInfo:
                 action('xend.domain.suspended', onSuspended)
                 action('xend.domain.died', onDied)
 
+            def cberr(err):
+                print 'xfr_vm_suspend>cberr>', err
+                subscribe(on=0)
+                return err
+
             subscribe()
             val = self.xd.domain_shutdown(vmid, reason='suspend')
             self.suspended[vmid] = 1
+            d.addErrback(cberr)
+            d.setTimeout(self.timeout)
             return d
-        except:
+        except Exception, err:
+            print 'xfr_vm_suspend> Exception', err
+            traceback.print_exc()
             val = errno.EINVAL
         return ['xfr.err', val]
 
@@ -278,6 +306,7 @@ class XendMigrateInfo(XfrdInfo):
             eserver.inject('xend.migrate.ok', self.sxpr())
         else:
             self.state = 'error'
+            self.error(XendError("migrate failed"))
             eserver.inject('xend.migrate.error', self.sxpr())
 
 class XendSaveInfo(XfrdInfo):
@@ -320,6 +349,7 @@ class XendSaveInfo(XfrdInfo):
             eserver.inject('xend.save.ok', self.sxpr())
         else:
             self.state = 'error'
+            self.error(XendError("save failed"))
             eserver.inject('xend.save.error', self.sxpr())
     
 
@@ -376,8 +406,8 @@ class XendMigrate:
 
     def session_begin(self, info):
         self._add_session(info.xid, info)
-        mcf = XfrdClientFactory(info)
-        reactor.connectTCP('localhost', XFRD_PORT, mcf)
+        xcf = XfrdClientFactory(info)
+        reactor.connectTCP('localhost', XFRD_PORT, xcf)
         return info
     
     def migrate_begin(self, dom, host, port=XFRD_PORT):
