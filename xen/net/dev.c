@@ -38,7 +38,7 @@
 #define rtnl_lock() ((void)0)
 #define rtnl_unlock() ((void)0)
 
-#if 1
+#if 0
 #define DPRINTK(_f, _a...) printk(_f , ## _a)
 #else 
 #define DPRINTK(_f, _a...) ((void)0)
@@ -533,6 +533,7 @@ void deliver_packet(struct sk_buff *skb, net_vif_t *vif)
     skb->pf = g_pfn;
 
  inc_and_out:        
+    smp_wmb(); /* updates must happen before releasing the descriptor. */
     shadow_ring->rx_idx = RX_RING_INC(i);
 }
 
@@ -681,6 +682,8 @@ static void tx_skb_release(struct sk_buff *skb)
      * mutual exclusion from do_IRQ().
      */
 
+    smp_wmb(); /* make sure any status updates occur before inc'ing tx_cons. */
+
     /* Skip over a sequence of bad descriptors, plus the first good one. */
     do {
         idx = vif->shadow_ring->tx_cons;
@@ -731,15 +734,20 @@ static void net_tx_action(unsigned long unused)
         if ( vif->shadow_ring->tx_idx == vif->shadow_ring->tx_prod )
             continue;
 
-        /* Check the chosen entry is good. */
+        /* Pick an entry from the transmit queue. */
         tx = &vif->shadow_ring->tx_ring[vif->shadow_ring->tx_idx];
-        if ( tx->status != RING_STATUS_OK ) goto skip_desc;
+        vif->shadow_ring->tx_idx = TX_RING_INC(vif->shadow_ring->tx_idx);
+        if ( vif->shadow_ring->tx_idx != vif->shadow_ring->tx_prod )
+            add_to_net_schedule_list_tail(vif);
+
+        /* Check the chosen entry is good. */
+        if ( tx->status != RING_STATUS_OK ) continue;
 
         if ( (skb = alloc_skb_nodata(GFP_ATOMIC)) == NULL )
         {
-            add_to_net_schedule_list_tail(vif);
             printk("Out of memory in net_tx_action()!\n");
-            goto out;
+            tx->status = RING_STATUS_BAD_PAGE;
+            break;
         }
         
         skb->destructor = tx_skb_release;
@@ -764,17 +772,11 @@ static void net_tx_action(unsigned long unused)
         /* Transmit should always work, or the queue would be stopped. */
         if ( dev->hard_start_xmit(skb, dev) != 0 )
         {
-            add_to_net_schedule_list_tail(vif);
             printk("Weird failure in hard_start_xmit!\n");
-            goto out;
+            kfree_skb(skb);
+            break;
         }
-
-    skip_desc:
-        vif->shadow_ring->tx_idx = TX_RING_INC(vif->shadow_ring->tx_idx);
-        if ( vif->shadow_ring->tx_idx != vif->shadow_ring->tx_prod )
-            add_to_net_schedule_list_tail(vif);
     }
- out:
     spin_unlock(&dev->xmit_lock);
 }
 
@@ -827,6 +829,7 @@ void update_shared_ring(void)
             if ( rx->flush_count == tlb_flush_count[smp_processor_id()] )
                 __flush_tlb();
 
+            smp_wmb(); /* copy descriptor before inc'ing rx_cons */
             shadow_ring->rx_cons = RX_RING_INC(shadow_ring->rx_cons);
 
             if ( shadow_ring->rx_cons == net_ring->rx_event )
