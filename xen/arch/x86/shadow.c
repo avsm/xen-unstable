@@ -45,7 +45,7 @@ static inline void free_shadow_page(
     free_domheap_page(page);
 }
 
-static void free_shadow_state(struct domain *d)
+void free_shadow_state(struct domain *d)
 {
     int                   i, free = 0;
     struct shadow_status *x, *n;
@@ -56,6 +56,8 @@ static void free_shadow_state(struct domain *d)
      */
 
     shadow_audit(d, 1);
+
+    if( !d->arch.shadow_ht ) return;
 
     /* Free each hash chain in turn. */
     for ( i = 0; i < shadow_ht_buckets; i++ )
@@ -114,7 +116,7 @@ static inline int clear_shadow_page(
         /* We clear L2 pages by zeroing the guest entries. */
     case PGT_l2_page_table:
         p = map_domain_mem((spage - frame_table) << PAGE_SHIFT);
-        if ( shadow_mode(d) == SHM_full_32 )
+        if ( shadow_mode_external(d) )
             memset(p, 0, L2_PAGETABLE_ENTRIES * sizeof(*p));
         else 
             memset(p, 0, DOMAIN_ENTRIES_PER_L2_PAGETABLE * sizeof(*p));
@@ -166,15 +168,22 @@ void shadow_mode_init(void)
 {
 }
 
-int shadow_mode_enable(struct domain *d, unsigned int mode)
-{
-    d->arch.shadow_ht = xmalloc_array(struct shadow_status, shadow_ht_buckets);
-    if ( d->arch.shadow_ht == NULL )
-        goto nomem;
-    memset(d->arch.shadow_ht, 0,
-           shadow_ht_buckets * sizeof(struct shadow_status));
 
-    if ( mode == SHM_logdirty )
+int __shadow_mode_enable(struct domain *d, unsigned int mode)
+{
+    d->arch.shadow_mode = mode;
+
+    if (!d->arch.shadow_ht)
+    {
+        d->arch.shadow_ht = xmalloc_array(struct shadow_status, shadow_ht_buckets);
+        if ( d->arch.shadow_ht == NULL )
+            goto nomem;
+
+        memset(d->arch.shadow_ht, 0,
+           shadow_ht_buckets * sizeof(struct shadow_status));
+    }
+
+    if ( shadow_mode_log_dirty(d) && !d->arch.shadow_dirty_bitmap)
     {
         d->arch.shadow_dirty_bitmap_size = (d->max_pages + 63) & ~63;
         d->arch.shadow_dirty_bitmap = 
@@ -189,9 +198,6 @@ int shadow_mode_enable(struct domain *d, unsigned int mode)
                d->arch.shadow_dirty_bitmap_size/8);
     }
 
-    d->arch.shadow_mode = mode;
-
-    __shadow_mk_pagetable(d->exec_domain[0]); /* XXX SMP */
     return 0;
 
  nomem:
@@ -199,6 +205,15 @@ int shadow_mode_enable(struct domain *d, unsigned int mode)
         xfree(d->arch.shadow_ht);
     d->arch.shadow_ht = NULL;
     return -ENOMEM;
+}
+
+int shadow_mode_enable(struct domain *d, unsigned int mode)
+{
+    int rc;
+    shadow_lock(d);
+    rc = __shadow_mode_enable(d, mode);
+    shadow_unlock(d);
+    return rc;
 }
 
 void __shadow_mode_disable(struct domain *d)
@@ -240,6 +255,7 @@ static int shadow_mode_table_op(
 {
     unsigned int      op = sc->op;
     int               i, rc = 0;
+    struct exec_domain *ed;
 
     ASSERT(spin_is_locked(&d->arch.shadow_lock));
 
@@ -344,7 +360,10 @@ static int shadow_mode_table_op(
 
     SH_VLOG("shadow mode table op : page count %d", d->arch.shadow_page_count);
     shadow_audit(d, 1);
-    __shadow_mk_pagetable(d->exec_domain[0]); /* XXX SMP */
+
+    for_each_exec_domain(d,ed)
+        __update_pagetables(ed);
+
     return rc;
 }
 
@@ -352,6 +371,7 @@ int shadow_mode_control(struct domain *d, dom0_shadow_control_t *sc)
 {
     unsigned int op = sc->op;
     int          rc = 0;
+    struct exec_domain *ed;
 
     if ( unlikely(d == current->domain) )
     {
@@ -371,21 +391,24 @@ int shadow_mode_control(struct domain *d, dom0_shadow_control_t *sc)
         break;
 
     case DOM0_SHADOW_CONTROL_OP_ENABLE_TEST:
-        shadow_mode_disable(d);
-        rc = shadow_mode_enable(d, SHM_test);
+        free_shadow_state(d);
+        rc = __shadow_mode_enable(d, SHM_enable);
         break;
 
     case DOM0_SHADOW_CONTROL_OP_ENABLE_LOGDIRTY:
-        shadow_mode_disable(d);
-        rc = shadow_mode_enable(d, SHM_logdirty);
+        free_shadow_state(d);
+        rc = __shadow_mode_enable(d, d->arch.shadow_mode|SHM_log_dirty);
         break;
 
     default:
-        rc = shadow_mode(d) ? shadow_mode_table_op(d, sc) : -EINVAL;
+        rc = shadow_mode_enabled(d) ? shadow_mode_table_op(d, sc) : -EINVAL;
         break;
     }
 
     shadow_unlock(d);
+
+    for_each_exec_domain(d,ed)
+        update_pagetables(ed);
 
     domain_unpause(d);
 
@@ -446,7 +469,6 @@ unsigned long shadow_l2_table(
 {
     struct pfn_info *spfn_info;
     unsigned long    spfn;
-    l2_pgentry_t    *spl2e = 0;
     unsigned long guest_gpfn;
 
     guest_gpfn = __mfn_to_gpfn(d, gpfn);
@@ -467,7 +489,7 @@ unsigned long shadow_l2_table(
  
 #ifdef __i386__
     /* Install hypervisor and 2x linear p.t. mapings. */
-    if ( shadow_mode(d) == SHM_full_32 )
+    if ( shadow_mode_translate(d) )
     {
 #ifdef CONFIG_VMX
         vmx_update_shadow_state(d->exec_domain[0], gpfn, spfn);
@@ -477,6 +499,7 @@ unsigned long shadow_l2_table(
     }
     else
     {
+        l2_pgentry_t *spl2e;
         spl2e = (l2_pgentry_t *)map_domain_mem(spfn << PAGE_SHIFT);
         /*
          * We could proactively fill in PDEs for pages that are already
@@ -498,11 +521,10 @@ unsigned long shadow_l2_table(
             mk_l2_pgentry(__pa(page_get_owner(
                 &frame_table[gpfn])->arch.mm_perdomain_pt) |
                           __PAGE_HYPERVISOR);
+
+        unmap_domain_mem(spl2e);
     }
 #endif
-
-    if ( shadow_mode(d) != SHM_full_32 ) 
-        unmap_domain_mem(spl2e);
 
     SH_VLOG("shadow_l2_table( %p -> %p)", gpfn, spfn);
     return spfn;
@@ -933,7 +955,7 @@ int check_l2_table(
                                     L2_PAGETABLE_SHIFT]),
                (smfn << PAGE_SHIFT) | __PAGE_HYPERVISOR);
 
-    if ( shadow_mode(d) != SHM_full_32 ) {
+    if ( !shadow_mode_translate(d) ) {
         if ( (l2_pgentry_val(spl2e[PERDOMAIN_VIRT_START >> L2_PAGETABLE_SHIFT]) !=
               ((v2m(page_get_owner(&frame_table[gmfn])->arch.mm_perdomain_pt) |
                 __PAGE_HYPERVISOR))) )
