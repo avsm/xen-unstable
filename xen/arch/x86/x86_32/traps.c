@@ -23,15 +23,15 @@ void show_guest_stack(void)
     int i;
     execution_context_t *ec = get_execution_context();
     unsigned long *stack = (unsigned long *)ec->esp;
-    printk("Guest EIP is %lx\n",ec->eip);
+    printk("Guest EIP is %lx\n   ",ec->eip);
 
     for ( i = 0; i < kstack_depth_to_print; i++ )
     {
         if ( ((long)stack & (STACK_SIZE-1)) == 0 )
             break;
         if ( i && ((i % 8) == 0) )
-            printk("\n       ");
-            printk("%08lx ", *stack++);            
+            printk("\n   ");
+            printk("%p ", *stack++);            
     }
     printk("\n");
     
@@ -42,7 +42,7 @@ void show_trace(unsigned long *esp)
     unsigned long *stack, addr;
     int i;
 
-    printk("Call Trace from ESP=%p: ", esp);
+    printk("Call Trace from ESP=%p:\n   ", esp);
     stack = esp;
     i = 0;
     while (((long) stack & (STACK_SIZE-1)) != 0) {
@@ -50,7 +50,7 @@ void show_trace(unsigned long *esp)
         if (kernel_text_address(addr)) {
             if (i && ((i % 6) == 0))
                 printk("\n   ");
-            printk("[<%08lx>] ", addr);
+            printk("[<%p>] ", addr);
             i++;
         }
     }
@@ -62,7 +62,7 @@ void show_stack(unsigned long *esp)
     unsigned long *stack;
     int i;
 
-    printk("Stack trace from ESP=%p:\n", esp);
+    printk("Stack trace from ESP=%p:\n   ", esp);
 
     stack = esp;
     for ( i = 0; i < kstack_depth_to_print; i++ )
@@ -70,11 +70,11 @@ void show_stack(unsigned long *esp)
         if ( ((long)stack & (STACK_SIZE-1)) == 0 )
             break;
         if ( i && ((i % 8) == 0) )
-            printk("\n       ");
+            printk("\n   ");
         if ( kernel_text_address(*stack) )
-            printk("[%08lx] ", *stack++);
+            printk("[%p] ", *stack++);
         else
-            printk("%08lx ", *stack++);            
+            printk("%p ", *stack++);            
     }
     printk("\n");
 
@@ -105,17 +105,36 @@ void show_registers(struct xen_regs *regs)
         gs  = __HYPERVISOR_DS;
     }
 
-    printk("CPU:    %d\nEIP:    %04lx:[<%08lx>]      \nEFLAGS: %08lx\n",
+    printk("CPU:    %d\nEIP:    %04lx:[<%p>]      \nEFLAGS: %p\n",
            smp_processor_id(), 0xffff & regs->cs, regs->eip, regs->eflags);
-    printk("eax: %08lx   ebx: %08lx   ecx: %08lx   edx: %08lx\n",
+    printk("eax: %p   ebx: %p   ecx: %p   edx: %p\n",
            regs->eax, regs->ebx, regs->ecx, regs->edx);
-    printk("esi: %08lx   edi: %08lx   ebp: %08lx   esp: %08lx\n",
+    printk("esi: %p   edi: %p   ebp: %p   esp: %p\n",
            regs->esi, regs->edi, regs->ebp, esp);
     printk("ds: %04x   es: %04x   fs: %04x   gs: %04x   ss: %04x\n",
            ds, es, fs, gs, ss);
 
     show_stack((unsigned long *)&regs->esp);
 } 
+
+void show_page_walk(unsigned long addr)
+{
+    unsigned long page;
+
+    if ( addr < PAGE_OFFSET )
+        return;
+
+    printk("Pagetable walk from %p:\n", addr);
+    
+    page = l2_pgentry_val(idle_pg_table[l2_table_offset(addr)]);
+    printk(" L2 = %p %s\n", page, (page & _PAGE_PSE) ? "(4MB)" : "");
+    if ( !(page & _PAGE_PRESENT) || (page & _PAGE_PSE) )
+        return;
+
+    page &= PAGE_MASK;
+    page = ((unsigned long *) __va(page))[l1_table_offset(addr)];
+    printk("  L1 = %p\n", page);
+}
 
 #define DOUBLEFAULT_STACK_SIZE 1024
 static struct tss_struct doublefault_tss;
@@ -172,7 +191,9 @@ void __init doublefault_init(void)
     tss->eflags = 2;
     tss->bitmap = IOBMP_INVALID_OFFSET;
     _set_tssldt_desc(gdt_table+__DOUBLEFAULT_TSS_ENTRY,
-                     (int)tss, 235, 0x89);
+                     (unsigned long)tss, 235, 9);
+
+    set_task_gate(TRAP_double_fault, __DOUBLEFAULT_TSS_ENTRY<<3);
 }
 
 long set_fast_trap(struct exec_domain *p, int idx)
