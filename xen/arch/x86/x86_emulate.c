@@ -18,11 +18,14 @@ typedef int16_t            s16;
 typedef int32_t            s32;
 typedef int64_t            s64;
 #include <public/xen.h>
+#define DPRINTF(_f, _a...) printf( _f , ## _a )
 #else
 #include <xen/config.h>
 #include <xen/types.h>
 #include <xen/lib.h>
+#include <xen/mm.h>
 #include <asm/regs.h>
+#define DPRINTF DPRINTK
 #endif
 #include <asm-x86/x86_emulate.h>
 
@@ -178,7 +181,7 @@ static u8 twobyte_table[256] = {
     /* 0xB8 - 0xBF */
     0, 0, DstMem|SrcImmByte|ModRM, DstMem|SrcReg|ModRM, 0, 0, 0, 0,
     /* 0xC0 - 0xCF */
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, ImplicitOps|ModRM, 0, 0, 0, 0, 0, 0, 0, 0,
     /* 0xD0 - 0xDF */
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     /* 0xE0 - 0xEF */
@@ -225,22 +228,25 @@ struct operand {
 #define EFLAGS_MASK (EFLG_OF|EFLG_SF|EFLG_ZF|EFLG_AF|EFLG_PF|EFLG_CF)
 
 /* Before executing instruction: restore necessary bits in EFLAGS. */
-/* EFLAGS = (_sav & _msk) | (EFLAGS & ~_msk); _sav &= ~msk; */
 #define _PRE_EFLAGS(_sav, _msk, _tmp)           \
+/* EFLAGS = (_sav & _msk) | (EFLAGS & ~_msk); */\
 "push %"_sav"; "                                \
 "movl %"_msk",%"_LO32 _tmp"; "                  \
 "andl %"_LO32 _tmp",("_STK"); "                 \
-"notl %"_LO32 _tmp"; "                          \
-"andl %"_LO32 _tmp",%"_sav"; "                  \
 "pushf; "                                       \
+"notl %"_LO32 _tmp"; "                          \
 "andl %"_LO32 _tmp",("_STK"); "                 \
 "pop  %"_tmp"; "                                \
 "orl  %"_LO32 _tmp",("_STK"); "                 \
-"popf; "
+"popf; "                                        \
+/* _sav &= ~msk; */                             \
+"movl %"_msk",%"_LO32 _tmp"; "                  \
+"notl %"_LO32 _tmp"; "                          \
+"andl %"_LO32 _tmp",%"_sav"; "
 
 /* After executing instruction: write-back necessary bits in EFLAGS. */
-/* _sav |= EFLAGS & _msk; */
 #define _POST_EFLAGS(_sav, _msk, _tmp)          \
+/* _sav |= EFLAGS & _msk; */                    \
 "pushf; "                                       \
 "pop  %"_tmp"; "                                \
 "andl %"_msk",%"_LO32 _tmp"; "                  \
@@ -363,13 +369,11 @@ do{ __asm__ __volatile__ (                                              \
 /* Fetch next part of the instruction being emulated. */
 #define insn_fetch(_type, _size, _eip) \
 ({ unsigned long _x; \
-   if ( ops->read_std((unsigned long)(_eip), &_x, (_size)) ) \
+   if ( (rc = ops->read_std((unsigned long)(_eip), &_x, (_size))) != 0 ) \
        goto done; \
    (_eip) += (_size); \
    (_type)_x; \
 })
-
-#define DPRINTF(_f, _a...) printf( _f , ## _a )
 
 void *
 decode_register(
@@ -422,6 +426,7 @@ x86_emulate_memop(
     u8 modrm, modrm_mod = 0, modrm_reg = 0, modrm_rm = 0;
     unsigned int op_bytes = (mode == 8) ? 4 : mode, ad_bytes = mode;
     unsigned int lock_prefix = 0, rep_prefix = 0, i;
+    int rc = 0;
     struct operand src, dst;
 
     /* Shadow copy of register state. Committed on successful emulation. */
@@ -556,7 +561,8 @@ x86_emulate_memop(
         dst.ptr   = (unsigned long *)cr2;
         dst.bytes = (d & ByteOp) ? 1 : op_bytes;
         if ( !(d & Mov) && /* optimisation - avoid slow emulated read */
-             ops->read_emulated((unsigned long)dst.ptr, &dst.val, dst.bytes) )
+             ((rc = ops->read_emulated((unsigned long)dst.ptr,
+                                       &dst.val, dst.bytes)) != 0) )
              goto done;
         break;
     }
@@ -590,7 +596,8 @@ x86_emulate_memop(
         src.type  = OP_MEM;
         src.ptr   = (unsigned long *)cr2;
         src.bytes = (d & ByteOp) ? 1 : op_bytes;
-        if ( ops->read_emulated((unsigned long)src.ptr, &src.val, src.bytes) )
+        if ( (rc = ops->read_emulated((unsigned long)src.ptr, 
+                                      &src.val, src.bytes)) != 0 )
             goto done;
         src.orig_val = src.val;
         break;
@@ -664,6 +671,7 @@ x86_emulate_memop(
         src.val ^= dst.val;
         dst.val ^= src.val;
         src.val ^= dst.val;
+        lock_prefix = 1;
         break;
     case 0xa0 ... 0xa1: /* mov */
         dst.ptr = (unsigned long *)&_regs.eax;
@@ -682,7 +690,7 @@ x86_emulate_memop(
         /* 64-bit mode: POP defaults to 64-bit operands. */
         if ( (mode == 8) && (dst.bytes == 4) )
             dst.bytes = 8;
-        if ( ops->read_std(_regs.esp, &dst.val, dst.bytes) )
+        if ( (rc = ops->read_std(_regs.esp, &dst.val, dst.bytes)) != 0 )
             goto done;
         _regs.esp += dst.bytes;
         break;
@@ -759,11 +767,12 @@ x86_emulate_memop(
             if ( (mode == 8) && (dst.bytes == 4) )
             {
                 dst.bytes = 8;
-                if ( ops->read_std((unsigned long)dst.ptr, &dst.val, 8) )
+                if ( (rc = ops->read_std((unsigned long)dst.ptr,
+                                         &dst.val, 8)) != 0 )
                     goto done;
             }
             _regs.esp -= dst.bytes;
-            if ( ops->write_std(_regs.esp, dst.val, dst.bytes) )
+            if ( (rc = ops->write_std(_regs.esp, dst.val, dst.bytes)) != 0 )
                 goto done;
             dst.val = dst.orig_val; /* skanky: disable writeback */
             break;
@@ -790,22 +799,13 @@ x86_emulate_memop(
             break;
         case OP_MEM:
             if ( lock_prefix )
-            {
-                unsigned long seen;
-                if ( ops->cmpxchg_emulated((unsigned long)dst.ptr,
-                                           dst.orig_val, dst.val,
-                                           &seen, dst.bytes) )
-                    goto done;
-                if ( seen != dst.orig_val )
-                    goto done; /* Try again... */
-            }
+                rc = ops->cmpxchg_emulated(
+                    (unsigned long)dst.ptr, dst.orig_val, dst.val, dst.bytes);
             else
-            {
-                if ( ops->write_emulated((unsigned long)dst.ptr,
-                                         dst.val, dst.bytes) )
-                    goto done;
-            }
-            break;
+                rc = ops->write_emulated(
+                    (unsigned long)dst.ptr, dst.val, dst.bytes);
+            if ( rc != 0 )
+                goto done;
         default:
             break;
         }
@@ -815,7 +815,7 @@ x86_emulate_memop(
     *regs = _regs;
 
  done:
-    return 0;
+    return (rc == X86EMUL_UNHANDLEABLE) ? -1 : 0;
 
  special_insn:
     if ( twobyte )
@@ -839,15 +839,15 @@ x86_emulate_memop(
         {
             /* Write fault: destination is special memory. */
             dst.ptr = (unsigned long *)cr2;
-            if ( ops->read_std(_regs.esi - _regs.edi + cr2, 
-                               &dst.val, dst.bytes) )
+            if ( (rc = ops->read_std(_regs.esi - _regs.edi + cr2, 
+                                     &dst.val, dst.bytes)) != 0 )
                 goto done;
         }
         else
         {
             /* Read fault: source is special memory. */
             dst.ptr = (unsigned long *)(_regs.edi - _regs.esi + cr2);
-            if ( ops->read_emulated(cr2, &dst.val, dst.bytes) )
+            if ( (rc = ops->read_emulated(cr2, &dst.val, dst.bytes)) != 0 )
                 goto done;
         }
         _regs.esi += (_regs.eflags & EFLG_DF) ? -dst.bytes : dst.bytes;
@@ -867,7 +867,7 @@ x86_emulate_memop(
         dst.type  = OP_REG;
         dst.bytes = (d & ByteOp) ? 1 : op_bytes;
         dst.ptr   = (unsigned long *)&_regs.eax;
-        if ( ops->read_emulated(cr2, &dst.val, dst.bytes) )
+        if ( (rc = ops->read_emulated(cr2, &dst.val, dst.bytes)) != 0 )
             goto done;
         _regs.esi += (_regs.eflags & EFLG_DF) ? -dst.bytes : dst.bytes;
         break;
@@ -935,23 +935,23 @@ x86_emulate_memop(
         }
         break;
     case 0xa3: bt: /* bt */
-        src.val &= (1UL << (1 << dst.bytes)) - 1; /* only subword offset */
+        src.val &= (dst.bytes << 3) - 1; /* only subword offset */
         emulate_2op_SrcV_nobyte("bt", src, dst, _regs.eflags);
         break;
     case 0xb3: btr: /* btr */
-        src.val &= (1UL << (1 << dst.bytes)) - 1; /* only subword offset */
+        src.val &= (dst.bytes << 3) - 1; /* only subword offset */
         emulate_2op_SrcV_nobyte("btr", src, dst, _regs.eflags);
         break;
     case 0xab: bts: /* bts */
-        src.val &= (1UL << (1 << dst.bytes)) - 1; /* only subword offset */
+        src.val &= (dst.bytes << 3) - 1; /* only subword offset */
         emulate_2op_SrcV_nobyte("bts", src, dst, _regs.eflags);
         break;
     case 0xbb: btc: /* btc */
-        src.val &= (1UL << (1 << dst.bytes)) - 1; /* only subword offset */
+        src.val &= (dst.bytes << 3) - 1; /* only subword offset */
         emulate_2op_SrcV_nobyte("btc", src, dst, _regs.eflags);
         break;
     case 0xba: /* Grp8 */
-        switch ( modrm_reg >> 1 )
+        switch ( modrm_reg & 3 )
         {
         case 0: goto bt;
         case 1: goto bts;
@@ -963,11 +963,102 @@ x86_emulate_memop(
     goto writeback;
 
  twobyte_special_insn:
-    /* Only prefetch instructions get here, so nothing to do. */
-    dst.orig_val = dst.val; /* disable writeback */
+    /* Disable writeback. */
+    dst.orig_val = dst.val;
+    switch ( b )
+    {
+    case 0x0d: /* GrpP (prefetch) */
+    case 0x18: /* Grp16 (prefetch/nop) */
+        break;
+    case 0xc7: /* Grp9 (cmpxchg8b) */
+#if defined(__i386__)
+    {
+        unsigned long old_lo, old_hi;
+        if ( ((rc = ops->read_emulated(cr2+0, &old_lo, 4)) != 0) ||
+             ((rc = ops->read_emulated(cr2+4, &old_hi, 4)) != 0) )
+            goto done;
+        if ( (old_lo != _regs.eax) || (old_hi != _regs.edx) )
+        {
+            _regs.eax = old_lo;
+            _regs.edx = old_hi;
+            _regs.eflags &= ~EFLG_ZF;
+        }
+        else if ( ops->cmpxchg8b_emulated == NULL )
+        {
+            rc = X86EMUL_UNHANDLEABLE;
+            goto done;
+        }
+        else
+        {
+            if ( (rc = ops->cmpxchg8b_emulated(cr2, old_lo, old_hi,
+                                               _regs.ebx, _regs.ecx)) != 0 )
+                goto done;
+            _regs.eflags |= EFLG_ZF;
+        }
+        break;
+    }
+#elif defined(__x86_64__)
+    {
+        unsigned long old, new;
+        if ( (rc = ops->read_emulated(cr2, &old, 8)) != 0 )
+            goto done;
+        if ( ((u32)(old>>0) != (u32)_regs.eax) ||
+             ((u32)(old>>32) != (u32)_regs.edx) )
+        {
+            _regs.eax = (u32)(old>>0);
+            _regs.edx = (u32)(old>>32);
+            _regs.eflags &= ~EFLG_ZF;
+        }
+        else
+        {
+            new = (_regs.ecx<<32)|(u32)_regs.ebx;
+            if ( (rc = ops->cmpxchg_emulated(cr2, old, new, 8)) != 0 )
+                goto done;
+            _regs.eflags |= EFLG_ZF;
+        }
+        break;
+    }
+#endif
+    }
     goto writeback;
 
  cannot_emulate:
     DPRINTF("Cannot emulate %02x\n", b);
     return -1;
 }
+
+#ifndef __TEST_HARNESS__
+
+#include <asm/mm.h>
+#include <asm/uaccess.h>
+
+int
+x86_emulate_read_std(
+    unsigned long addr,
+    unsigned long *val,
+    unsigned int bytes)
+{
+    *val = 0;
+    if ( copy_from_user((void *)val, (void *)addr, bytes) )
+    {
+        propagate_page_fault(addr, 4); /* user mode, read fault */
+        return X86EMUL_PROPAGATE_FAULT;
+    }
+    return X86EMUL_CONTINUE;
+}
+
+int
+x86_emulate_write_std(
+    unsigned long addr,
+    unsigned long val,
+    unsigned int bytes)
+{
+    if ( copy_to_user((void *)addr, (void *)&val, bytes) )
+    {
+        propagate_page_fault(addr, 6); /* user mode, write fault */
+        return X86EMUL_PROPAGATE_FAULT;
+    }
+    return X86EMUL_CONTINUE;
+}
+
+#endif

@@ -22,6 +22,7 @@
 #include <xen/lib.h>
 #include <xen/init.h>
 #include <xen/mm.h>
+#include <xen/sched.h>
 #include <asm/page.h>
 #include <asm/flushtlb.h>
 #include <asm/fixmap.h>
@@ -287,7 +288,7 @@ int check_descriptor(struct desc_struct *d)
     if ( (b & _SEGMENT_DPL) != 3 )
         goto bad;
 
-    /* Any code or data segment is okay. No base/limit checking. */
+    /* All code and data segments are okay. No base/limit checking. */
     if ( (b & _SEGMENT_S) )
         goto good;
 
