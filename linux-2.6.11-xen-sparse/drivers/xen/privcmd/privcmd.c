@@ -28,6 +28,11 @@
 #include <asm-xen/xen-public/dom0_ops.h>
 #include <asm-xen/xen_proc.h>
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,0)
+#define pud_t pgd_t
+#define pud_offset(d, va) d
+#endif
+
 static struct proc_dir_entry *privcmd_intf;
 
 static int privcmd_ioctl(struct inode *inode, struct file *file,
@@ -174,13 +179,12 @@ static int privcmd_ioctl(struct inode *inode, struct file *file,
 
     case IOCTL_PRIVCMD_GET_MACH2PHYS_START_MFN:
     {
-	unsigned long m2p_start_mfn = 
-	    HYPERVISOR_shared_info->arch.mfn_to_pfn_start;
-
-	if( put_user( m2p_start_mfn, (unsigned long *) data ) )
-	    ret = -EFAULT;
-	else
-	    ret = 0;
+        unsigned long m2pv = (unsigned long)machine_to_phys_mapping;
+        pgd_t *pgd = pgd_offset_k(m2pv);
+        pud_t *pud = pud_offset(pgd, m2pv);
+        pmd_t *pmd = pmd_offset(pud, m2pv);
+        unsigned long m2p_start_mfn = pfn_to_mfn(pmd_val(*pmd) >> PAGE_SHIFT);
+        ret = put_user(m2p_start_mfn, (unsigned long *)data) ? -EFAULT: 0;
     }
     break;
 
