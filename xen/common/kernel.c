@@ -239,7 +239,6 @@ void putchar_serial(unsigned char c)
 {
 #ifdef CONFIG_OUTPUT_SERIAL
     if ( c == '\n' ) putchar_serial('\r');
-    if ( (c != '\n') && (c != '\r') && ((c < 32) || (c > 126)) ) return;
     while ( !(inb(SERIAL_BASE+LINE_STATUS)&(1<<5)) ) barrier();
     outb(c, SERIAL_BASE+TX_HOLD);
 #endif
@@ -330,13 +329,14 @@ static void putchar (int c)
 {
 #ifdef CONFIG_OUTPUT_CONSOLE
     static char zeroarr[2*COLUMNS] = { 0 };
+    if ( (c != '\n') && ((c < 32) || (c > 126)) ) return;
 #endif
 
     putchar_serial(c);
 
 #ifdef CONFIG_OUTPUT_CONSOLE
     if(opt_console) {
-      if (c == '\n' || c == '\r')
+      if (c == '\n')
 	{
 	newline:
 	  xpos = 0;
@@ -445,7 +445,6 @@ unsigned short compute_cksum(unsigned short *buf, int count)
 /* XXX SMH: below is rather vile; pulled in to allow network console */
 
 extern int netif_rx(struct sk_buff *); 
-extern struct net_device *the_dev;
 
 typedef struct my_udphdr {
     __u16 source;
@@ -520,8 +519,8 @@ int console_export(char *str, int len)
     iph->id      = 0xdead;
     iph->ttl     = 255;
     iph->protocol= 17;
-    iph->daddr   = htonl(0xa9fe0001);  /* 169.254.0.1 */
-    iph->saddr   = htonl(0xa9fe0001);  /* 169.254.0.1 */
+    iph->daddr   = htonl(0xa9fe0100);  /* 169.254.1.0 */
+    iph->saddr   = htonl(0xa9fe0100);  /* 169.254.1.0 */
     iph->tot_len = htons(hdr_size + len); 
     iph->check	 = 0;
     iph->check   = compute_cksum((__u16 *)iph, sizeof(struct my_iphdr)/2); 

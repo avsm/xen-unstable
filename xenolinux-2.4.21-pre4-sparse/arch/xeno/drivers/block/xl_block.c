@@ -7,6 +7,7 @@
 
 #include "xl_block.h"
 #include <linux/blk.h>
+#include <linux/cdrom.h>
 
 typedef unsigned char byte; /* from linux/ide.h */
 
@@ -49,10 +50,16 @@ inline unsigned short xldev_to_physdev(kdev_t xldev)
 
     switch ( MAJOR(xldev) ) 
     { 
-    case XLIDE_MAJOR: 
-        physdev = XENDEV_IDE + (MINOR(xldev) >> XLIDE_PARTN_SHIFT);
+    case XLIDE_MAJOR_0: 
+        physdev = XENDEV_IDE + (0*XLIDE_DEVS_PER_MAJOR) +
+            (MINOR(xldev) >> XLIDE_PARTN_SHIFT);
 	break; 
-	
+
+    case XLIDE_MAJOR_1:
+	physdev = XENDEV_IDE + (1*XLIDE_DEVS_PER_MAJOR) +
+            (MINOR(xldev) >> XLIDE_PARTN_SHIFT);
+        break;
+
     case XLSCSI_MAJOR: 
         physdev = XENDEV_SCSI + (MINOR(xldev) >> XLSCSI_PARTN_SHIFT);
 	break; 
@@ -74,8 +81,12 @@ static inline struct gendisk *xldev_to_gendisk(kdev_t xldev)
 
     switch ( MAJOR(xldev) ) 
     { 
-    case XLIDE_MAJOR: 
-        gd = xlide_gendisk;
+    case XLIDE_MAJOR_0: 
+        gd = xlide_gendisk[0];
+	break; 
+	
+    case XLIDE_MAJOR_1: 
+        gd = xlide_gendisk[1];
 	break; 
 	
     case XLSCSI_MAJOR: 
@@ -157,7 +168,7 @@ int xenolinux_block_ioctl(struct inode *inode, struct file *filep,
     case BLKSSZGET:
 	switch ( MAJOR(dev) )
         {
-	case XLIDE_MAJOR: 
+	case XLIDE_MAJOR_0: 
 	    DPRINTK_IOCTL("   BLKSSZGET: %x 0x%x\n", BLKSSZGET, 
 			  xlide_hwsect(MINOR(dev)));
 	    return xlide_hwsect(MINOR(dev)); 
@@ -213,9 +224,15 @@ int xenolinux_block_ioctl(struct inode *inode, struct file *filep,
 	if (put_user(0x106, (unsigned int *) &geo->cylinders)) return -EFAULT;
 	return 0;
 
+    case CDROMMULTISESSION:
+        printk("FIXME: support multisession CDs later\n");
+        memset((struct cdrom_multisession *)argument, 0, 
+               sizeof(struct cdrom_multisession));
+        return 0;
+
     default:
-        DPRINTK_IOCTL("   eh? unknown ioctl\n");
-	break;
+        printk("ioctl %08x not supported by xl_block\n", command);
+	return -ENOSYS;
     }
     
     return 0;
