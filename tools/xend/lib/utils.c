@@ -235,6 +235,35 @@ static PyTypeObject xu_notifier_type = {
  * *********************** MESSAGE ***********************
  */
 
+#define TYPE(_x,_y) (((_x)<<8)|(_y))
+#define P2C(_struct, _field, _ctype)                                      \
+    do {                                                                  \
+        PyObject *obj;                                                    \
+        if ( (obj = PyDict_GetItemString(payload, #_field)) != NULL )     \
+        {                                                                 \
+            if ( PyInt_Check(obj) )                                       \
+            {                                                             \
+                ((_struct *)&xum->msg.msg[0])->_field =                   \
+                  (_ctype)PyInt_AsLong(obj);                              \
+                dict_items_parsed++;                                      \
+            }                                                             \
+            else if ( PyLong_Check(obj) )                                 \
+            {                                                             \
+                ((_struct *)&xum->msg.msg[0])->_field =                   \
+                  (_ctype)PyLong_AsUnsignedLongLong(obj);                 \
+                dict_items_parsed++;                                      \
+            }                                                             \
+        }                                                                 \
+        xum->msg.length = sizeof(_struct);                                \
+    } while ( 0 )
+#define C2P(_struct, _field, _pytype, _ctype)                             \
+    do {                                                                  \
+        PyObject *obj = Py ## _pytype ## _From ## _ctype                  \
+                        (((_struct *)&xum->msg.msg[0])->_field);          \
+        if ( dict == NULL ) dict = PyDict_New();                          \
+        PyDict_SetItemString(dict, #_field, obj);                         \
+    } while ( 0 )
+
 typedef struct {
     PyObject_HEAD;
     control_msg_t msg;
@@ -262,38 +291,166 @@ static PyObject *xu_message_append_payload(PyObject *self, PyObject *args)
     return Py_None;
 }
 
+static PyObject *xu_message_set_response_fields(PyObject *self, PyObject *args)
+{
+    xu_message_object *xum = (xu_message_object *)self;
+    PyObject *payload;
+    int dict_items_parsed = 0;
+
+    if ( !PyArg_ParseTuple(args, "O", &payload) )
+        return NULL;
+
+    if ( !PyDict_Check(payload) )
+    {
+        PyErr_SetString(PyExc_TypeError, "payload is not a dictionary");
+        return NULL;
+    }
+
+    switch ( TYPE(xum->msg.type, xum->msg.subtype) )
+    {
+    case TYPE(CMSG_BLKIF_FE, CMSG_BLKIF_FE_DRIVER_STATUS_CHANGED):
+        P2C(blkif_fe_driver_status_changed_t, nr_interfaces, u32);
+        break;
+    case TYPE(CMSG_NETIF_FE, CMSG_NETIF_FE_DRIVER_STATUS_CHANGED):
+        P2C(netif_fe_driver_status_changed_t, nr_interfaces, u32);
+        break;
+    }
+
+    if ( dict_items_parsed != PyDict_Size(payload) )
+    {
+        PyErr_SetString(PyExc_TypeError, "payload contains bad items");
+        return NULL;
+    }
+
+    Py_INCREF(Py_None);
+    return Py_None;
+}
+
 static PyObject *xu_message_get_payload(PyObject *self, PyObject *args)
 {
     xu_message_object *xum = (xu_message_object *)self;
+    PyObject *dict = NULL;
 
     if ( !PyArg_ParseTuple(args, "") )
         return NULL;
 
+    switch ( TYPE(xum->msg.type, xum->msg.subtype) )
+    {
+    case TYPE(CMSG_BLKIF_FE, CMSG_BLKIF_FE_INTERFACE_STATUS_CHANGED):
+        C2P(blkif_fe_interface_status_changed_t, handle, Int, Long);
+        C2P(blkif_fe_interface_status_changed_t, status, Int, Long);
+        C2P(blkif_fe_interface_status_changed_t, evtchn, Int, Long);
+        return dict;
+    case TYPE(CMSG_BLKIF_FE, CMSG_BLKIF_FE_DRIVER_STATUS_CHANGED):
+        C2P(blkif_fe_driver_status_changed_t, status, Int, Long);
+        return dict;
+    case TYPE(CMSG_BLKIF_FE, CMSG_BLKIF_FE_INTERFACE_CONNECT):
+        C2P(blkif_fe_interface_connect_t, handle,      Int, Long);
+        C2P(blkif_fe_interface_connect_t, shmem_frame, Int, Long);
+        return dict;
+    case TYPE(CMSG_BLKIF_FE, CMSG_BLKIF_FE_INTERFACE_DISCONNECT):
+        C2P(blkif_fe_interface_disconnect_t, handle, Int, Long);
+        return dict;
+    case TYPE(CMSG_BLKIF_BE, CMSG_BLKIF_BE_CREATE):
+        C2P(blkif_be_create_t, domid,        Int, Long);
+        C2P(blkif_be_create_t, blkif_handle, Int, Long);
+        C2P(blkif_be_create_t, status,       Int, Long);
+        return dict;
+    case TYPE(CMSG_BLKIF_BE, CMSG_BLKIF_BE_DESTROY):
+        C2P(blkif_be_destroy_t, domid,        Int, Long);
+        C2P(blkif_be_destroy_t, blkif_handle, Int, Long);
+        C2P(blkif_be_destroy_t, status,       Int, Long);
+        return dict;
+    case TYPE(CMSG_BLKIF_BE, CMSG_BLKIF_BE_CONNECT):
+        C2P(blkif_be_connect_t, domid,        Int, Long);
+        C2P(blkif_be_connect_t, blkif_handle, Int, Long);
+        C2P(blkif_be_connect_t, shmem_frame,  Int, Long);
+        C2P(blkif_be_connect_t, evtchn,       Int, Long);
+        C2P(blkif_be_connect_t, status,       Int, Long);
+        return dict;
+    case TYPE(CMSG_BLKIF_BE, CMSG_BLKIF_BE_DISCONNECT):
+        C2P(blkif_be_disconnect_t, domid,        Int, Long);
+        C2P(blkif_be_disconnect_t, blkif_handle, Int, Long);
+        C2P(blkif_be_disconnect_t, status,       Int, Long);
+        return dict;
+    case TYPE(CMSG_BLKIF_BE, CMSG_BLKIF_BE_VBD_CREATE):
+        C2P(blkif_be_vbd_create_t, domid,        Int, Long);
+        C2P(blkif_be_vbd_create_t, blkif_handle, Int, Long);
+        C2P(blkif_be_vbd_create_t, vdevice,      Int, Long);
+        C2P(blkif_be_vbd_create_t, readonly,     Int, Long);
+        C2P(blkif_be_vbd_create_t, status,       Int, Long);
+        return dict;
+    case TYPE(CMSG_BLKIF_BE, CMSG_BLKIF_BE_VBD_DESTROY):
+        C2P(blkif_be_vbd_destroy_t, domid,        Int, Long);
+        C2P(blkif_be_vbd_destroy_t, blkif_handle, Int, Long);
+        C2P(blkif_be_vbd_destroy_t, vdevice,      Int, Long);
+        C2P(blkif_be_vbd_destroy_t, status,       Int, Long);
+        return dict;
+    case TYPE(CMSG_BLKIF_BE, CMSG_BLKIF_BE_VBD_GROW):
+        C2P(blkif_be_vbd_grow_t, domid,         Int, Long);
+        C2P(blkif_be_vbd_grow_t, blkif_handle,  Int, Long);
+        C2P(blkif_be_vbd_grow_t, vdevice,       Int, Long);
+        C2P(blkif_be_vbd_grow_t, extent.sector_start, 
+             Long, UnsignedLongLong);
+        C2P(blkif_be_vbd_grow_t, extent.sector_length, 
+             Long, UnsignedLongLong);
+        C2P(blkif_be_vbd_grow_t, extent.device, Int, Long);
+        C2P(blkif_be_vbd_grow_t, status,        Int, Long);
+        return dict;
+    case TYPE(CMSG_BLKIF_BE, CMSG_BLKIF_BE_VBD_SHRINK):
+        C2P(blkif_be_vbd_shrink_t, domid,        Int, Long);
+        C2P(blkif_be_vbd_shrink_t, blkif_handle, Int, Long);
+        C2P(blkif_be_vbd_shrink_t, vdevice,      Int, Long);
+        C2P(blkif_be_vbd_shrink_t, status,       Int, Long);
+        return dict;
+    case TYPE(CMSG_BLKIF_BE, CMSG_BLKIF_BE_DRIVER_STATUS_CHANGED):
+        C2P(blkif_be_driver_status_changed_t, status, Int, Long);
+        return dict;
+    case TYPE(CMSG_NETIF_FE, CMSG_NETIF_FE_INTERFACE_STATUS_CHANGED):
+        C2P(netif_fe_interface_status_changed_t, handle, Int, Long);
+        C2P(netif_fe_interface_status_changed_t, status, Int, Long);
+        C2P(netif_fe_interface_status_changed_t, evtchn, Int, Long);
+        return dict;
+    case TYPE(CMSG_NETIF_FE, CMSG_NETIF_FE_DRIVER_STATUS_CHANGED):
+        C2P(netif_fe_driver_status_changed_t, status, Int, Long);
+        return dict;
+    case TYPE(CMSG_NETIF_FE, CMSG_NETIF_FE_INTERFACE_CONNECT):
+        C2P(netif_fe_interface_connect_t, handle,         Int, Long);
+        C2P(netif_fe_interface_connect_t, tx_shmem_frame, Int, Long);
+        C2P(netif_fe_interface_connect_t, rx_shmem_frame, Int, Long);
+        return dict;
+    case TYPE(CMSG_NETIF_FE, CMSG_NETIF_FE_INTERFACE_DISCONNECT):
+        C2P(netif_fe_interface_disconnect_t, handle, Int, Long);
+        return dict;
+    case TYPE(CMSG_NETIF_BE, CMSG_NETIF_BE_CREATE):
+        C2P(netif_be_create_t, domid,        Int, Long);
+        C2P(netif_be_create_t, netif_handle, Int, Long);
+        C2P(netif_be_create_t, status,       Int, Long);
+        return dict;
+    case TYPE(CMSG_NETIF_BE, CMSG_NETIF_BE_DESTROY):
+        C2P(netif_be_destroy_t, domid,        Int, Long);
+        C2P(netif_be_destroy_t, netif_handle, Int, Long);
+        C2P(netif_be_destroy_t, status,       Int, Long);
+        return dict;
+    case TYPE(CMSG_NETIF_BE, CMSG_NETIF_BE_CONNECT):
+        C2P(netif_be_connect_t, domid,          Int, Long);
+        C2P(netif_be_connect_t, netif_handle,   Int, Long);
+        C2P(netif_be_connect_t, tx_shmem_frame, Int, Long);
+        C2P(netif_be_connect_t, rx_shmem_frame, Int, Long);
+        C2P(netif_be_connect_t, evtchn,         Int, Long);
+        C2P(netif_be_connect_t, status,         Int, Long);
+        return dict;
+    case TYPE(CMSG_NETIF_BE, CMSG_NETIF_BE_DISCONNECT):
+        C2P(netif_be_disconnect_t, domid,        Int, Long);
+        C2P(netif_be_disconnect_t, netif_handle, Int, Long);
+        C2P(netif_be_disconnect_t, status,       Int, Long);
+        return dict;
+    case TYPE(CMSG_NETIF_BE, CMSG_NETIF_BE_DRIVER_STATUS_CHANGED):
+        C2P(netif_be_driver_status_changed_t, status, Int, Long);
+        return dict;
+    }
+
     return PyString_FromStringAndSize(xum->msg.msg, xum->msg.length);
-}
-
-static PyObject *xu_message_set_header(PyObject *self, 
-                                       PyObject *args, 
-                                       PyObject *kwds)
-{
-    xu_message_object *xum = (xu_message_object *)self;
-    int type = -1, subtype = -1, id = -1;
-
-    static char *kwd_list[] = { "type", "subtype", "id", NULL };
-
-    if ( !PyArg_ParseTupleAndKeywords(args, kwds, "|iii", kwd_list,
-                                      &type, &subtype, &id) )
-        return NULL;
-
-    if ( type != -1 )
-        xum->msg.type = (u8)type;
-    if ( subtype != -1 )
-        xum->msg.subtype = (u8)subtype;
-    if ( id != -1 )
-        xum->msg.id = (u8)id;
-
-    Py_INCREF(Py_None);
-    return Py_None;
 }
 
 static PyObject *xu_message_get_header(PyObject *self, PyObject *args)
@@ -315,15 +472,15 @@ static PyMethodDef xu_message_methods[] = {
       METH_VARARGS,
       "Append @str to the message payload.\n" },
 
+    { "set_response_fields",
+      (PyCFunction)xu_message_set_response_fields,
+      METH_VARARGS,
+      "Fill in the response fields in a message that was passed to us.\n" },
+
     { "get_payload",
       (PyCFunction)xu_message_get_payload,
       METH_VARARGS,
       "Return the message payload in string form.\n" },
-
-    { "set_header",
-      (PyCFunction)xu_message_set_header,
-      METH_VARARGS | METH_KEYWORDS,
-      "Accepts keywords @type, @subtype, and @id.\n" },
 
     { "get_header",
       (PyCFunction)xu_message_get_header,
@@ -338,9 +495,10 @@ staticforward PyTypeObject xu_message_type;
 static PyObject *xu_message_new(PyObject *self, PyObject *args)
 {
     xu_message_object *xum;
-    int type, subtype, id;
+    int type, subtype, id, dict_items_parsed = 0;
+    PyObject *payload = NULL;
 
-    if ( !PyArg_ParseTuple(args, "iii", &type, &subtype, &id) )
+    if ( !PyArg_ParseTuple(args, "iii|O", &type, &subtype, &id, &payload) )
         return NULL;
 
     xum = PyObject_New(xu_message_object, &xu_message_type);
@@ -349,6 +507,110 @@ static PyObject *xu_message_new(PyObject *self, PyObject *args)
     xum->msg.subtype = subtype;
     xum->msg.id      = id;
     xum->msg.length  = 0;
+
+    if ( payload == NULL )
+        return (PyObject *)xum;
+
+    if ( !PyDict_Check(payload) )
+    {
+        PyErr_SetString(PyExc_TypeError, "payload is not a dictionary");
+        PyObject_Del((PyObject *)xum);
+        return NULL;
+    }
+
+    switch ( TYPE(type, subtype) )
+    {
+    case TYPE(CMSG_BLKIF_FE, CMSG_BLKIF_FE_INTERFACE_STATUS_CHANGED):
+        P2C(blkif_fe_interface_status_changed_t, handle, u32);
+        P2C(blkif_fe_interface_status_changed_t, status, u32);
+        P2C(blkif_fe_interface_status_changed_t, evtchn, u16);
+        break;
+    case TYPE(CMSG_BLKIF_BE, CMSG_BLKIF_BE_CREATE):
+        P2C(blkif_be_create_t, domid,        u32);
+        P2C(blkif_be_create_t, blkif_handle, u32);
+        break;
+    case TYPE(CMSG_BLKIF_BE, CMSG_BLKIF_BE_DESTROY):
+        P2C(blkif_be_destroy_t, domid,        u32);
+        P2C(blkif_be_destroy_t, blkif_handle, u32);
+        break;
+    case TYPE(CMSG_BLKIF_BE, CMSG_BLKIF_BE_CONNECT):
+        P2C(blkif_be_connect_t, domid,        u32);
+        P2C(blkif_be_connect_t, blkif_handle, u32);
+        P2C(blkif_be_connect_t, shmem_frame,  memory_t);
+        P2C(blkif_be_connect_t, evtchn,       u16);
+        break;
+    case TYPE(CMSG_BLKIF_BE, CMSG_BLKIF_BE_DISCONNECT):
+        P2C(blkif_be_disconnect_t, domid,        u32);
+        P2C(blkif_be_disconnect_t, blkif_handle, u32);
+        break;
+    case TYPE(CMSG_BLKIF_BE, CMSG_BLKIF_BE_VBD_CREATE):
+        P2C(blkif_be_vbd_create_t, domid,        u32);
+        P2C(blkif_be_vbd_create_t, blkif_handle, u32);
+        P2C(blkif_be_vbd_create_t, vdevice,      blkif_vdev_t);
+        P2C(blkif_be_vbd_create_t, readonly,     u16);
+        break;
+    case TYPE(CMSG_BLKIF_BE, CMSG_BLKIF_BE_VBD_DESTROY):
+        P2C(blkif_be_vbd_destroy_t, domid,        u32);
+        P2C(blkif_be_vbd_destroy_t, blkif_handle, u32);
+        P2C(blkif_be_vbd_destroy_t, vdevice,      blkif_vdev_t);
+        break;
+    case TYPE(CMSG_BLKIF_BE, CMSG_BLKIF_BE_VBD_GROW):
+        P2C(blkif_be_vbd_grow_t, domid,                u32);
+        P2C(blkif_be_vbd_grow_t, blkif_handle,         u32);
+        P2C(blkif_be_vbd_grow_t, vdevice,              blkif_vdev_t);
+        P2C(blkif_be_vbd_grow_t, extent.sector_start,  blkif_sector_t);
+        P2C(blkif_be_vbd_grow_t, extent.sector_length, blkif_sector_t);
+        P2C(blkif_be_vbd_grow_t, extent.device,        blkif_pdev_t);
+        break;
+    case TYPE(CMSG_BLKIF_BE, CMSG_BLKIF_BE_VBD_SHRINK):
+        P2C(blkif_be_vbd_shrink_t, domid,        u32);
+        P2C(blkif_be_vbd_shrink_t, blkif_handle, u32);
+        P2C(blkif_be_vbd_shrink_t, vdevice,      blkif_vdev_t);
+        break;
+    case TYPE(CMSG_NETIF_FE, CMSG_NETIF_FE_INTERFACE_STATUS_CHANGED):
+        P2C(netif_fe_interface_status_changed_t, handle, u32);
+        P2C(netif_fe_interface_status_changed_t, status, u32);
+        P2C(netif_fe_interface_status_changed_t, evtchn, u16);
+        P2C(netif_fe_interface_status_changed_t, mac[0], u8);
+        P2C(netif_fe_interface_status_changed_t, mac[1], u8);
+        P2C(netif_fe_interface_status_changed_t, mac[2], u8);
+        P2C(netif_fe_interface_status_changed_t, mac[3], u8);
+        P2C(netif_fe_interface_status_changed_t, mac[4], u8);
+        P2C(netif_fe_interface_status_changed_t, mac[5], u8);
+        break;
+    case TYPE(CMSG_NETIF_BE, CMSG_NETIF_BE_CREATE):
+        P2C(netif_be_create_t, domid,        u32);
+        P2C(netif_be_create_t, netif_handle, u32);
+        P2C(netif_be_create_t, mac[0],       u8);
+        P2C(netif_be_create_t, mac[1],       u8);
+        P2C(netif_be_create_t, mac[2],       u8);
+        P2C(netif_be_create_t, mac[3],       u8);
+        P2C(netif_be_create_t, mac[4],       u8);
+        P2C(netif_be_create_t, mac[5],       u8);
+        break;
+    case TYPE(CMSG_NETIF_BE, CMSG_NETIF_BE_DESTROY):
+        P2C(netif_be_destroy_t, domid,        u32);
+        P2C(netif_be_destroy_t, netif_handle, u32);
+        break;
+    case TYPE(CMSG_NETIF_BE, CMSG_NETIF_BE_CONNECT):
+        P2C(netif_be_connect_t, domid,          u32);
+        P2C(netif_be_connect_t, netif_handle,   u32);
+        P2C(netif_be_connect_t, tx_shmem_frame, memory_t);
+        P2C(netif_be_connect_t, rx_shmem_frame, memory_t);
+        P2C(netif_be_connect_t, evtchn,         u16);
+        break;
+    case TYPE(CMSG_NETIF_BE, CMSG_NETIF_BE_DISCONNECT):
+        P2C(netif_be_disconnect_t, domid,        u32);
+        P2C(netif_be_disconnect_t, netif_handle, u32);
+        break;
+    }
+
+    if ( dict_items_parsed != PyDict_Size(payload) )
+    {
+        PyErr_SetString(PyExc_TypeError, "payload contains bad items");
+        PyObject_Del((PyObject *)xum);
+        return NULL;
+    }
 
     return (PyObject *)xum;
 }
