@@ -77,7 +77,7 @@ EXPORT_SYMBOL(mmu_cr4_features);
 
 unsigned long wait_init_idle;
 
-struct domain *idle_task[NR_CPUS] = { &idle0_task };
+struct exec_domain *idle_task[NR_CPUS] = { &idle0_exec_domain };
 
 #ifdef	CONFIG_ACPI_INTERPRETER
 int acpi_disabled = 0;
@@ -185,6 +185,11 @@ static void __init init_intel(struct cpuinfo_x86 *c)
         }
     }
 #endif
+
+#ifdef CONFIG_VMX
+    start_vmx();
+#endif
+
 }
 
 static void __init init_amd(struct cpuinfo_x86 *c)
@@ -477,7 +482,7 @@ void __init __start_xen(multiboot_info_t *mbi)
         cmdline_parse(__va(mbi->cmdline));
 
     /* Must do this early -- e.g., spinlocks rely on get_current(). */
-    set_current(&idle0_task);
+    set_current(&idle0_exec_domain);
 
     /* We initialise the serial devices very early so we can get debugging. */
     serial_init_stage1();
@@ -503,7 +508,7 @@ void __init __start_xen(multiboot_info_t *mbi)
             e820_raw[e820_raw_nr].size = 
                 ((u64)map->length_high << 32) | (u64)map->length_low;
             e820_raw[e820_raw_nr].type = 
-                (map->type > E820_NVS) ? E820_RESERVED : map->type;
+                (map->type > E820_SHARED_PAGE) ? E820_RESERVED : map->type;
             e820_raw_nr++;
             bytes += map->size + 4;
         }
@@ -606,7 +611,7 @@ void __init __start_xen(multiboot_info_t *mbi)
     if ( dom0 == NULL )
         panic("Error creating domain 0\n");
 
-    set_bit(DF_PRIVILEGED, &dom0->flags);
+    set_bit(DF_PRIVILEGED, &dom0->d_flags);
 
     /* Grab the DOM0 command line. Skip past the image name. */
     cmdline = (unsigned char *)(mod[0].string ? __va(mod[0].string) : NULL);
@@ -642,7 +647,7 @@ void __init __start_xen(multiboot_info_t *mbi)
     /* Give up the VGA console if DOM0 is configured to grab it. */
     console_endboot(cmdline && strstr(cmdline, "tty0"));
 
-    domain_unpause_by_systemcontroller(current);
+    domain_unpause_by_systemcontroller(current->domain);
     domain_unpause_by_systemcontroller(dom0);
     startup_cpu_idle_loop();
 }
