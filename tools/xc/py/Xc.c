@@ -509,7 +509,7 @@ static PyObject *pyxc_linux_build(PyObject *self,
 
     static char *kwd_list[] = { "dom", "control_evtchn", 
                                 "image", "ramdisk", "cmdline", "flags",
-				NULL };
+                                NULL };
 
     if ( !PyArg_ParseTupleAndKeywords(args, kwds, "iis|ssi", kwd_list, 
                                       &dom, &control_evtchn, 
@@ -927,7 +927,7 @@ static PyObject *pyxc_shadow_control(PyObject *self,
                                       &dom, &op) )
         return NULL;
 
-    if ( xc_shadow_control(xc->xc_handle, dom, op, NULL, 0, NULL, NULL) < 0 )
+    if ( xc_shadow_control(xc->xc_handle, dom, op, NULL, 0, NULL) < 0 )
         return PyErr_SetFromErrno(xc_error);
     
     Py_INCREF(zero);

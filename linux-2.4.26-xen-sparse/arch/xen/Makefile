@@ -16,7 +16,13 @@
 #           Added '-march' and '-mpreferred-stack-boundary' support
 #
 
-override EXTRAVERSION := -xen$(EXTRAVERSION)
+override EXTRAVERSION:=$(subst linux-$(VERSION).$(PATCHLEVEL).$(SUBLEVEL),,$(shell basename $(TOPDIR)))$(EXTRAVERSION)
+
+# If no .config file exists then use the appropriate defconfig-* file
+ifneq (.config,$(wildcard .config))
+DUMMYX:=$(shell cp $(TOPDIR)/arch/xen/defconfig$(EXTRAVERSION) $(TOPDIR)/.config)
+-include $(TOPDIR)/.config
+endif
 
 LD=$(CROSS_COMPILE)ld -m elf_i386
 OBJCOPY=$(CROSS_COMPILE)objcopy -R .note -R .comment -S
@@ -115,6 +121,7 @@ dist:
 %_config: arch/xen/defconfig-%
 	rm -f .config arch/xen/defconfig
 	cp -f arch/xen/defconfig-$(@:_config=) arch/xen/defconfig
+	cp -f arch/xen/defconfig-$(@:_config=) .config
 
 
 archclean:
