@@ -10,8 +10,6 @@
 #ifndef __XEN_KEYHANDLER_H__
 #define __XEN_KEYHANDLER_H__
 
-struct xen_regs;
-
 /*
  * Register a callback function for key @key. The callback occurs in
  * softirq context with no locks held and interrupts enabled.
