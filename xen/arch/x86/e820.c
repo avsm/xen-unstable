@@ -27,15 +27,22 @@ static void __init add_memory_region(unsigned long long start,
 
 #define E820_DEBUG	1
 
-static void __init print_memory_map(void)
+#ifndef NDEBUG
+#define __init_unless_debugging
+#else
+#define __init_unless_debugging __init
+#endif
+
+void __init_unless_debugging
+print_e820_memory_map(struct e820entry *map, int entries)
 {
     int i;
 
-    for (i = 0; i < e820.nr_map; i++) {
+    for (i = 0; i < entries; i++) {
         printk(" %016Lx - %016Lx ",
-               e820.map[i].addr,
-               e820.map[i].addr + e820.map[i].size);
-        switch (e820.map[i].type) {
+               map[i].addr,
+               map[i].addr + map[i].size);
+        switch (map[i].type) {
         case E820_RAM:	printk("(usable)\n");
             break;
         case E820_RESERVED:
@@ -47,7 +54,7 @@ static void __init print_memory_map(void)
         case E820_NVS:
             printk("(ACPI NVS)\n");
             break;
-        default:	printk("type %u\n", e820.map[i].type);
+        default:	printk("type %u\n", map[i].type);
             break;
         }
     }
@@ -305,17 +312,11 @@ static unsigned long __init find_max_pfn(void)
     return max_pfn;
 }
 
-static void __init machine_specific_memory_setup(
-    struct e820entry *raw, int raw_nr)
+#ifdef __i386__
+static void __init clip_4gb(void)
 {
-    char nr = (char)raw_nr;
     int i;
 
-    sanitize_e820_map(raw, &nr);
-
-    (void)copy_e820_map(raw, nr);
-
-#ifdef __i386__
     /* 32-bit systems restricted to a 4GB physical memory map. */
     for ( i = 0; i < e820.nr_map; i++ )
     {
@@ -335,13 +336,24 @@ static void __init machine_specific_memory_setup(
             e820.nr_map = i + 1;                
         }            
     }
+}
+#else
+#define clip_4gb() ((void)0)
 #endif
+
+static void __init machine_specific_memory_setup(
+    struct e820entry *raw, int raw_nr)
+{
+    char nr = (char)raw_nr;
+    sanitize_e820_map(raw, &nr);
+    (void)copy_e820_map(raw, nr);
+    clip_4gb();
 }
 
-unsigned long init_e820(struct e820entry *raw, int raw_nr)
+unsigned long __init init_e820(struct e820entry *raw, int raw_nr)
 {
     machine_specific_memory_setup(raw, raw_nr);
     printk(KERN_INFO "Physical RAM map:\n");
-    print_memory_map();
+    print_e820_memory_map(e820.map, e820.nr_map);
     return find_max_pfn();
 }
