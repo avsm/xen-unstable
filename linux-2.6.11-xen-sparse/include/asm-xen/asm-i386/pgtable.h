@@ -89,9 +89,6 @@ void paging_init(void);
 # define VMALLOC_END	(FIXADDR_START-2*PAGE_SIZE)
 #endif
 
-extern void *high_memory;
-extern unsigned long vmalloc_earlyreserve;
-
 /*
  * The 4MB page is guessing..  Detailed in the infamous "Chapter H"
  * of the Pentium details, but assuming intel did the straightforward
@@ -214,7 +211,7 @@ extern unsigned long pg0[];
 /* pmd_present doesn't just test the _PAGE_PRESENT bit since wr.p.t.
    can temporarily clear it. */
 #define pmd_present(x)	(pmd_val(x))
-/* pmd_clear below */
+#define pmd_clear(xp)	do { set_pmd(xp, __pmd(0)); } while (0)
 #define pmd_bad(x)	((pmd_val(x) & (~PAGE_MASK & ~_PAGE_USER & ~_PAGE_PRESENT)) != (_KERNPG_TABLE & ~_PAGE_PRESENT))
 
 
@@ -254,33 +251,28 @@ static inline pte_t pte_mkwrite(pte_t pte)	{ (pte).pte_low |= _PAGE_RW; return p
 
 static inline int ptep_test_and_clear_dirty(pte_t *ptep)
 {
-	pte_t pte = *ptep;
-	int ret = pte_dirty(pte);
-	if (ret)
-		xen_l1_entry_update(ptep, pte_mkclean(pte).pte_low);
-	return ret;
+	if (!pte_dirty(*ptep))
+		return 0;
+	return test_and_clear_bit(_PAGE_BIT_DIRTY, &ptep->pte_low);
 }
 
 static inline int ptep_test_and_clear_young(pte_t *ptep)
 {
-	pte_t pte = *ptep;
-	int ret = pte_young(pte);
-	if (ret)
-		xen_l1_entry_update(ptep, pte_mkold(pte).pte_low);
-	return ret;
+	if (!pte_young(*ptep))
+		return 0;
+	return test_and_clear_bit(_PAGE_BIT_ACCESSED, &ptep->pte_low);
 }
 
 static inline void ptep_set_wrprotect(pte_t *ptep)
 {
-	pte_t pte = *ptep;
-	if (pte_write(pte))
-		set_pte(ptep, pte_wrprotect(pte));
+	if (pte_write(*ptep))
+		clear_bit(_PAGE_BIT_RW, &ptep->pte_low);
 }
+
 static inline void ptep_mkdirty(pte_t *ptep)
 {
-	pte_t pte = *ptep;
-	if (!pte_dirty(pte))
-		xen_l1_entry_update(ptep, pte_mkdirty(pte).pte_low);
+	if (!pte_dirty(*ptep))
+		set_bit(_PAGE_BIT_DIRTY, &ptep->pte_low);
 }
 
 /*
@@ -315,11 +307,6 @@ static inline pte_t pte_modify(pte_t pte, pgprot_t newprot)
 }
 
 #define page_pte(page) page_pte_prot(page, __pgprot(0))
-
-#define pmd_clear(xp)	do {					\
-	set_pmd(xp, __pmd(0));					\
-	xen_flush_page_update_queue();				\
-} while (0)
 
 #define pmd_large(pmd) \
 ((pmd_val(pmd) & (_PAGE_PSE|_PAGE_PRESENT)) == (_PAGE_PSE|_PAGE_PRESENT))
@@ -416,13 +403,11 @@ extern void noexec_setup(const char *str);
  */
 #define update_mmu_cache(vma,address,pte) do { } while (0)
 #define  __HAVE_ARCH_PTEP_SET_ACCESS_FLAGS
-
 #define ptep_set_access_flags(__vma, __address, __ptep, __entry, __dirty) \
 	do {								  \
 		if (__dirty) {						  \
 		        if ( likely((__vma)->vm_mm == current->mm) ) {    \
-			    xen_flush_page_update_queue();                \
-			    HYPERVISOR_update_va_mapping((__address)>>PAGE_SHIFT, (__entry), UVMF_INVLPG); \
+			    HYPERVISOR_update_va_mapping((__address), (__entry), UVMF_INVLPG|UVMF_MULTI|(unsigned long)((__vma)->vm_mm->cpu_vm_mask.bits)); \
 			} else {                                          \
                             xen_l1_entry_update((__ptep), (__entry).pte_low); \
 			    flush_tlb_page((__vma), (__address));         \
@@ -440,21 +425,28 @@ do {				  					\
 #define ptep_establish_new(__vma, __address, __ptep, __entry)		\
 do {				  					\
 	if (likely((__vma)->vm_mm == current->mm)) {			\
-		xen_flush_page_update_queue();				\
-		HYPERVISOR_update_va_mapping((__address)>>PAGE_SHIFT,	\
+		HYPERVISOR_update_va_mapping((__address),		\
 					     __entry, 0);		\
 	} else {							\
 		xen_l1_entry_update((__ptep), (__entry).pte_low);	\
 	}								\
 } while (0)
 
-/* NOTE: make_page* callers must call flush_page_update_queue() */
+#ifndef CONFIG_XEN_SHADOW_MODE
 void make_lowmem_page_readonly(void *va);
 void make_lowmem_page_writable(void *va);
 void make_page_readonly(void *va);
 void make_page_writable(void *va);
 void make_pages_readonly(void *va, unsigned int nr);
 void make_pages_writable(void *va, unsigned int nr);
+#else
+#define make_lowmem_page_readonly(_va) ((void)0)
+#define make_lowmem_page_writable(_va) ((void)0)
+#define make_page_readonly(_va)        ((void)0)
+#define make_page_writable(_va)        ((void)0)
+#define make_pages_readonly(_va, _nr)  ((void)0)
+#define make_pages_writable(_va, _nr)  ((void)0)
+#endif
 
 #define arbitrary_virt_to_machine(__va)					\
 ({									\
@@ -472,7 +464,6 @@ void make_pages_writable(void *va, unsigned int nr);
 #define kern_addr_valid(addr)	(1)
 #endif /* !CONFIG_DISCONTIGMEM */
 
-#define DOMID_LOCAL (0xFFFFU)
 int direct_remap_area_pages(struct mm_struct *mm,
                             unsigned long address, 
                             unsigned long machine_addr,
