@@ -69,6 +69,7 @@ int xc_domain_pincpu(int xc_handle,
     dom0_op_t op;
     op.cmd = DOM0_PINCPUDOMAIN;
     op.u.pincpudomain.domain = (domid_t)domid;
+    op.u.pincpudomain.exec_domain = 0;
     op.u.pincpudomain.cpu  = cpu;
     return do_dom0_op(xc_handle, &op);
 }
@@ -87,6 +88,7 @@ int xc_domain_getinfo(int xc_handle,
     {
         op.cmd = DOM0_GETDOMAININFO;
         op.u.getdomaininfo.domain = (domid_t)next_domid;
+        op.u.getdomaininfo.exec_domain = 0; // FIX ME?!?
         op.u.getdomaininfo.ctxt = NULL; /* no exec context info, thanks. */
         if ( do_dom0_op(xc_handle, &op) < 0 )
             break;
@@ -120,6 +122,7 @@ int xc_domain_getinfo(int xc_handle,
 
 int xc_domain_getfullinfo(int xc_handle,
                           u32 domid,
+                          u32 vcpu,
                           xc_domaininfo_t *info,
                           full_execution_context_t *ctxt)
 {
@@ -128,6 +131,7 @@ int xc_domain_getfullinfo(int xc_handle,
 
     op.cmd = DOM0_GETDOMAININFO;
     op.u.getdomaininfo.domain = (domid_t)domid;
+    op.u.getdomaininfo.exec_domain = (u16)vcpu;
     op.u.getdomaininfo.ctxt = ctxt;
 
     rc = do_dom0_op(xc_handle, &op);
@@ -173,10 +177,10 @@ int xc_domain_setcpuweight(int xc_handle,
     int ret;
     
     /* Figure out which scheduler is currently used: */
-    if((ret = xc_sched_id(xc_handle, &sched_id)))
+    if ( (ret = xc_sched_id(xc_handle, &sched_id)) != 0 )
         return ret;
     
-    switch(sched_id)
+    switch ( sched_id )
     {
         case SCHED_BVT:
         {
@@ -188,28 +192,19 @@ int xc_domain_setcpuweight(int xc_handle,
 
             /* Preserve all the scheduling parameters apart 
                of MCU advance. */
-            if((ret = xc_bvtsched_domain_get(xc_handle, domid, &mcuadv, 
-                                &warpback, &warpvalue, &warpl, &warpu)))
+            if ( (ret = xc_bvtsched_domain_get(
+                xc_handle, domid, &mcuadv, 
+                &warpback, &warpvalue, &warpl, &warpu)) != 0 )
                 return ret;
             
             /* The MCU advance is inverse of the weight.
                Default value of the weight is 1, default mcuadv 10.
                The scaling factor is therefore 10. */
-            if(weight > 0) mcuadv = 10 / weight;
+            if ( weight > 0 )
+                mcuadv = 10 / weight;
             
             ret = xc_bvtsched_domain_set(xc_handle, domid, mcuadv, 
                                          warpback, warpvalue, warpl, warpu);
-            break;
-        }
-        
-        case SCHED_RROBIN:
-        {
-            /* The weight cannot be set for RRobin */
-            break;
-        }
-        case SCHED_ATROPOS:
-        {
-            /* TODO - can we set weights in Atropos? */
             break;
         }
     }
@@ -237,18 +232,5 @@ int xc_domain_setmaxmem(int xc_handle,
     op.cmd = DOM0_SETDOMAINMAXMEM;
     op.u.setdomainmaxmem.domain = (domid_t)domid;
     op.u.setdomainmaxmem.max_memkb = max_memkb;
-    return do_dom0_op(xc_handle, &op);
-}
-
-int xc_domain_setvmassist(int xc_handle,
-                          u32 domid, 
-                          unsigned int cmd,
-                          unsigned int type)
-{
-    dom0_op_t op;
-    op.cmd = DOM0_SETDOMAINVMASSIST;
-    op.u.setdomainvmassist.domain = (domid_t)domid;
-    op.u.setdomainvmassist.cmd = cmd;
-    op.u.setdomainvmassist.type = type;
     return do_dom0_op(xc_handle, &op);
 }

@@ -11,12 +11,10 @@
 #define pmd_populate_kernel(mm, pmd, pte) \
 		set_pmd(pmd, __pmd(_PAGE_TABLE + __pa(pte)))
 
-#define pmd_populate(mm, pmd, pte) do {				\
+#define pmd_populate(mm, pmd, pte) 				\
 	set_pmd(pmd, __pmd(_PAGE_TABLE +			\
 		((unsigned long long)page_to_pfn(pte) <<	\
-			(unsigned long long) PAGE_SHIFT)));	\
-	flush_page_update_queue();				\
-} while (0)
+			(unsigned long long) PAGE_SHIFT)))
 /*
  * Allocate and free page tables.
  */
@@ -30,7 +28,6 @@ static inline void pte_free_kernel(pte_t *pte)
 {
 	free_page((unsigned long)pte);
 	make_page_writable(pte);
-	flush_page_update_queue();
 }
 
 extern void pte_free(struct page *pte);
