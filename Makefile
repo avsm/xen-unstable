@@ -22,11 +22,12 @@ XKERNELS := $(foreach kernel, $(KERNELS), $(patsubst buildconfigs/mk.%,%,$(wildc
 export DESTDIR
 
 # Export target architecture overrides to Xen and Linux sub-trees.
-ifneq ($(TARGET_ARCH),)
-SUBARCH := $(subst x86_32,i386,$(TARGET_ARCH))
-export TARGET_ARCH SUBARCH
+ifneq ($(XEN_TARGET_ARCH),)
+SUBARCH := $(subst x86_32,i386,$(XEN_TARGET_ARCH))
+export XEN_TARGET_ARCH SUBARCH
 endif
 
+include Config.mk
 include buildconfigs/Rules.mk
 
 .PHONY:	all dist install xen tools kernels docs world clean mkpatches mrproper
@@ -162,7 +163,7 @@ uninstall: D=$(DESTDIR)
 uninstall:
 	[ ! -d $(D)/etc/xen ] || mv -f $(D)/etc/xen $(D)/etc/xen.old
 	rm -rf $(D)/etc/init.d/xend*
-	rm -rf $(D)/usr/lib/libxc* $(D)/usr/lib/libxutil*
+	rm -rf $(D)/usr/$(LIBDIR)/libxc* $(D)/usr/$(LIBDIR)/libxutil*
 	rm -rf $(D)/usr/lib/python/xen $(D)/usr/include/xen
 	rm -rf $(D)/usr/include/xcs_proto.h $(D)/usr/include/xc.h
 	rm -rf $(D)/usr/sbin/xcs $(D)/usr/sbin/xcsdump $(D)/usr/sbin/xen*
@@ -171,6 +172,7 @@ uninstall:
 	rm -rf $(D)/usr/share/doc/xen  $(D)/usr/man/man*/xentrace*
 	rm -rf $(D)/usr/bin/xen* $(D)/usr/bin/miniterm
 	rm -rf $(D)/boot/*xen*
+	rm -rf $(D)/lib/modules/*xen*
 
 # Legacy targets for compatibility
 linux24:
