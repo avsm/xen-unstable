@@ -189,11 +189,6 @@ class Xend:
     def xend_node_log(self):
         return self.xendGet(self.nodeurl('log'))
 
-    def xend_node_cpu_rrobin_slice_set(self, slice):
-        return self.xendPost(self.nodeurl(),
-                             {'op'      : 'cpu_rrobin_slice_set',
-                              'slice'   : slice })
-
     def xend_node_cpu_bvt_slice_set(self, ctx_allow):
         return self.xendPost(self.nodeurl(),
                              {'op'      : 'cpu_bvt_slice_set',
@@ -265,18 +260,17 @@ class Xend:
                               'warpl'    : warpl,
                               'warpu'    : warpu })
 
-    def xend_domain_cpu_atropos_set(self, id, period, slice, latency, xtratime):
-        return self.xendPost(self.domainurl(id),
-                             {'op'      : 'cpu_atropos_set',
-                              'period'  : period,
-                              'slice'   : slice,
-                              'latency' : latency,
-                              'xtratime': xtratime })
-
     def xend_domain_maxmem_set(self, id, memory):
         return self.xendPost(self.domainurl(id),
                              { 'op'     : 'maxmem_set',
                                'memory' : memory })
+
+    def xend_domain_vif_limit(self, id, vif, credit, period):
+        return self.xendPost(self.domainurl(id),
+                            { 'op'      : 'vif_credit_limit',
+                              'vif'     : vif,
+                              'credit'  : credit,
+                              'period'  : period })
 
     def xend_domain_vifs(self, id):
         return self.xendGet(self.domainurl(id),
@@ -300,6 +294,12 @@ class Xend:
         return self.xendPost(self.domainurl(id),
                              {'op'      : 'device_create',
                               'config'  : fileof(config) })
+
+    def xend_domain_device_refresh(self, id, type, idx):
+        return self.xendPost(self.domainurl(id),
+                             {'op'      : 'device_refresh',
+                              'type'    : type,
+                              'idx'     : idx })
 
     def xend_domain_device_destroy(self, id, type, idx):
         return self.xendPost(self.domainurl(id),

@@ -44,6 +44,9 @@ void *map_domain_mem(unsigned long pa)
     unsigned long va;
     unsigned int idx, cpu = smp_processor_id();
     unsigned long *cache = mapcache;
+#ifndef NDEBUG
+    unsigned int flush_count = 0;
+#endif
 
     ASSERT(!in_irq());
     perfc_incrc(map_domain_mem_count);
@@ -62,6 +65,7 @@ void *map_domain_mem(unsigned long pa)
         idx = map_idx = (map_idx + 1) & (MAPCACHE_ENTRIES - 1);
         if ( unlikely(idx == 0) )
         {
+            ASSERT(flush_count++ == 0);
             flush_all_ready_maps();
             perfc_incrc(domain_page_tlb_flush);
             local_flush_tlb();
@@ -81,6 +85,8 @@ void *map_domain_mem(unsigned long pa)
 void unmap_domain_mem(void *va)
 {
     unsigned int idx;
+    ASSERT((void *)MAPCACHE_VIRT_START <= va);
+    ASSERT(va < (void *)MAPCACHE_VIRT_END);
     idx = ((unsigned long)va - MAPCACHE_VIRT_START) >> PAGE_SHIFT;
     mapcache[idx] |= READY_FOR_TLB_FLUSH;
 }

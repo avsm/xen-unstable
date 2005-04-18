@@ -13,29 +13,16 @@
  * within a page table are directly modified.  Thus, the following
  * hook is made available.
  */
-#define set_pte_batched(pteptr, pteval) \
-	queue_l1_entry_update(pteptr, (pteval).pte_low)
 #define set_pte(pteptr, pteval) (*(pteptr) = pteval)
 #define set_pte_atomic(pteptr, pteval) set_pte(pteptr,pteval)
+
+#ifndef CONFIG_XEN_SHADOW_MODE
 #define set_pmd(pmdptr, pmdval) xen_l2_entry_update((pmdptr), (pmdval))
+#else
+#define set_pmd(pmdptr, pmdval) (*(pmdptr) = (pmdval))
+#endif
 
-/*
- * A note on implementation of this atomic 'get-and-clear' operation.
- * This is actually very simple because Xen Linux can only run on a single
- * processor. Therefore, we cannot race other processors setting the 'accessed'
- * or 'dirty' bits on a page-table entry.
- * Even if pages are shared between domains, that is not a problem because
- * each domain will have separate page tables, with their own versions of
- * accessed & dirty state.
- */
-static inline pte_t ptep_get_and_clear(pte_t *xp)
-{
-	pte_t pte = *xp;
-	if (pte.pte_low)
-		set_pte(xp, __pte_ma(0));
-	return pte;
-}
-
+#define ptep_get_and_clear(xp)	__pte_ma(xchg(&(xp)->pte_low, 0))
 #define pte_same(a, b)		((a).pte_low == (b).pte_low)
 /*
  * We detect special mappings in one of two ways:
@@ -57,7 +44,7 @@ static inline pte_t ptep_get_and_clear(pte_t *xp)
  *      require. In all the cases we care about, the high bit gets shifted out
  *      (e.g., phys_to_machine()) so behaviour there is correct.
  */
-#define INVALID_P2M_ENTRY (~0UL)
+#define INVALID_P2M_ENTRY (~0U)
 #define FOREIGN_FRAME(_m) ((_m) | (1UL<<((sizeof(unsigned long)*8)-1)))
 #define pte_pfn(_pte)							\
 ({									\
