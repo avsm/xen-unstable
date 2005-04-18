@@ -564,7 +564,6 @@ void __init cpu_gdt_init(struct Xgt_desc_struct *gdt_descr)
 		frames[f] = virt_to_machine(va) >> PAGE_SHIFT;
 		make_page_readonly((void *)va);
 	}
-	flush_page_update_queue();
 	if (HYPERVISOR_set_gdt(frames, gdt_descr->size / 8))
 		BUG();
 	lgdt_finish();
@@ -598,17 +597,6 @@ void __init cpu_init (void)
 	}
 
 	/*
-	 * Initialize the per-CPU GDT with the boot GDT,
-	 * and set up the GDT descriptor:
-	 */
-	if (cpu) {
-		cpu_gdt_descr[cpu].size = GDT_SIZE;
-		cpu_gdt_descr[cpu].address = 0;	/* XXXcl alloc page */
-		BUG();		/* XXXcl SMP */
-		memcpy((void *)cpu_gdt_descr[cpu].address,
-		    (void *)cpu_gdt_descr[0].address, GDT_SIZE);
-	}
-	/*
 	 * Set up the per-thread TLS descriptor cache:
 	 */
 	memcpy(thread->tls_array, &get_cpu_gdt_table(cpu)[GDT_ENTRY_TLS_MIN],
@@ -633,7 +621,6 @@ void __init cpu_init (void)
 	load_esp0(t, thread);
 
 	load_LDT(&init_mm.context);
-	flush_page_update_queue();
 
 	/* Clear %fs and %gs. */
 	asm volatile ("xorl %eax, %eax; movl %eax, %fs; movl %eax, %gs");

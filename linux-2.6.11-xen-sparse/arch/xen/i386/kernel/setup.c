@@ -40,6 +40,8 @@
 #include <linux/efi.h>
 #include <linux/init.h>
 #include <linux/edd.h>
+#include <linux/percpu.h>
+#include <linux/notifier.h>
 #include <video/edid.h>
 #include <asm/e820.h>
 #include <asm/mpspec.h>
@@ -50,11 +52,21 @@
 #include <asm/ist.h>
 #include <asm/io.h>
 #include <asm-xen/hypervisor.h>
+#include <asm-xen/xen-public/physdev.h>
 #include "setup_arch_pre.h"
 #include <bios_ebda.h>
 
 /* Allows setting of maximum possible memory size  */
 static unsigned long xen_override_max_pfn;
+
+extern struct notifier_block *panic_notifier_list;
+static int xen_panic_event(struct notifier_block *, unsigned long, void *);
+static struct notifier_block xen_panic_block = {
+	xen_panic_event,
+        NULL,
+        0 /* try to go last */
+};
+
 
 int disable_pse __initdata = 0;
 
@@ -347,11 +359,8 @@ static void __init probe_roms(void)
 shared_info_t *HYPERVISOR_shared_info = (shared_info_t *)empty_zero_page;
 EXPORT_SYMBOL(HYPERVISOR_shared_info);
 
-unsigned long *phys_to_machine_mapping, *pfn_to_mfn_frame_list;
+unsigned int *phys_to_machine_mapping, *pfn_to_mfn_frame_list;
 EXPORT_SYMBOL(phys_to_machine_mapping);
-
-multicall_entry_t multicall_list[8];
-int nr_multicall_ents = 0;
 
 /* Raw start-of-day parameters from the hypervisor. */
 union xen_start_info_union xen_start_info_union;
@@ -1151,7 +1160,7 @@ static unsigned long __init setup_memory(void)
 	}
 #endif
 
-	phys_to_machine_mapping = (unsigned long *)xen_start_info.mfn_list;
+	phys_to_machine_mapping = (unsigned int *)xen_start_info.mfn_list;
 
 	return max_low_pfn;
 }
@@ -1388,17 +1397,22 @@ static void set_mca_bus(int x) { }
  */
 void __init setup_arch(char **cmdline_p)
 {
-        int i,j;
-
-        unsigned long max_low_pfn;
+	int i,j;
+	physdev_op_t op;
+	unsigned long max_low_pfn;
 
 	/* Force a quick death if the kernel panics. */
 	extern int panic_timeout;
 	if ( panic_timeout == 0 )
 		panic_timeout = 1;
 
-	HYPERVISOR_vm_assist(VMASST_CMD_enable,
-			     VMASST_TYPE_4gb_segments);
+	/* Register a call for panic conditions. */
+	notifier_chain_register(&panic_notifier_list, &xen_panic_block);
+
+	HYPERVISOR_vm_assist(
+		VMASST_CMD_enable, VMASST_TYPE_4gb_segments);
+	HYPERVISOR_vm_assist(
+		VMASST_CMD_enable, VMASST_TYPE_writable_pagetables);
 
 	memcpy(&boot_cpu_data, &new_cpu_data, sizeof(new_cpu_data));
 	early_cpu_init();
@@ -1571,16 +1585,9 @@ void __init setup_arch(char **cmdline_p)
 
 	register_memory();
 
-	/* If we are a privileged guest OS then we should request IO privs. */
-	if (xen_start_info.flags & SIF_PRIVILEGED) {
-		dom0_op_t op;
-		op.cmd           = DOM0_IOPL;
-		op.u.iopl.domain = DOMID_SELF;
-		op.u.iopl.iopl   = 1;
-		if (HYPERVISOR_dom0_op(&op) != 0)
-			panic("Unable to obtain IOPL, despite SIF_PRIVILEGED");
-		current->thread.io_pl = 1;
-	}
+	op.cmd             = PHYSDEVOP_SET_IOPL;
+	op.u.set_iopl.iopl = current->thread.io_pl = 1;
+	HYPERVISOR_physdev_op(&op);
 
 	if (xen_start_info.flags & SIF_INITDOMAIN) {
 		if (!(xen_start_info.flags & SIF_PRIVILEGED))
@@ -1609,6 +1616,16 @@ void __init setup_arch(char **cmdline_p)
 #endif
 	}
 }
+
+
+static int
+xen_panic_event(struct notifier_block *this, unsigned long event, void *ptr)
+{
+     HYPERVISOR_crash();    
+     /* we're never actually going to get here... */
+     return NOTIFY_DONE;
+}
+
 
 #include "setup_arch_post.h"
 /*

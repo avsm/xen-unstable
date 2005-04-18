@@ -80,12 +80,44 @@ VM_MASK		= 0x00020000
 #define evtchn_upcall_pending		/* 0 */
 #define evtchn_upcall_mask		1
 
+#define sizeof_vcpu_shift		3
+
+#ifdef CONFIG_SMP
+#define XEN_GET_VCPU_INFO(reg)
+#define preempt_disable(reg)	incl TI_preempt_count(reg)
+#define preempt_enable(reg)	decl TI_preempt_count(reg)
+#define XEN_LOCK_VCPU_INFO_SMP(reg) preempt_disable(%ebp)		; \
+				movl TI_cpu(%ebp),reg			; \
+				shl  $sizeof_vcpu_shift,reg		; \
+				addl HYPERVISOR_shared_info,reg
+#define XEN_UNLOCK_VCPU_INFO_SMP(reg) preempt_enable(%ebp)
+#define XEN_UNLOCK_VCPU_INFO_SMP_fixup .byte 0xff,0xff,0xff
+#define Ux00 0xff
+#define XEN_LOCKED_BLOCK_EVENTS(reg)	movb $1,evtchn_upcall_mask(reg)
+#define XEN_BLOCK_EVENTS(reg)	XEN_LOCK_VCPU_INFO_SMP(reg)		; \
+				XEN_LOCKED_BLOCK_EVENTS(reg)		; \
+    				XEN_UNLOCK_VCPU_INFO_SMP(reg)
+#define XEN_UNBLOCK_EVENTS(reg)	XEN_LOCK_VCPU_INFO_SMP(reg)		; \
+				movb $0,evtchn_upcall_mask(reg)		; \
+    				XEN_UNLOCK_VCPU_INFO_SMP(reg)
+#define XEN_SAVE_UPCALL_MASK(reg,tmp,off) GET_THREAD_INFO(%ebp)		; \
+				XEN_LOCK_VCPU_INFO_SMP(reg)		; \
+				movb evtchn_upcall_mask(reg), tmp	; \
+				movb tmp, off(%esp)			; \
+    				XEN_UNLOCK_VCPU_INFO_SMP(reg)
+#else
 #define XEN_GET_VCPU_INFO(reg)	movl HYPERVISOR_shared_info,reg
-#define XEN_BLOCK_EVENTS(reg)	movb $1,evtchn_upcall_mask(reg)
+#define XEN_LOCK_VCPU_INFO_SMP(reg)
+#define XEN_UNLOCK_VCPU_INFO_SMP(reg)
+#define XEN_UNLOCK_VCPU_INFO_SMP_fixup
+#define Ux00 0x00
+#define XEN_LOCKED_BLOCK_EVENTS(reg)	movb $1,evtchn_upcall_mask(reg)
+#define XEN_BLOCK_EVENTS(reg)	XEN_LOCKED_BLOCK_EVENTS(reg)
 #define XEN_UNBLOCK_EVENTS(reg)	movb $0,evtchn_upcall_mask(reg)
 #define XEN_SAVE_UPCALL_MASK(reg,tmp,off) \
 	movb evtchn_upcall_mask(reg), tmp; \
 	movb tmp, off(%esp)
+#endif
 
 #define XEN_TEST_PENDING(reg)	testb $0xFF,evtchn_upcall_pending(reg)
 
@@ -284,9 +316,11 @@ restore_all:
 	jnz resume_vm86
 	movb EVENT_MASK(%esp), %al
 	notb %al			# %al == ~saved_mask
+	XEN_LOCK_VCPU_INFO_SMP(%esi)
 	andb evtchn_upcall_mask(%esi),%al
 	andb $1,%al			# %al == mask & ~saved_mask
 	jnz restore_all_enable_events	#     != 0 => reenable event delivery
+	XEN_UNLOCK_VCPU_INFO_SMP(%esi)
 	RESTORE_ALL
 
 resume_vm86:
@@ -473,8 +507,10 @@ restore_all_enable_events:
 scrit:	/**** START OF CRITICAL REGION ****/
 	XEN_TEST_PENDING(%esi)
 	jnz  14f			# process more events if necessary...
+	XEN_UNLOCK_VCPU_INFO_SMP(%esi)
 	RESTORE_ALL
-14:	XEN_BLOCK_EVENTS(%esi)
+14:	XEN_LOCKED_BLOCK_EVENTS(%esi)
+	XEN_UNLOCK_VCPU_INFO_SMP(%esi)
 	jmp  11b
 ecrit:  /**** END OF CRITICAL REGION ****/
 # [How we do the fixup]. We want to merge the current stack frame with the
@@ -487,24 +523,33 @@ ecrit:  /**** END OF CRITICAL REGION ****/
 critical_region_fixup:
 	addl $critical_fixup_table-scrit,%eax
 	movzbl (%eax),%eax		# %eax contains num bytes popped
-	mov  %esp,%esi
+#ifdef CONFIG_SMP
+	cmpb $0xff,%al
+	jne  15f
+	add  $1,%al
+	GET_THREAD_INFO(%ebp)
+	XEN_UNLOCK_VCPU_INFO_SMP(%esi)
+15:
+#endif
+    	mov  %esp,%esi
 	add  %eax,%esi			# %esi points at end of src region
 	mov  %esp,%edi
 	add  $0x34,%edi			# %edi points at end of dst region
 	mov  %eax,%ecx
 	shr  $2,%ecx			# convert words to bytes
-	je   16f			# skip loop if nothing to copy
-15:	subl $4,%esi			# pre-decrementing copy loop
+	je   17f			# skip loop if nothing to copy
+16:	subl $4,%esi			# pre-decrementing copy loop
 	subl $4,%edi
 	movl (%esi),%eax
 	movl %eax,(%edi)
-	loop 15b
-16:	movl %edi,%esp			# final %edi is top of merged stack
+	loop 16b
+17:	movl %edi,%esp			# final %edi is top of merged stack
 	jmp  11b
 
 critical_fixup_table:
-	.byte 0x00,0x00,0x00		# testb $0xff,(%esi) = XEN_TEST_PENDING
-	.byte 0x00,0x00			# jnz  14f
+	.byte Ux00,Ux00,Ux00		# testb $0xff,(%esi) = XEN_TEST_PENDING
+	.byte Ux00,Ux00			# jnz  14f
+	XEN_UNLOCK_VCPU_INFO_SMP_fixup
 	.byte 0x00			# pop  %ebx
 	.byte 0x04			# pop  %ecx
 	.byte 0x08			# pop  %edx
@@ -516,7 +561,8 @@ critical_fixup_table:
 	.byte 0x20			# pop  %es
 	.byte 0x24,0x24,0x24		# add  $4,%esp
 	.byte 0x28			# iret
-	.byte 0x00,0x00,0x00,0x00	# movb $1,1(%esi)
+	.byte Ux00,Ux00,Ux00,Ux00	# movb $1,1(%esi)
+	XEN_UNLOCK_VCPU_INFO_SMP_fixup
 	.byte 0x00,0x00			# jmp  11b
 
 # Hypervisor uses this for application faults while it executes.
