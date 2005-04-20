@@ -1455,7 +1455,7 @@ int do_mmuext_op(
         goto out;
     }
 
-    if ( unlikely(!array_access_ok(VERIFY_READ, uops, count, sizeof(op))) )
+    if ( unlikely(!array_access_ok(uops, count, sizeof(op))) )
     {
         rc = -EFAULT;
         goto out;
@@ -1625,7 +1625,6 @@ int do_mmuext_op(
         {
             if ( shadow_mode_external(d) )
             {
-                // ignore this request from an external domain...
                 MEM_LOG("ignoring SET_LDT hypercall from external "
                         "domain %u\n", d->id);
                 okay = 0;
@@ -1636,8 +1635,7 @@ int do_mmuext_op(
             unsigned long ents = op.nr_ents;
             if ( ((ptr & (PAGE_SIZE-1)) != 0) || 
                  (ents > 8192) ||
-                 ((ptr+ents*LDT_ENTRY_SIZE) < ptr) ||
-                 ((ptr+ents*LDT_ENTRY_SIZE) > PAGE_OFFSET) )
+                 !array_access_ok(ptr, ents, LDT_ENTRY_SIZE) )
             {
                 okay = 0;
                 MEM_LOG("Bad args to SET_LDT: ptr=%p, ents=%p", ptr, ents);
@@ -1812,7 +1810,7 @@ int do_mmu_update(
     perfc_addc(num_page_updates, count);
     perfc_incr_histo(bpt_updates, count, PT_UPDATES);
 
-    if ( unlikely(!array_access_ok(VERIFY_READ, ureqs, count, sizeof(req))) )
+    if ( unlikely(!array_access_ok(ureqs, count, sizeof(req))) )
     {
         rc = -EFAULT;
         goto out;
@@ -2589,7 +2587,7 @@ static int ptwr_emulated_update(
     struct domain *d = current->domain;
 
     /* Aligned access only, thank you. */
-    if ( !access_ok(VERIFY_WRITE, addr, bytes) || ((addr & (bytes-1)) != 0) )
+    if ( !access_ok(addr, bytes) || ((addr & (bytes-1)) != 0) )
     {
         MEM_LOG("ptwr_emulate: Unaligned or bad size ptwr access (%d, %p)\n",
                 bytes, addr);
