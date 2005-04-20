@@ -185,12 +185,20 @@ typedef struct {
 } dom0_pincpudomain_t;
 
 /* Get trace buffers machine base address */
-#define DOM0_GETTBUFS         21
+#define DOM0_TBUFCONTROL       21
 typedef struct {
+    /* IN variables */
+#define DOM0_TBUF_GET_INFO     0
+#define DOM0_TBUF_SET_CPU_MASK 1
+#define DOM0_TBUF_SET_EVT_MASK 2
+    u8 op;
+    /* IN/OUT variables */
+    unsigned long cpu_mask;
+    u32           evt_mask;
     /* OUT variables */
     memory_t mach_addr;
     u32      size;
-} dom0_gettbufs_t;
+} dom0_tbufcontrol_t;
 
 /*
  * Get physical information about the host machine
@@ -234,6 +242,7 @@ typedef struct {
 #define DOM0_SHADOW_CONTROL_OP_OFF         0
 #define DOM0_SHADOW_CONTROL_OP_ENABLE_TEST 1
 #define DOM0_SHADOW_CONTROL_OP_ENABLE_LOGDIRTY 2
+#define DOM0_SHADOW_CONTROL_OP_ENABLE_TRANSLATE 3
 
 #define DOM0_SHADOW_CONTROL_OP_FLUSH       10     /* table ops */
 #define DOM0_SHADOW_CONTROL_OP_CLEAN       11
@@ -374,9 +383,9 @@ typedef struct {
         dom0_msr_t               msr;
         dom0_debug_t             debug;
         dom0_settime_t           settime;
-        dom0_readconsole_t	 readconsole;
+        dom0_readconsole_t       readconsole;
         dom0_pincpudomain_t      pincpudomain;
-        dom0_gettbufs_t          gettbufs;
+        dom0_tbufcontrol_t       tbufcontrol;
         dom0_physinfo_t          physinfo;
         dom0_pcidev_access_t     pcidev_access;
         dom0_sched_id_t          sched_id;

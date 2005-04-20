@@ -171,6 +171,9 @@ void arch_init_memory(void)
 {
     extern void subarch_init_memory(struct domain *);
 
+    unsigned long i, j, pfn, nr_pfns;
+    struct pfn_info *page;
+
     memset(percpu_info, 0, sizeof(percpu_info));
 
     /*
@@ -184,12 +187,41 @@ void arch_init_memory(void)
 
     /*
      * Initialise our DOMID_IO domain.
-     * This domain owns no pages but is considered a special case when
-     * mapping I/O pages, as the mappings occur at the priv of the caller.
+     * This domain owns I/O pages that are within the range of the pfn_info
+     * array. Mappings occur at the priv of the caller.
      */
     dom_io = alloc_domain_struct();
     atomic_set(&dom_io->refcnt, 1);
     dom_io->id = DOMID_IO;
+
+    /* First 1MB of RAM is historically marked as I/O. */
+    for ( i = 0; i < 0x100; i++ )
+    {
+        page = &frame_table[i];
+        page->count_info        = PGC_allocated | 1;
+        page->u.inuse.type_info = PGT_writable_page | PGT_validated | 1;
+        page_set_owner(page, dom_io);
+    }
+ 
+    /* Any non-RAM areas in the e820 map are considered to be for I/O. */
+    for ( i = 0; i < e820.nr_map; i++ )
+    {
+        if ( e820.map[i].type == E820_RAM )
+            continue;
+        pfn = e820.map[i].addr >> PAGE_SHIFT;
+        nr_pfns = (e820.map[i].size +
+                   (e820.map[i].addr & ~PAGE_MASK) +
+                   ~PAGE_MASK) >> PAGE_SHIFT;
+        for ( j = 0; j < nr_pfns; j++ )
+        {
+            if ( !pfn_valid(pfn+j) )
+                continue;
+            page = &frame_table[pfn+j];
+            page->count_info        = PGC_allocated | 1;
+            page->u.inuse.type_info = PGT_writable_page | PGT_validated | 1;
+            page_set_owner(page, dom_io);
+        }
+    }
 
     subarch_init_memory(dom_xen);
 }
@@ -306,13 +338,7 @@ static int get_page_from_pagenr(unsigned long page_nr, struct domain *d)
 {
     struct pfn_info *page = &frame_table[page_nr];
 
-    if ( unlikely(!pfn_is_ram(page_nr)) )
-    {
-        MEM_LOG("Pfn %p is not RAM", page_nr);
-        return 0;
-    }
-
-    if ( unlikely(!get_page(page, d)) )
+    if ( unlikely(!pfn_valid(page_nr)) || unlikely(!get_page(page, d)) )
     {
         MEM_LOG("Could not get page ref for pfn %p", page_nr);
         return 0;
@@ -419,20 +445,25 @@ get_page_from_l1e(
         return 0;
     }
 
-    if ( unlikely(!pfn_is_ram(mfn)) )
+    if ( unlikely(!pfn_valid(mfn)) ||
+         unlikely(page_get_owner(page) == dom_io) )
     {
-        /* Revert to caller privileges if FD == DOMID_IO. */
+        /* DOMID_IO reverts to caller for privilege checks. */
         if ( d == dom_io )
             d = current->domain;
 
-        if ( IS_PRIV(d) )
+        if ( (!IS_PRIV(d)) &&
+             (!IS_CAPABLE_PHYSDEV(d) || !domain_iomem_in_pfn(d, mfn)) )
+        {
+            MEM_LOG("Non-privileged attempt to map I/O space %08lx", mfn);
+            return 0;
+        }
+
+        /* No reference counting for out-of-range I/O pages. */
+        if ( !pfn_valid(mfn) )
             return 1;
 
-        if ( IS_CAPABLE_PHYSDEV(d) )
-            return domain_iomem_in_pfn(d, mfn);
-
-        MEM_LOG("Non-privileged attempt to map I/O space %p", mfn);
-        return 0;
+        d = dom_io;
     }
 
     return ((l1v & _PAGE_RW) ?
@@ -529,7 +560,7 @@ void put_page_from_l1e(l1_pgentry_t l1e, struct domain *d)
     struct pfn_info *page = &frame_table[pfn];
     struct domain   *e;
 
-    if ( !(l1v & _PAGE_PRESENT) || !pfn_is_ram(pfn) )
+    if ( !(l1v & _PAGE_PRESENT) || !pfn_valid(pfn) )
         return;
 
     e = page_get_owner(page);
@@ -1198,35 +1229,38 @@ int get_page_type(struct pfn_info *page, u32 type)
                     nx |= PGT_validated;
             }
         }
-        else if ( unlikely(!(x & PGT_validated)) )
+        else
         {
-            /* Someone else is updating validation of this page. Wait... */
-            while ( (y = page->u.inuse.type_info) == x )
-                cpu_relax();
-            goto again;
-        }
-        else if ( unlikely((x & (PGT_type_mask|PGT_va_mask)) != type) )
-        {
-            if ( unlikely((x & PGT_type_mask) != (type & PGT_type_mask) ) )
+            if ( unlikely((x & (PGT_type_mask|PGT_va_mask)) != type) )
             {
-                if ( ((x & PGT_type_mask) != PGT_l2_page_table) ||
-                     ((type & PGT_type_mask) != PGT_l1_page_table) )
-                    MEM_LOG("Bad type (saw %08x != exp %08x) for pfn %p",
-                            x, type, page_to_pfn(page));
-                return 0;
+                if ( unlikely((x & PGT_type_mask) != (type & PGT_type_mask) ) )
+                {
+                    if ( ((x & PGT_type_mask) != PGT_l2_page_table) ||
+                         ((type & PGT_type_mask) != PGT_l1_page_table) )
+                        MEM_LOG("Bad type (saw %08x != exp %08x) for pfn %p",
+                                x, type, page_to_pfn(page));
+                    return 0;
+                }
+                else if ( (x & PGT_va_mask) == PGT_va_mutable )
+                {
+                    /* The va backpointer is mutable, hence we update it. */
+                    nx &= ~PGT_va_mask;
+                    nx |= type; /* we know the actual type is correct */
+                }
+                else if ( ((type & PGT_va_mask) != PGT_va_mutable) &&
+                          ((type & PGT_va_mask) != (x & PGT_va_mask)) )
+                {
+                    /* This table is potentially mapped at multiple locations. */
+                    nx &= ~PGT_va_mask;
+                    nx |= PGT_va_unknown;
+                }
             }
-            else if ( (x & PGT_va_mask) == PGT_va_mutable )
+            if ( unlikely(!(x & PGT_validated)) )
             {
-                /* The va backpointer is mutable, hence we update it. */
-                nx &= ~PGT_va_mask;
-                nx |= type; /* we know the actual type is correct */
-            }
-            else if ( ((type & PGT_va_mask) != PGT_va_mutable) &&
-                      ((type & PGT_va_mask) != (x & PGT_va_mask)) )
-            {
-                /* This table is potentially mapped at multiple locations. */
-                nx &= ~PGT_va_mask;
-                nx |= PGT_va_unknown;
+                /* Someone else is updating validation of this page. Wait... */
+                while ( (y = page->u.inuse.type_info) == x )
+                    cpu_relax();
+                goto again;
             }
         }
     }
@@ -1430,7 +1464,7 @@ int do_mmuext_op(
         goto out;
     }
 
-    if ( unlikely(!array_access_ok(VERIFY_READ, uops, count, sizeof(op))) )
+    if ( unlikely(!array_access_ok(uops, count, sizeof(op))) )
     {
         rc = -EFAULT;
         goto out;
@@ -1600,7 +1634,6 @@ int do_mmuext_op(
         {
             if ( shadow_mode_external(d) )
             {
-                // ignore this request from an external domain...
                 MEM_LOG("ignoring SET_LDT hypercall from external "
                         "domain %u\n", d->id);
                 okay = 0;
@@ -1611,8 +1644,7 @@ int do_mmuext_op(
             unsigned long ents = op.nr_ents;
             if ( ((ptr & (PAGE_SIZE-1)) != 0) || 
                  (ents > 8192) ||
-                 ((ptr+ents*LDT_ENTRY_SIZE) < ptr) ||
-                 ((ptr+ents*LDT_ENTRY_SIZE) > PAGE_OFFSET) )
+                 !array_access_ok(ptr, ents, LDT_ENTRY_SIZE) )
             {
                 okay = 0;
                 MEM_LOG("Bad args to SET_LDT: ptr=%p, ents=%p", ptr, ents);
@@ -1787,7 +1819,7 @@ int do_mmu_update(
     perfc_addc(num_page_updates, count);
     perfc_incr_histo(bpt_updates, count, PT_UPDATES);
 
-    if ( unlikely(!array_access_ok(VERIFY_READ, ureqs, count, sizeof(req))) )
+    if ( unlikely(!array_access_ok(ureqs, count, sizeof(req))) )
     {
         rc = -EFAULT;
         goto out;
@@ -1897,8 +1929,11 @@ int do_mmu_update(
                         gpfn = __mfn_to_gpfn(d, mfn);
                         ASSERT(VALID_M2P(gpfn));
 
-                        if ( page_is_page_table(page) )
+                        if ( page_is_page_table(page) &&
+                             !page_out_of_sync(page) )
+                        {
                             shadow_mark_mfn_out_of_sync(ed, gpfn, mfn);
+                        }
                     }
 
                     *(unsigned long *)va = req.val;
@@ -2152,7 +2187,7 @@ int do_update_va_mapping(unsigned long va,
             local_flush_tlb();
             break;
         case UVMF_ALL:
-            BUG_ON(shadow_mode_enabled(d));
+            BUG_ON(shadow_mode_enabled(d) && (d->cpuset != (1<<cpu)));
             flush_tlb_mask(d->cpuset);
             break;
         default:
@@ -2173,7 +2208,7 @@ int do_update_va_mapping(unsigned long va,
             local_flush_tlb_one(va);
             break;
         case UVMF_ALL:
-            BUG_ON(shadow_mode_enabled(d));
+            BUG_ON(shadow_mode_enabled(d) && (d->cpuset != (1<<cpu)));
             flush_tlb_one_mask(d->cpuset, va);
             break;
         default:
@@ -2391,7 +2426,7 @@ long do_update_descriptor(unsigned long pa, u64 desc)
         if ( shadow_mode_log_dirty(dom) )
             __mark_dirty(dom, mfn);
 
-        if ( page_is_page_table(page) )
+        if ( page_is_page_table(page) && !page_out_of_sync(page) )
             shadow_mark_mfn_out_of_sync(current, gpfn, mfn);
     }
 
@@ -2556,7 +2591,7 @@ static int ptwr_emulated_update(
     struct domain *d = current->domain;
 
     /* Aligned access only, thank you. */
-    if ( !access_ok(VERIFY_WRITE, addr, bytes) || ((addr & (bytes-1)) != 0) )
+    if ( !access_ok(addr, bytes) || ((addr & (bytes-1)) != 0) )
     {
         MEM_LOG("ptwr_emulate: Unaligned or bad size ptwr access (%d, %p)\n",
                 bytes, addr);
@@ -2848,7 +2883,7 @@ void ptwr_destroy(struct domain *d)
         gntref = (grant_ref_t)((val & 0xFF00) | ((ptr >> 2) & 0x00FF));
         
         if ( unlikely(IS_XEN_HEAP_FRAME(page)) ||
-             unlikely(!pfn_is_ram(pfn)) ||
+             unlikely(!pfn_valid(pfn)) ||
              unlikely((e = find_domain_by_id(domid)) == NULL) )
         {
             MEM_LOG("Bad frame (%p) or bad domid (%d).\n", pfn, domid);

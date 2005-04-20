@@ -10,12 +10,6 @@
 #include <asm/io.h>
 #include <asm-xen/balloon.h>
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,0)
-#define pte_offset_kernel pte_offset
-#define pud_t pgd_t
-#define pud_offset(d, va) d
-#endif
-
 /* Map a set of buffers described by scatterlist in streaming
  * mode for DMA.  This is the scatter-gather version of the
  * above pci_map_single interface.  Here the scatter gather list
@@ -97,10 +91,9 @@ xen_contig_memory(unsigned long vstart, unsigned int order)
 		pmd = pmd_offset(pud, (vstart + (i*PAGE_SIZE)));
 		pte = pte_offset_kernel(pmd, (vstart + (i*PAGE_SIZE)));
 		pfn = pte->pte >> PAGE_SHIFT;
-		queue_l1_entry_update(pte, 0);
+		xen_l1_entry_update(pte, 0);
 		phys_to_machine_mapping[(__pa(vstart)>>PAGE_SHIFT)+i] =
 			(u32)INVALID_P2M_ENTRY;
-		flush_page_update_queue();
 		if (HYPERVISOR_dom_mem_op(MEMOP_decrease_reservation, 
 					  &pfn, 1, 0) != 1) BUG();
 	}
@@ -113,9 +106,9 @@ xen_contig_memory(unsigned long vstart, unsigned int order)
 		pud = pud_offset(pgd, (vstart + (i*PAGE_SIZE)));
 		pmd = pmd_offset(pud, (vstart + (i*PAGE_SIZE)));
 		pte = pte_offset_kernel(pmd, (vstart + (i*PAGE_SIZE)));
-		queue_l1_entry_update(
+		xen_l1_entry_update(
 			pte, ((pfn+i)<<PAGE_SHIFT)|__PAGE_KERNEL);
-		queue_machphys_update(
+		xen_machphys_update(
 			pfn+i, (__pa(vstart)>>PAGE_SHIFT)+i);
 		phys_to_machine_mapping[(__pa(vstart)>>PAGE_SHIFT)+i] =
 			pfn+i;
@@ -126,24 +119,13 @@ xen_contig_memory(unsigned long vstart, unsigned int order)
         balloon_unlock(flags);
 }
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,0)
-void *pci_alloc_consistent(struct pci_dev *hwdev, size_t size,
-			   dma_addr_t *dma_handle)
-#else
 void *dma_alloc_coherent(struct device *dev, size_t size,
 			   dma_addr_t *dma_handle, unsigned gfp)
-#endif
 {
 	void *ret;
 	unsigned int order = get_order(size);
 	unsigned long vstart;
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,0)
-	int gfp = GFP_ATOMIC;
-
-	if (hwdev == NULL || ((u32)hwdev->dma_mask < 0xffffffff))
-		gfp |= GFP_DMA;
-#else
 	struct dma_coherent_mem *mem = dev ? dev->dma_mem : NULL;
 
 	/* ignore region specifiers */
@@ -164,7 +146,6 @@ void *dma_alloc_coherent(struct device *dev, size_t size,
 
 	if (dev == NULL || (dev->coherent_dma_mask < 0xffffffff))
 		gfp |= GFP_DMA;
-#endif
 
 	vstart = __get_free_pages(gfp, order);
 	ret = (void *)vstart;
@@ -179,14 +160,6 @@ void *dma_alloc_coherent(struct device *dev, size_t size,
 	return ret;
 }
 EXPORT_SYMBOL(dma_alloc_coherent);
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,0)
-void pci_free_consistent(struct pci_dev *hwdev, size_t size,
-			 void *vaddr, dma_addr_t dma_handle)
-{
-	free_pages((unsigned long)vaddr, get_order(size));
-}
-#else
 
 void dma_free_coherent(struct device *dev, size_t size,
 			 void *vaddr, dma_addr_t dma_handle)
@@ -280,5 +253,4 @@ void *dma_mark_declared_memory_occupied(struct device *dev,
 	return mem->virt_base + (pos << PAGE_SHIFT);
 }
 EXPORT_SYMBOL(dma_mark_declared_memory_occupied);
-#endif
 #endif

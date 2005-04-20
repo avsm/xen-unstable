@@ -86,7 +86,11 @@ struct timespec __xtime __section_xtime;
 struct timezone __sys_tz __section_sys_tz;
 #endif
 
+#if defined(__x86_64__)
+unsigned int cpu_khz;	/* Detected as we calibrate the TSC */
+#else
 unsigned long cpu_khz;	/* Detected as we calibrate the TSC */
+#endif
 
 extern unsigned long wall_jiffies;
 
@@ -762,7 +766,7 @@ void time_resume(void)
 }
 
 #ifdef CONFIG_SMP
-static char timer_name[NR_IRQS][15];
+static char timer_name[NR_CPUS][15];
 void local_setup_timer(void)
 {
 	int seq, cpu = smp_processor_id();

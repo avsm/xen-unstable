@@ -50,6 +50,7 @@
 420c983dAE5qEtJMI6wHAQnHVJ1r2g extras/mini-os/x86_64.S
 423e7e86yUUeeOvTAmjIahrpk1ksaQ freebsd-5.3-xen-sparse/conf/Makefile.i386-xen
 423e7e86CSWbA9G8OftmMbfhStuQ6Q freebsd-5.3-xen-sparse/conf/files.i386-xen
+42642db9m5qcqIrsHX8QlcBGeKSAmw freebsd-5.3-xen-sparse/conf/kern.mk
 423e7e86m-vV5fQ_32CjcFMEr77Fyg freebsd-5.3-xen-sparse/conf/ldscript.i386-xen
 423e7e86Fo2PxRS_37IwkpH-x5t5xQ freebsd-5.3-xen-sparse/conf/options.i386-xen
 423e7e868Yt0iZuEeccnczyToPPvow freebsd-5.3-xen-sparse/fbsdxensetup
@@ -262,7 +263,6 @@
 3f68905c5eiA-lBMQSvXLMWS1ikDEA linux-2.6.11-xen-sparse/arch/xen/kernel/xen_proc.c
 424efaa6xahU2q85_dT-SjUJEaivfg linux-2.6.11-xen-sparse/arch/xen/x86_64/Kconfig
 424efaa6kKleWe45IrqsG8gkejgEQA linux-2.6.11-xen-sparse/arch/xen/x86_64/Makefile
-424efaa7hjpGexXRf5TYBwgP7uT5Wg linux-2.6.11-xen-sparse/arch/xen/x86_64/defconfig
 424efaa6HSyuVodl6SxFGj39vlp6MA linux-2.6.11-xen-sparse/arch/xen/x86_64/kernel/Makefile
 424efaa7bVAw3Z_q0SdFivfNVavyIg linux-2.6.11-xen-sparse/arch/xen/x86_64/kernel/asm-offsets.c
 424efaa7ddTVabh547Opf0u9vKmUXw linux-2.6.11-xen-sparse/arch/xen/x86_64/kernel/e820.c
@@ -343,6 +343,7 @@
 40f5623akIoBsQ3KxSB2kufkbgONXQ linux-2.6.11-xen-sparse/include/asm-xen/asm-i386/fixmap.h
 41979925z1MsKU1SfuuheM1IFDQ_bA linux-2.6.11-xen-sparse/include/asm-xen/asm-i386/floppy.h
 4118b6a418gnL6AZsTdglC92YGqYTg linux-2.6.11-xen-sparse/include/asm-xen/asm-i386/highmem.h
+42539fb5A9hsS3NFQ-2VY4y1TONZZQ linux-2.6.11-xen-sparse/include/asm-xen/asm-i386/hypercall.h
 40f5623aJVXQwpJMOLE99XgvGsfQ8Q linux-2.6.11-xen-sparse/include/asm-xen/asm-i386/io.h
 40f5623aKXkBBxgpLx2NcvkncQ1Yyw linux-2.6.11-xen-sparse/include/asm-xen/asm-i386/mach-xen/irq_vectors.h
 40f5623aDMCsWOFO0jktZ4e8sjwvEg linux-2.6.11-xen-sparse/include/asm-xen/asm-i386/mach-xen/setup_arch_post.h
@@ -511,6 +512,7 @@
 4124b307jt7T3CHysgl9LijNHSe1tA tools/check/check_brctl
 4124b307HDX972-zihuZWXB7R8Vd0w tools/check/check_curl_devel
 4124b307P3bZBkTFm6r-3XTbf0phAA tools/check/check_curl_lib
+42642813SYRkwr07qVZ9eCI5QTZANg tools/check/check_iproute
 4124b307u-FeKvFP9kZnh0rLV0XjGg tools/check/check_logging
 4124b307tRTjLqzRy60QrUoqN2Fhuw tools/check/check_python
 4124b307XdznSNCv97lrT3RpOdMM1A tools/check/check_twisted
@@ -1362,8 +1364,10 @@
 4204e7acwXDo-5iAAiO2eQbtDeYZXA xen/include/asm-x86/init.h
 3ddb79c3fQ_O3o5NHK2N8AJdk0Ea4Q xen/include/asm-x86/io.h
 3ddb79c2TKeScYHQZreTdHqYNLbehQ xen/include/asm-x86/io_apic.h
+42605109qxLSrHVE2SRhGXmgk907iw xen/include/asm-x86/io_ports.h
 3ddb79c2L7rTlFzazOLW1XuSZefpFw xen/include/asm-x86/irq.h
 404f1b93OjLO4bFfBXYNaJdIqlNz-Q xen/include/asm-x86/ldt.h
+4260510aYPj2kr6rMbBfMxcvvmXndQ xen/include/asm-x86/mach_apic.h
 3ddb79c3I98vWcQR8xEo34JMJ4Ahyw xen/include/asm-x86/mc146818rtc.h
 40ec25fd7cSvbP7Biw91zaU_g0xsEQ xen/include/asm-x86/mm.h
 3ddb79c3n_UbPuxlkNxvvLycClIkxA xen/include/asm-x86/mpspec.h

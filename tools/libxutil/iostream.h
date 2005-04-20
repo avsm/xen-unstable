@@ -105,13 +105,16 @@ extern int IOStream_vprint(IOStream *io, const char *format, va_list args);
  * @return if ok, number of bytes read, otherwise negative error code
  */
 static inline int IOStream_read(IOStream *stream, void *buf, size_t n){
-    int result = 0;
-    if(stream->closed) goto exit;
+    int result;
+    if(stream->closed){
+        result = IOSTREAM_EOF;
+        goto exit;
+    }
     if(!stream->methods || !stream->methods->read){
         result = -EINVAL;
         goto exit;
     }
-    result = stream->methods->read(stream, buf, n);
+    result = (stream->methods->read)(stream, buf, n);
     if(result > 0){
         stream->read += result;
     }
@@ -124,16 +127,19 @@ static inline int IOStream_read(IOStream *stream, void *buf, size_t n){
  * @param stream input
  * @param buf where to put input
  * @param n number of bytes to write
- * @return if ok, number of bytes read, otherwise negative error code
+ * @return if ok, number of bytes written, otherwise negative error code
  */
 static inline int IOStream_write(IOStream *stream, const void *buf, size_t n){
-    int result = 0;
-    if(stream->closed) goto exit;
+    int result;
+    if(stream->closed){
+        result = IOSTREAM_EOF;
+        goto exit;
+    }
     if(!stream->methods || !stream->methods->write){
         result = -EINVAL;
         goto exit;
     }
-    result = stream->methods->write(stream, buf, n);
+    result = (stream->methods->write)(stream, buf, n);
     if(result > 0){
         stream->written += result;
     }
@@ -151,7 +157,7 @@ static inline int IOStream_flush(IOStream *stream){
     if(stream->closed){
         result = IOSTREAM_EOF;
     } else if(stream->methods->flush){
-        result = stream->methods->flush(stream);
+        result = (stream->methods->flush)(stream);
         if(result < 0) result = IOSTREAM_EOF;
     }
     return result;
@@ -165,7 +171,7 @@ static inline int IOStream_flush(IOStream *stream){
 static inline int IOStream_error(IOStream *stream){
     int err = 0;
     if(stream->methods && stream->methods->error){
-       err = stream->methods->error(stream);
+       err = (stream->methods->error)(stream);
     }
     return err;
 }
@@ -178,7 +184,8 @@ static inline int IOStream_error(IOStream *stream){
 static inline int IOStream_close(IOStream *stream){
     int err = 1;
     if(stream->methods && stream->methods->close){
-        err = stream->methods->close(stream);
+        err = (stream->methods->close)(stream);
+        stream->closed = 1;
     }
     return err;
 }
@@ -189,7 +196,7 @@ static inline int IOStream_close(IOStream *stream){
  * @return 1 if closed, 0 otherwise
  */
 static inline int IOStream_is_closed(IOStream *stream){
-  return stream->closed;
+    return stream->closed;
 }
 
 /** Free the memory used by the stream.
@@ -197,11 +204,14 @@ static inline int IOStream_is_closed(IOStream *stream){
  * @param stream to free
  */
 static inline void IOStream_free(IOStream *stream){
-  if(stream->methods && stream->methods->free){
-    stream->methods->free(stream);
-  }
-  *stream = (IOStream){};
-  deallocate(stream);
+    if(!stream->closed && stream->methods && stream->methods->close){
+        (stream->methods->close)(stream);
+    }
+    if(stream->methods && stream->methods->free){
+        (stream->methods->free)(stream);
+    }
+    *stream = (IOStream){};
+    deallocate(stream);
 }
 
 

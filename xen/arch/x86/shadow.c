@@ -68,9 +68,14 @@ shadow_promote(struct domain *d, unsigned long gpfn, unsigned long gmfn,
 
     if ( !shadow_remove_all_write_access(d, gpfn, gmfn) )
     {
-        FSH_LOG("%s: couldn't find/remove all write accesses, gpfn=%p gmfn=%p\n",
+        FSH_LOG("%s: couldn't find/remove all write accesses, gpfn=%p gmfn=%p",
                 __func__, gpfn, gmfn);
+#if 1 || defined(LIVE_DANGEROUSLY)
+        set_bit(_PGC_page_table, &page->count_info);
+        return 1;
+#endif
         return 0;
+        
     }
 
     // To convert this page to use as a page table, the writable count
@@ -288,7 +293,7 @@ alloc_shadow_page(struct domain *d,
     return smfn;
 
   fail:
-    FSH_LOG("promotion of pfn=%p mfn=%p failed!  external gnttab refs?\n",
+    FSH_LOG("promotion of pfn=%p mfn=%p failed!  external gnttab refs?",
             gpfn, gmfn);
     free_domheap_page(page);
     return 0;
@@ -311,9 +316,6 @@ free_shadow_l1_table(struct domain *d, unsigned long smfn)
     }
 
     unmap_domain_mem(pl1e);
-
-    list_add(&spage->list, &d->arch.free_shadow_frames);
-    perfc_incr(free_l1_pages);
 }
 
 static void inline
@@ -322,10 +324,16 @@ free_shadow_hl2_table(struct domain *d, unsigned long smfn)
     l1_pgentry_t *hl2 = map_domain_mem(smfn << PAGE_SHIFT);
     int i, limit;
 
+    SH_VVLOG("%s: smfn=%p freed\n", __func__, smfn);
+
+#ifdef __i386__
     if ( shadow_mode_external(d) )
         limit = L2_PAGETABLE_ENTRIES;
     else
         limit = DOMAIN_ENTRIES_PER_L2_PAGETABLE;
+#else
+    limit = 0; /* XXX x86/64 XXX */
+#endif
 
     for ( i = 0; i < limit; i++ )
     {
@@ -349,8 +357,7 @@ free_shadow_l2_table(struct domain *d, unsigned long smfn)
                 put_shadow_ref(pl2e[i] >> PAGE_SHIFT);
 
     if ( (PGT_base_page_table == PGT_l2_page_table) &&
-         shadow_mode_translate(d) &&
-         !shadow_mode_external(d) )
+         shadow_mode_translate(d) && !external )
     {
         // free the ref to the hl2
         //
@@ -368,6 +375,8 @@ void free_shadow_page(unsigned long smfn)
     struct domain *d = page_get_owner(pfn_to_page(gmfn));
     unsigned long gpfn = __mfn_to_gpfn(d, gmfn);
     unsigned long type = page->u.inuse.type_info & PGT_type_mask;
+
+    SH_VVLOG("%s: free'ing smfn=%p", __func__, smfn);
 
     ASSERT( ! IS_INVALID_M2P_ENTRY(gpfn) );
 
@@ -410,7 +419,12 @@ void free_shadow_page(unsigned long smfn)
     page->tlbflush_timestamp = 0;
     page->u.free.cpu_mask = 0;
 
-    if ( type != PGT_l1_shadow )
+    if ( type == PGT_l1_shadow )
+    {
+        list_add(&page->list, &d->arch.free_shadow_frames);
+        perfc_incr(free_l1_pages);
+    }
+    else
         free_domheap_page(page);
 }
 
@@ -506,18 +520,18 @@ static void free_out_of_sync_state(struct domain *d)
 
 static void free_shadow_pages(struct domain *d)
 {
-    int                   i, free = 0;
-    struct shadow_status *x, *n;
-    struct exec_domain   *e;
+    int                   i;
+    struct shadow_status *x;
+    struct exec_domain   *ed;
  
     /*
      * WARNING! The shadow page table must not currently be in use!
      * e.g., You are expected to have paused the domain and synchronized CR3.
      */
 
-    shadow_audit(d, 1);
-
     if( !d->arch.shadow_ht ) return;
+
+    shadow_audit(d, 1);
 
     // first, remove any outstanding refs from out_of_sync entries...
     //
@@ -525,58 +539,81 @@ static void free_shadow_pages(struct domain *d)
 
     // second, remove any outstanding refs from ed->arch.shadow_table...
     //
-    for_each_exec_domain(d, e)
+    for_each_exec_domain(d, ed)
     {
-        if ( pagetable_val(e->arch.shadow_table) )
+        if ( pagetable_val(ed->arch.shadow_table) )
         {
-            put_shadow_ref(pagetable_val(e->arch.shadow_table) >> PAGE_SHIFT);
-            e->arch.shadow_table = mk_pagetable(0);
+            put_shadow_ref(pagetable_val(ed->arch.shadow_table) >> PAGE_SHIFT);
+            ed->arch.shadow_table = mk_pagetable(0);
+        }
+    }
+
+    // For external shadows, remove the monitor table's refs
+    //
+    if ( shadow_mode_external(d) )
+    {
+        for_each_exec_domain(d, ed)
+        {
+            l2_pgentry_t *mpl2e = ed->arch.monitor_vtable;
+            l2_pgentry_t hl2e = mpl2e[l2_table_offset(LINEAR_PT_VIRT_START)];
+            l2_pgentry_t smfn = mpl2e[l2_table_offset(SH_LINEAR_PT_VIRT_START)];
+            if ( l2_pgentry_val(hl2e) & _PAGE_PRESENT )
+            {
+                put_shadow_ref(l2_pgentry_val(hl2e) >> PAGE_SHIFT);
+                mpl2e[l2_table_offset(LINEAR_PT_VIRT_START)] = mk_l2_pgentry(0);
+            }
+            if ( l2_pgentry_val(smfn) & _PAGE_PRESENT )
+            {
+                put_shadow_ref(l2_pgentry_val(smfn) >> PAGE_SHIFT);
+                mpl2e[l2_table_offset(SH_LINEAR_PT_VIRT_START)] = mk_l2_pgentry(0);
+            }
         }
     }
 
     // Now, the only refs to shadow pages that are left are from the shadow
-    // pages themselves.  We can just free them.
+    // pages themselves.  We just unpin the pinned pages, and the rest
+    // should automatically disappear.
     //
+    // NB: Beware: each explicitly or implicit call to free_shadow_page
+    // can/will result in the hash bucket getting rewritten out from
+    // under us...  First, collect the list of pinned pages, then
+    // free them.
+    //
+#define PINNED(_x) (frame_table[_x].u.inuse.type_info & PGT_pinned)
     for ( i = 0; i < shadow_ht_buckets; i++ )
     {
+        u32 count;
+        unsigned long *mfn_list;
+
         /* Skip empty buckets. */
         x = &d->arch.shadow_ht[i];
         if ( x->gpfn_and_flags == 0 )
             continue;
 
-        /* Free the head page. */
-        free_shadow_page(x->smfn);
+        count = 0;
+        for ( ; x != NULL; x = x->next )
+            if ( PINNED(x->smfn) )
+                count++;
+        if ( !count )
+            continue;
 
-        /* Reinitialise the head node. */
-        x->gpfn_and_flags = 0;
-        x->smfn           = 0;
-        n                 = x->next;
-        x->next           = NULL;
+        mfn_list = xmalloc_array(unsigned long, count);
+        count = 0;
+        for ( x = &d->arch.shadow_ht[i]; x != NULL; x = x->next )
+            if ( PINNED(x->smfn) )
+                mfn_list[count++] = x->smfn;
 
-        free++;
-
-        /* Iterate over non-head nodes. */
-        for ( x = n; x != NULL; x = n )
-        { 
-            /* Free the shadow page. */
-            free_shadow_page(x->smfn);
-
-            /* Re-initialise the chain node. */
-            x->gpfn_and_flags = 0;
-            x->smfn           = 0;
-
-            /* Add to the free list. */
-            n       = x->next;
-            x->next = d->arch.shadow_ht_free;
-            d->arch.shadow_ht_free = x;
-
-            free++;
+        while ( count )
+        {
+            shadow_unpin(mfn_list[--count]);
         }
-
-        shadow_audit(d, 0);
+        xfree(mfn_list);
     }
+#undef PINNED
 
-    SH_LOG("Free shadow table. Freed=%d.", free);
+    shadow_audit(d, 0);
+
+    SH_LOG("Free shadow table.");
 }
 
 void shadow_mode_init(void)
@@ -604,9 +641,11 @@ static void alloc_monitor_pagetable(struct exec_domain *ed)
     mpl2e = (l2_pgentry_t *) map_domain_mem(mmfn << PAGE_SHIFT);
     memset(mpl2e, 0, PAGE_SIZE);
 
+#ifdef __i386__ /* XXX screws x86/64 build */
     memcpy(&mpl2e[DOMAIN_ENTRIES_PER_L2_PAGETABLE], 
            &idle_pg_table[DOMAIN_ENTRIES_PER_L2_PAGETABLE],
            HYPERVISOR_ENTRIES_PER_L2_PAGETABLE * sizeof(l2_pgentry_t));
+#endif
 
     mpl2e[l2_table_offset(PERDOMAIN_VIRT_START)] =
         mk_l2_pgentry((__pa(d->arch.mm_perdomain_pt) & PAGE_MASK) 
@@ -615,6 +654,12 @@ static void alloc_monitor_pagetable(struct exec_domain *ed)
     // map the phys_to_machine map into the Read-Only MPT space for this domain
     mpl2e[l2_table_offset(RO_MPT_VIRT_START)] =
         mk_l2_pgentry(pagetable_val(d->arch.phys_table) | __PAGE_HYPERVISOR);
+
+    // Don't (yet) have mappings for these...
+    // Don't want to accidentally see the idle_pg_table's linear mapping.
+    //
+    mpl2e[l2_table_offset(LINEAR_PT_VIRT_START)] = mk_l2_pgentry(0);
+    mpl2e[l2_table_offset(SH_LINEAR_PT_VIRT_START)] = mk_l2_pgentry(0);
 
     ed->arch.monitor_table = mk_pagetable(mmfn << PAGE_SHIFT);
     ed->arch.monitor_vtable = mpl2e;
@@ -625,7 +670,7 @@ static void alloc_monitor_pagetable(struct exec_domain *ed)
  */
 void free_monitor_pagetable(struct exec_domain *ed)
 {
-    l2_pgentry_t *mpl2e, hl2e;
+    l2_pgentry_t *mpl2e, hl2e, sl2e;
     unsigned long mfn;
 
     ASSERT( pagetable_val(ed->arch.monitor_table) );
@@ -637,11 +682,21 @@ void free_monitor_pagetable(struct exec_domain *ed)
      * First get the mfn for hl2_table by looking at monitor_table
      */
     hl2e = mpl2e[LINEAR_PT_VIRT_START >> L2_PAGETABLE_SHIFT];
-    ASSERT(l2_pgentry_val(hl2e) & _PAGE_PRESENT);
-    mfn = l2_pgentry_val(hl2e) >> PAGE_SHIFT;
-    ASSERT(mfn);
+    if ( l2_pgentry_val(hl2e) & _PAGE_PRESENT )
+    {
+        mfn = l2_pgentry_val(hl2e) >> PAGE_SHIFT;
+        ASSERT(mfn);
+        put_shadow_ref(mfn);
+    }
 
-    put_shadow_ref(mfn);
+    sl2e = mpl2e[SH_LINEAR_PT_VIRT_START >> L2_PAGETABLE_SHIFT];
+    if ( l2_pgentry_val(sl2e) & _PAGE_PRESENT )
+    {
+        mfn = l2_pgentry_val(sl2e) >> PAGE_SHIFT;
+        ASSERT(mfn);
+        put_shadow_ref(mfn);
+    }
+
     unmap_domain_mem(mpl2e);
 
     /*
@@ -1222,6 +1277,11 @@ int shadow_mode_control(struct domain *d, dom0_shadow_control_t *sc)
         rc = __shadow_mode_enable(d, d->arch.shadow_mode|SHM_enable|SHM_log_dirty);
         break;
 
+    case DOM0_SHADOW_CONTROL_OP_ENABLE_TRANSLATE:
+        free_shadow_pages(d);
+        rc = __shadow_mode_enable(d, d->arch.shadow_mode|SHM_enable|SHM_translate);
+        break;
+
     default:
         rc = shadow_mode_enabled(d) ? shadow_mode_table_op(d, sc) : -EINVAL;
         break;
@@ -1242,10 +1302,11 @@ int shadow_mode_control(struct domain *d, dom0_shadow_control_t *sc)
  */
 void vmx_shadow_clear_state(struct domain *d)
 {
-    SH_VVLOG("vmx_clear_shadow_state:");
+    SH_VVLOG("%s:", __func__);
     shadow_lock(d);
     free_shadow_pages(d);
     shadow_unlock(d);
+    update_pagetables(d->exec_domain[0]);
 }
 
 unsigned long
@@ -1302,14 +1363,20 @@ shadow_hl2_table(struct domain *d, unsigned long gpfn, unsigned long gmfn,
         BUG(); /* XXX Deal gracefully with failure. */
     }
 
+    SH_VVLOG("shadow_hl2_table(gpfn=%p, gmfn=%p, smfn=%p) => %p",
+             gpfn, gmfn, smfn, hl2mfn);
     perfc_incrc(shadow_hl2_table_count);
 
     hl2 = map_domain_mem(hl2mfn << PAGE_SHIFT);
 
+#ifdef __i386__
     if ( shadow_mode_external(d) )
         limit = L2_PAGETABLE_ENTRIES;
     else
         limit = DOMAIN_ENTRIES_PER_L2_PAGETABLE;
+#else
+    limit = 0; /* XXX x86/64 XXX */
+#endif
 
     memset(hl2, 0, limit * sizeof(l1_pgentry_t));
 
@@ -1584,7 +1651,7 @@ static inline unsigned long
 shadow_make_snapshot(
     struct domain *d, unsigned long gpfn, unsigned long gmfn)
 {
-    unsigned long smfn, sl1mfn;
+    unsigned long smfn, sl1mfn = 0;
     void *original, *snapshot;
     u32 min_max = 0;
     int min, max, length;
@@ -1660,10 +1727,10 @@ shadow_mark_mfn_out_of_sync(struct exec_domain *ed, unsigned long gpfn,
     struct out_of_sync_entry *entry = shadow_alloc_oos_entry(d);
 
     ASSERT(spin_is_locked(&d->arch.shadow_lock));
-    ASSERT(pfn_is_ram(mfn));
+    ASSERT(pfn_valid(mfn));
     ASSERT((page->u.inuse.type_info & PGT_type_mask) == PGT_writable_page);
 
-    FSH_LOG("mark_mfn_out_of_sync(gpfn=%p, mfn=%p) c=%p t=%p",
+    FSH_LOG("%s(gpfn=%p, mfn=%p) c=%p t=%p", __func__,
             gpfn, mfn, page->count_info, page->u.inuse.type_info);
 
     // XXX this will require some more thought...  Cross-domain sharing and
@@ -1936,9 +2003,13 @@ int shadow_remove_all_write_access(
 
     // How many outstanding writable PTEs for this page are there?
     //
-    write_refs = (frame_table[readonly_gmfn].u.inuse.type_info & PGT_count_mask);
-    if ( write_refs && (frame_table[readonly_gmfn].u.inuse.type_info & PGT_pinned) )
+    write_refs =
+        (frame_table[readonly_gmfn].u.inuse.type_info & PGT_count_mask);
+    if ( write_refs &&
+         (frame_table[readonly_gmfn].u.inuse.type_info & PGT_pinned) )
+    {
         write_refs--;
+    }
 
     if ( write_refs == 0 )
     {
@@ -1946,7 +2017,7 @@ int shadow_remove_all_write_access(
         return 1;
     }
 
-    // Before searching all the L1 page tables, check the typical culprit first.
+    // Before searching all the L1 page tables, check the typical culprit first
     //
     if ( (prediction = predict_writable_pte_page(d, readonly_gpfn)) )
     {
@@ -1986,7 +2057,7 @@ int shadow_remove_all_write_access(
         }
     }
 
-    FSH_LOG("%s: looking for %d refs, found %d refs\n",
+    FSH_LOG("%s: looking for %d refs, found %d refs",
             __func__, write_refs, found);
 
     return 0;
@@ -2031,6 +2102,7 @@ u32 shadow_remove_all_access(struct domain *d, unsigned long forbidden_gmfn)
     u32 count = 0;
 
     ASSERT(spin_is_locked(&d->arch.shadow_lock));
+    perfc_incrc(remove_all_access);
 
     for (i = 0; i < shadow_ht_buckets; i++)
     {
@@ -2199,6 +2271,14 @@ static int resync_all(struct domain *d, u32 stype)
         {
             perfc_incrc(unshadow_l2_count);
             shadow_unpin(smfn);
+            if ( unlikely(shadow_mode_external(d)) )
+            {
+                unsigned long hl2mfn;
+
+                if ( (hl2mfn = __shadow_status(d, entry->gpfn, PGT_hl2_shadow)) &&
+                     (frame_table[hl2mfn].u.inuse.type_info & PGT_pinned) )
+                    shadow_unpin(hl2mfn);
+            }
         }
     }
 
@@ -2382,14 +2462,14 @@ int shadow_fault(unsigned long va, struct xen_regs *regs)
  * SHADOW MODE:      none         enable         translate         external
  * 
  * 4KB things:
- * guest_vtable    lin_l2     mapped per gpdt  lin_l2 via hl2   mapped per gpdt
- * shadow_vtable     n/a         sh_lin_l2       sh_lin_l2      mapped per gpdt
- * hl2_vtable        n/a            n/a        lin_hl2 via hl2  mapped per gpdt
+ * guest_vtable    lin_l2     mapped per gl2   lin_l2 via hl2   mapped per gl2
+ * shadow_vtable     n/a         sh_lin_l2       sh_lin_l2      mapped per gl2
+ * hl2_vtable        n/a            n/a        lin_hl2 via hl2  mapped per gl2
  * monitor_vtable    n/a            n/a             n/a           mapped once
  *
  * 4MB things:
- * guest_linear  lin via gpdt   lin via gpdt     lin via hl2      lin via hl2
- * shadow_linear     n/a      sh_lin via spdt  sh_lin via spdt  sh_lin via spdt
+ * guest_linear  lin via gl2    lin via gl2      lin via hl2      lin via hl2
+ * shadow_linear     n/a      sh_lin via sl2   sh_lin via sl2   sh_lin via sl2
  * monitor_linear    n/a            n/a             n/a              ???
  * perdomain      perdomain      perdomain       perdomain        perdomain
  * R/O M2P         R/O M2P        R/O M2P           n/a              n/a
@@ -2461,9 +2541,6 @@ void __update_pagetables(struct exec_domain *ed)
     {
         if ( unlikely(!(hl2mfn = __shadow_status(d, gpfn, PGT_hl2_shadow))) )
             hl2mfn = shadow_hl2_table(d, gpfn, gmfn, smfn);
-        if ( !get_shadow_ref(hl2mfn) )
-            BUG();
-
         if ( ed->arch.hl2_vtable )
             unmap_domain_mem(ed->arch.hl2_vtable);
         ed->arch.hl2_vtable = map_domain_mem(hl2mfn << PAGE_SHIFT);
@@ -2475,16 +2552,24 @@ void __update_pagetables(struct exec_domain *ed)
     if ( max_mode == SHM_external )
     {
         l2_pgentry_t *mpl2e = ed->arch.monitor_vtable;
+        l2_pgentry_t old_hl2e = mpl2e[l2_table_offset(LINEAR_PT_VIRT_START)];
+        l2_pgentry_t old_sl2e = mpl2e[l2_table_offset(SH_LINEAR_PT_VIRT_START)];
 
         ASSERT( shadow_mode_translate(d) );
 
-        BUG(); // ref counts for hl2mfn and smfn need to be maintained!
-
+        if ( !get_shadow_ref(hl2mfn) )
+            BUG();
         mpl2e[l2_table_offset(LINEAR_PT_VIRT_START)] =
             mk_l2_pgentry((hl2mfn << PAGE_SHIFT) | __PAGE_HYPERVISOR);
+        if ( l2_pgentry_val(old_hl2e) & _PAGE_PRESENT )
+            put_shadow_ref(l2_pgentry_val(old_hl2e) >> PAGE_SHIFT);
 
+        if ( !get_shadow_ref(smfn) )
+            BUG();
         mpl2e[l2_table_offset(SH_LINEAR_PT_VIRT_START)] =
             mk_l2_pgentry((smfn << PAGE_SHIFT) | __PAGE_HYPERVISOR);
+        if ( l2_pgentry_val(old_sl2e) & _PAGE_PRESENT )
+            put_shadow_ref(l2_pgentry_val(old_sl2e) >> PAGE_SHIFT);
 
         // XXX - maybe this can be optimized somewhat??
         local_flush_tlb();
@@ -2622,14 +2707,6 @@ static int check_l1_table(
     unsigned long *gpl1e, *spl1e;
     int errors = 0, oos_ptes = 0;
 
-    // First check to see if this guest page is currently the active
-    // PTWR page.  If so, then we compare the (old) cached copy of the
-    // guest page to the shadow, and not the currently writable (and
-    // thus potentially out-of-sync) guest page.
-    //
-    if ( VM_ASSIST(d, VMASST_TYPE_writable_pagetables) )
-        BUG();
-
     if ( page_out_of_sync(pfn_to_page(gmfn)) )
     {
         gmfn = __shadow_status(d, gpfn, PGT_snapshot);
@@ -2712,10 +2789,14 @@ int check_l2_table(
                (__pa(d->arch.mm_perdomain_pt) | __PAGE_HYPERVISOR));
     }
 
+#ifdef __i386__
     if ( shadow_mode_external(d) )
         limit = L2_PAGETABLE_ENTRIES;
     else
         limit = DOMAIN_ENTRIES_PER_L2_PAGETABLE;
+#else
+    limit = 0; /* XXX x86/64 XXX */
+#endif
 
     /* Check the whole L2. */
     for ( i = 0; i < limit; i++ )
@@ -2743,7 +2824,7 @@ int _check_pagetable(struct exec_domain *ed, char *s)
     unsigned long ptbase_mfn = 0;
     int errors = 0, limit, oos_pdes = 0;
 
-    _audit_domain(d, AUDIT_QUIET);
+    //_audit_domain(d, AUDIT_QUIET);
     shadow_lock(d);
 
     sh_check_name = s;
@@ -2757,7 +2838,6 @@ int _check_pagetable(struct exec_domain *ed, char *s)
     if ( !(smfn = __shadow_status(d, ptbase_pfn, PGT_base_page_table)) )
     {
         printk("%s-PT %p not shadowed\n", s, gptbase);
-        errors++;
         goto out;
     }
     if ( page_out_of_sync(pfn_to_page(ptbase_mfn)) )
@@ -2773,10 +2853,14 @@ int _check_pagetable(struct exec_domain *ed, char *s)
     spl2e = (l2_pgentry_t *) map_domain_mem( smfn << PAGE_SHIFT );
 
     /* Go back and recurse. */
+#ifdef __i386__
     if ( shadow_mode_external(d) )
         limit = L2_PAGETABLE_ENTRIES;
     else
         limit = DOMAIN_ENTRIES_PER_L2_PAGETABLE;
+#else
+    limit = 0; /* XXX x86/64 XXX */
+#endif
 
     for ( i = 0; i < limit; i++ )
     {

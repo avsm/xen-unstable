@@ -85,7 +85,7 @@ static inline int page_is_page_table(struct pfn_info *page)
 
 static inline int mfn_is_page_table(unsigned long mfn)
 {
-    if ( !pfn_is_ram(mfn) )
+    if ( !pfn_valid(mfn) )
         return 0;
 
     return frame_table[mfn].count_info & PGC_page_table;
@@ -98,7 +98,7 @@ static inline int page_out_of_sync(struct pfn_info *page)
 
 static inline int mfn_out_of_sync(unsigned long mfn)
 {
-    if ( !pfn_is_ram(mfn) )
+    if ( !pfn_valid(mfn) )
         return 0;
 
     return frame_table[mfn].count_info & PGC_out_of_sync;
@@ -222,11 +222,11 @@ struct out_of_sync_entry {
 #define SHADOW_SNAPSHOT_ELSEWHERE (-1L)
 
 /************************************************************************/
-#define SHADOW_DEBUG 1
-#define SHADOW_VERBOSE_DEBUG 1
-#define SHADOW_VVERBOSE_DEBUG 1
-#define SHADOW_HASH_DEBUG 1
-#define FULLSHADOW_DEBUG 1
+#define SHADOW_DEBUG 0
+#define SHADOW_VERBOSE_DEBUG 0
+#define SHADOW_VVERBOSE_DEBUG 0
+#define SHADOW_HASH_DEBUG 0
+#define FULLSHADOW_DEBUG 0
 
 #if SHADOW_DEBUG
 extern int shadow_status_noswap;
@@ -270,20 +270,21 @@ extern int shadow_status_noswap;
 static inline int
 shadow_get_page_from_l1e(l1_pgentry_t l1e, struct domain *d)
 {
-    int res = get_page_from_l1e(l1e, d);
+    l1_pgentry_t nl1e = mk_l1_pgentry(l1_pgentry_val(l1e) & ~_PAGE_GLOBAL);
+    int res = get_page_from_l1e(nl1e, d);
     unsigned long mfn;
     struct domain *owner;
 
-    ASSERT( l1_pgentry_val(l1e) & _PAGE_PRESENT );
+    ASSERT( l1_pgentry_val(nl1e) & _PAGE_PRESENT );
 
     if ( unlikely(!res) && IS_PRIV(d) && !shadow_mode_translate(d) &&
-         !(l1_pgentry_val(l1e) & L1_DISALLOW_MASK) &&
-         (mfn = l1_pgentry_to_pfn(l1e)) &&
-         pfn_is_ram(mfn) &&
-         (owner = page_get_owner(pfn_to_page(l1_pgentry_to_pfn(l1e)))) &&
+         !(l1_pgentry_val(nl1e) & L1_DISALLOW_MASK) &&
+         (mfn = l1_pgentry_to_pfn(nl1e)) &&
+         pfn_valid(mfn) &&
+         (owner = page_get_owner(pfn_to_page(l1_pgentry_to_pfn(nl1e)))) &&
          (d != owner) )
     {
-        res = get_page_from_l1e(l1e, owner);
+        res = get_page_from_l1e(nl1e, owner);
         printk("tried to map mfn %p from domain %d into shadow page tables "
                "of domain %d; %s\n",
                mfn, owner->id, d->id, res ? "success" : "failed");
@@ -292,7 +293,7 @@ shadow_get_page_from_l1e(l1_pgentry_t l1e, struct domain *d)
     if ( unlikely(!res) )
     {
         perfc_incrc(shadow_get_page_fail);
-        FSH_LOG("%s failed to get ref l1e=%p\n", __func__, l1_pgentry_val(l1e));
+        FSH_LOG("%s failed to get ref l1e=%p", __func__, l1_pgentry_val(l1e));
     }
 
     return res;
@@ -398,13 +399,13 @@ static inline void shadow_drop_references(
            page->count_info, page->u.inuse.type_info);
 }
 
+/* XXX Needs more thought. Neither pretty nor fast: a place holder. */
 static inline void shadow_sync_and_drop_references(
     struct domain *d, struct pfn_info *page)
 {
     if ( likely(!shadow_mode_enabled(d)) )
         return;
 
-    /* XXX Needs more thought. Neither pretty nor fast: a place holder. */
     shadow_lock(d);
 
     if ( page_out_of_sync(page) )
@@ -412,54 +413,20 @@ static inline void shadow_sync_and_drop_references(
 
     shadow_remove_all_access(d, page_to_pfn(page));
 
-    if ( page->count_info != 1 )
-    {
-        printk("free_dom_mem in shadow mode didn't release page "
-               "mfn=%p c=%p\n", page_to_pfn(page), page->count_info);
-        shadow_unlock(d);
-        audit_domain(d);
-        BUG();
-    }
-
     shadow_unlock(d);
 }
 
 /************************************************************************/
 
-//#define MFN3_TO_WATCH 0x8575
-#ifdef MFN3_TO_WATCH
-#define get_shadow_ref(__s) (                                                 \
-{                                                                             \
-    unsigned long _s = (__s);                                                 \
-    if ( _s == MFN3_TO_WATCH )                                                \
-        printk("get_shadow_ref(%x) oc=%d @ %s:%d in %s\n",                    \
-               MFN3_TO_WATCH, frame_table[_s].count_info,                     \
-               __FILE__, __LINE__, __func__);                                 \
-    _get_shadow_ref(_s);                                                      \
-})
-#define put_shadow_ref(__s) (                                                 \
-{                                                                             \
-    unsigned long _s = (__s);                                                 \
-    if ( _s == MFN3_TO_WATCH )                                                \
-        printk("put_shadow_ref(%x) oc=%d @ %s:%d in %s\n",                    \
-               MFN3_TO_WATCH, frame_table[_s].count_info,                     \
-               __FILE__, __LINE__, __func__);                                 \
-    _put_shadow_ref(_s);                                                      \
-})
-#else
-#define _get_shadow_ref get_shadow_ref
-#define _put_shadow_ref put_shadow_ref
-#endif
-
 /*
  * Add another shadow reference to smfn.
  */
 static inline int
-_get_shadow_ref(unsigned long smfn)
+get_shadow_ref(unsigned long smfn)
 {
     u32 x, nx;
 
-    ASSERT(pfn_is_ram(smfn));
+    ASSERT(pfn_valid(smfn));
 
     x = frame_table[smfn].count_info;
     nx = x + 1;
@@ -484,18 +451,19 @@ extern void free_shadow_page(unsigned long smfn);
  * Drop a shadow reference to smfn.
  */
 static inline void
-_put_shadow_ref(unsigned long smfn)
+put_shadow_ref(unsigned long smfn)
 {
     u32 x, nx;
 
-    ASSERT(pfn_is_ram(smfn));
+    ASSERT(pfn_valid(smfn));
 
     x = frame_table[smfn].count_info;
     nx = x - 1;
 
     if ( unlikely(x == 0) )
     {
-        printk("put_shadow_ref underflow, oc=%p t=%p\n",
+        printk("put_shadow_ref underflow, smfn=%p oc=%p t=%p\n",
+               smfn,
                frame_table[smfn].count_info,
                frame_table[smfn].u.inuse.type_info);
         BUG();
@@ -517,13 +485,15 @@ shadow_pin(unsigned long smfn)
     ASSERT( !(frame_table[smfn].u.inuse.type_info & PGT_pinned) );
 
     frame_table[smfn].u.inuse.type_info |= PGT_pinned;
-    if ( !get_shadow_ref(smfn) )
+    if ( unlikely(!get_shadow_ref(smfn)) )
         BUG();
 }
 
 static inline void
 shadow_unpin(unsigned long smfn)
 {
+    ASSERT( (frame_table[smfn].u.inuse.type_info & PGT_pinned) );
+
     frame_table[smfn].u.inuse.type_info &= ~PGT_pinned;
     put_shadow_ref(smfn);
 }
@@ -776,7 +746,7 @@ validate_pte_change(
     perfc_incrc(validate_pte_calls);
 
 #if 0
-    FSH_LOG("validate_pte(old=%p new=%p)\n", old_pte, new_pte);
+    FSH_LOG("validate_pte(old=%p new=%p)", old_pte, new_pte);
 #endif
 
     old_spte = *shadow_pte_p;
@@ -1466,7 +1436,7 @@ static inline unsigned long gva_to_gpte(unsigned long gva)
     if ( unlikely(__get_user(gpte, (unsigned long *)
                              &linear_pg_table[gva >> PAGE_SHIFT])) )
     {
-        FSH_LOG("gva_to_gpte got a fault on gva=%p\n", gva);
+        FSH_LOG("gva_to_gpte got a fault on gva=%p", gva);
         return 0;
     }
 
@@ -1490,14 +1460,18 @@ extern void __update_pagetables(struct exec_domain *ed);
 static inline void update_pagetables(struct exec_domain *ed)
 {
     struct domain *d = ed->domain;
+    int paging_enabled;
 
 #ifdef CONFIG_VMX
-    int paging_enabled =
-        !VMX_DOMAIN(ed) ||
-        test_bit(VMX_CPU_STATE_PG_ENABLED, &ed->arch.arch_vmx.cpu_state);
-#else
-    const int paging_enabled = 1;
+    if ( VMX_DOMAIN(ed) )
+        paging_enabled =
+            test_bit(VMX_CPU_STATE_PG_ENABLED, &ed->arch.arch_vmx.cpu_state);
+    else
 #endif
+        // HACK ALERT: there's currently no easy way to figure out if a domU
+        // has set its arch.guest_table to zero, vs not yet initialized it.
+        //
+        paging_enabled = !!pagetable_val(ed->arch.guest_table);
 
     /*
      * We don't call __update_pagetables() when vmx guest paging is

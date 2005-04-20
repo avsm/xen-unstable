@@ -123,6 +123,13 @@ config XEN_BLKDEV_TAP
 	  to a character device, allowing device prototyping in application
 	  space.  Odds are that you want to say N here.
 
+config XEN_SHADOW_MODE
+	bool "Fake shadow mode"
+	default n
+    help
+      fakes out a shadow mode kernel
+
+
 config XEN_SCRUB_PAGES
 	bool "Scrub memory before freeing it to Xen"
 	default y
@@ -136,17 +143,17 @@ config XEN_SCRUB_PAGES
 
 choice
 	prompt "Processor Type"
-	default X86
+	default XEN_X86
 
-config X86
+config XEN_X86
 	bool "X86"
 	help
 	  Choose this option if your computer is a X86 architecture.
 
-config X86_64
+config XEN_X86_64
 	bool "X86_64"
 	help
-	  Choose this option if your computer is a X86 architecture.
+	  Choose this option if your computer is a X86_64 architecture.
 
 endchoice
 
@@ -158,11 +165,11 @@ config HAVE_ARCH_DEV_ALLOC_SKB
 
 source "init/Kconfig"
 
-if X86
+if XEN_X86
 source "arch/xen/i386/Kconfig"
 endif
 
-if X86_64
+if XEN_X86_64
 source "arch/xen/x86_64/Kconfig"
 endif
 
