@@ -1,16 +1,15 @@
 
 include $(BASEDIR)/Rules.mk
 
-ifneq ($(debugger),y)
-OBJS := $(subst pdb-linux.o,,$(OBJS))
-OBJS := $(subst pdb-stub.o,,$(OBJS))
-endif
-
 OBJS += $(patsubst %.S,%.o,$(wildcard $(TARGET_SUBARCH)/*.S))
 OBJS += $(patsubst %.c,%.o,$(wildcard $(TARGET_SUBARCH)/*.c))
 OBJS += $(patsubst %.c,%.o,$(wildcard mtrr/*.c))
 
 OBJS := $(subst $(TARGET_SUBARCH)/asm-offsets.o,,$(OBJS))
+
+ifneq ($(crash_debug),y)
+OBJS := $(patsubst cdb%.o,,$(OBJS))
+endif
 
 default: $(TARGET)
 
@@ -24,7 +23,7 @@ $(TARGET)-syms: boot/$(TARGET_SUBARCH).o $(ALL_OBJS) $(TARGET_SUBARCH)/xen.lds
 	$(LD) $(LDFLAGS) -T $(TARGET_SUBARCH)/xen.lds -N \
 	    boot/$(TARGET_SUBARCH).o $(ALL_OBJS) -o $@
 
-asm-offsets.s: $(TARGET_SUBARCH)/asm-offsets.c
+asm-offsets.s: $(TARGET_SUBARCH)/asm-offsets.c $(HDRS)
 	$(CC) $(CFLAGS) -S -o $@ $<
 
 boot/mkelf32: boot/mkelf32.c

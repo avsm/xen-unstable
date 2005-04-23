@@ -4,17 +4,8 @@
 
 #include <xen/config.h>
 #include <xen/list.h>
-#include <xen/spinlock.h>
-#include <xen/perfc.h>
-#include <xen/sched.h>
-
-#include <asm/processor.h>
-#include <asm/atomic.h>
-#include <asm/desc.h>
-#include <asm/flushtlb.h>
 #include <asm/io.h>
-
-#include <public/xen.h>
+#include <asm/uaccess.h>
 
 /*
  * Per-page-frame information.
@@ -30,6 +21,9 @@ struct pfn_info
     /* Each frame can be threaded onto a doubly-linked list. */
     struct list_head list;
 
+    /* Timestamp from 'TLB clock', used to reduce need for safety flushes. */
+    u32 tlbflush_timestamp;
+
     /* Reference count and various PGC_xxx flags and fields. */
     u32 count_info;
 
@@ -39,24 +33,22 @@ struct pfn_info
         /* Page is in use: ((count_info & PGC_count_mask) != 0). */
         struct {
             /* Owner of this page (NULL if page is anonymous). */
-            struct domain *domain;
+            u32 _domain; /* pickled format */
             /* Type reference count and various PGT_xxx flags and fields. */
             u32 type_info;
-        } inuse;
+        } PACKED inuse;
 
         /* Page is on a free list: ((count_info & PGC_count_mask) == 0). */
         struct {
             /* Mask of possibly-tainted TLBs. */
-            unsigned long cpu_mask;
+            u32 cpu_mask;
             /* Order-size of the free chunk this page is the head of. */
             u8 order;
-        } free;
+        } PACKED free;
 
-    } u;
+    } PACKED u;
 
-    /* Timestamp from 'TLB clock', used to reduce need for safety flushes. */
-    u32 tlbflush_timestamp;
-};
+} PACKED;
 
  /* The following page types are MUTUALLY EXCLUSIVE. */
 #define PGT_none            (0<<29) /* no special uses of this page */
@@ -67,7 +59,17 @@ struct pfn_info
 #define PGT_gdt_page        (5<<29) /* using this page in a GDT? */
 #define PGT_ldt_page        (6<<29) /* using this page in an LDT? */
 #define PGT_writable_page   (7<<29) /* has writable mappings of this page? */
+
+#define PGT_l1_shadow       PGT_l1_page_table
+#define PGT_l2_shadow       PGT_l2_page_table
+#define PGT_l3_shadow       PGT_l3_page_table
+#define PGT_l4_shadow       PGT_l4_page_table
+#define PGT_hl2_shadow      (5<<29)
+#define PGT_snapshot        (6<<29)
+#define PGT_writable_pred   (7<<29) /* predicted gpfn with writable ref */
+
 #define PGT_type_mask       (7<<29) /* Bits 29-31. */
+
  /* Has this page been validated for use as its current type? */
 #define _PGT_validated      28
 #define PGT_validated       (1U<<_PGT_validated)
@@ -84,11 +86,22 @@ struct pfn_info
  /* 17-bit count of uses of this frame as its current type. */
 #define PGT_count_mask      ((1U<<17)-1)
 
+#define PGT_mfn_mask        ((1U<<20)-1) /* mfn mask for shadow types */
+
+#define PGT_score_shift     20
+#define PGT_score_mask      (((1U<<4)-1)<<PGT_score_shift)
+
  /* Cleared when the owning guest 'frees' this page. */
 #define _PGC_allocated      31
 #define PGC_allocated       (1U<<_PGC_allocated)
- /* 31-bit count of references to this frame. */
-#define PGC_count_mask      ((1U<<31)-1)
+ /* Set when fullshadow mode marks a page out-of-sync */
+#define _PGC_out_of_sync     30
+#define PGC_out_of_sync     (1U<<_PGC_out_of_sync)
+ /* Set when fullshadow mode is using a page as a page table */
+#define _PGC_page_table      29
+#define PGC_page_table      (1U<<_PGC_page_table)
+ /* 29-bit count of references to this frame. */
+#define PGC_count_mask      ((1U<<29)-1)
 
 /* We trust the slab allocator in slab.c, and our use of it. */
 #define PageSlab(page)	    (1)
@@ -97,9 +110,22 @@ struct pfn_info
 
 #define IS_XEN_HEAP_FRAME(_pfn) (page_to_phys(_pfn) < xenheap_phys_end)
 
+#if defined(__i386__)
+#define pickle_domptr(_d)   ((u32)(unsigned long)(_d))
+#define unpickle_domptr(_d) ((struct domain *)(unsigned long)(_d))
+#elif defined(__x86_64__)
+static inline struct domain *unpickle_domptr(u32 _domain)
+{ return (_domain == 0) ? NULL : __va(_domain); }
+static inline u32 pickle_domptr(struct domain *domain)
+{ return (domain == NULL) ? 0 : (u32)__pa(domain); }
+#endif
+
+#define page_get_owner(_p)    (unpickle_domptr((_p)->u.inuse._domain))
+#define page_set_owner(_p,_d) ((_p)->u.inuse._domain = pickle_domptr(_d))
+
 #define SHARE_PFN_WITH_DOMAIN(_pfn, _dom)                                   \
     do {                                                                    \
-        (_pfn)->u.inuse.domain = (_dom);                                    \
+        page_set_owner((_pfn), (_dom));                                     \
         /* The incremented type count is intended to pin to 'writable'. */  \
         (_pfn)->u.inuse.type_info = PGT_writable_page | PGT_validated | 1;  \
         wmb(); /* install valid domain ptr before updating refcnt. */       \
@@ -113,8 +139,6 @@ struct pfn_info
         spin_unlock(&(_dom)->page_alloc_lock);                              \
     } while ( 0 )
 
-#define INVALID_P2M_ENTRY (~0UL)
-
 extern struct pfn_info *frame_table;
 extern unsigned long frame_table_size;
 extern unsigned long max_page;
@@ -122,6 +146,11 @@ void init_frametable(void);
 
 int alloc_page_type(struct pfn_info *page, unsigned int type);
 void free_page_type(struct pfn_info *page, unsigned int type);
+extern void invalidate_shadow_ldt(struct exec_domain *d);
+extern int shadow_remove_all_write_access(
+    struct domain *d, unsigned long gpfn, unsigned long gmfn);
+extern u32 shadow_remove_all_access( struct domain *d, unsigned long gmfn);
+extern int _shadow_mode_enabled(struct domain *d);
 
 static inline void put_page(struct pfn_info *page)
 {
@@ -142,7 +171,8 @@ static inline int get_page(struct pfn_info *page,
                            struct domain *domain)
 {
     u32 x, nx, y = page->count_info;
-    struct domain *d, *nd = page->u.inuse.domain;
+    u32 d, nd = page->u.inuse._domain;
+    u32 _domain = pickle_domptr(domain);
 
     do {
         x  = y;
@@ -150,11 +180,12 @@ static inline int get_page(struct pfn_info *page,
         d  = nd;
         if ( unlikely((x & PGC_count_mask) == 0) ||  /* Not allocated? */
              unlikely((nx & PGC_count_mask) == 0) || /* Count overflow? */
-             unlikely(d != domain) )                 /* Wrong owner? */
+             unlikely(d != _domain) )                /* Wrong owner? */
         {
-            DPRINTK("Error pfn %08lx: ed=%p, sd=%p, caf=%08x, taf=%08x\n",
-                    page_to_pfn(page), domain, d,
-                    x, page->u.inuse.type_info);
+            if ( !_shadow_mode_enabled(domain) )
+                DPRINTK("Error pfn %p: rd=%p, od=%p, caf=%08x, taf=%08x\n",
+                        page_to_pfn(page), domain, unpickle_domptr(d),
+                        x, page->u.inuse.type_info);
             return 0;
         }
         __asm__ __volatile__(
@@ -170,6 +201,8 @@ static inline int get_page(struct pfn_info *page,
 
 void put_page_type(struct pfn_info *page);
 int  get_page_type(struct pfn_info *page, u32 type);
+int  get_page_from_l1e(l1_pgentry_t l1e, struct domain *d);
+void put_page_from_l1e(l1_pgentry_t l1e, struct domain *d);
 
 static inline void put_page_and_type(struct pfn_info *page)
 {
@@ -198,15 +231,9 @@ static inline int get_page_and_type(struct pfn_info *page,
     ASSERT(((_p)->u.inuse.type_info & PGT_count_mask) != 0)
 #define ASSERT_PAGE_IS_DOMAIN(_p, _d)                          \
     ASSERT(((_p)->count_info & PGC_count_mask) != 0);          \
-    ASSERT((_p)->u.inuse.domain == (_d))
+    ASSERT(page_get_owner(_p) == (_d))
 
-int check_descriptor(unsigned long *d);
-
-/*
- * Use currently-executing domain's pagetables on the specified CPUs.
- * i.e., stop borrowing someone else's tables if you are the idle domain.
- */
-void synchronise_pagetables(unsigned long cpu_mask);
+int check_descriptor(struct desc_struct *d);
 
 /*
  * The MPT (machine->physical mapping table) is an array of word-sized
@@ -215,15 +242,36 @@ void synchronise_pagetables(unsigned long cpu_mask);
  * contiguous (or near contiguous) physical memory.
  */
 #undef  machine_to_phys_mapping
-#ifdef __x86_64__
-extern unsigned long *machine_to_phys_mapping;
-#else
-/* Don't call virt_to_phys on this: it isn't direct mapped.  Using
-   m2p_start_mfn instead. */
-#define machine_to_phys_mapping ((unsigned long *)RDWR_MPT_VIRT_START)
-extern unsigned long m2p_start_mfn;
-#endif
+#define machine_to_phys_mapping ((u32 *)RDWR_MPT_VIRT_START)
+#define INVALID_M2P_ENTRY        (~0U)
+#define VALID_M2P(_e)            (!((_e) & (1U<<31)))
+#define IS_INVALID_M2P_ENTRY(_e) (!VALID_M2P(_e))
 
+/*
+ * The phys_to_machine_mapping is the reversed mapping of MPT for full
+ * virtualization.  It is only used by shadow_mode_translate()==true
+ * guests, so we steal the address space that would have normally
+ * been used by the read-only MPT map.
+ */
+#define __phys_to_machine_mapping ((unsigned long *)RO_MPT_VIRT_START)
+#define INVALID_MFN               (~0UL)
+#define VALID_MFN(_mfn)           (!((_mfn) & (1U<<31)))
+
+/* Returns the machine physical */
+static inline unsigned long phys_to_machine_mapping(unsigned long pfn) 
+{
+    unsigned long mfn;
+    l1_pgentry_t pte;
+
+    if (!__copy_from_user(&pte, (__phys_to_machine_mapping + pfn),
+			  sizeof(pte))
+	&& (l1e_get_flags(pte) & _PAGE_PRESENT) )
+	mfn = l1e_get_pfn(pte);
+    else
+	mfn = INVALID_MFN;
+    
+    return mfn; 
+}
 #define set_machinetophys(_mfn, _pfn) machine_to_phys_mapping[(_mfn)] = (_pfn)
 
 #define DEFAULT_GDT_ENTRIES     (LAST_RESERVED_GDT_ENTRY+1)
@@ -231,26 +279,18 @@ extern unsigned long m2p_start_mfn;
 
 #ifdef MEMORY_GUARD
 void *memguard_init(void *heap_start);
+void memguard_guard_stack(void *p);
 void memguard_guard_range(void *p, unsigned long l);
 void memguard_unguard_range(void *p, unsigned long l);
-int memguard_is_guarded(void *p);
 #else
 #define memguard_init(_s)              (_s)
+#define memguard_guard_stack(_p)       ((void)0)
 #define memguard_guard_range(_p,_l)    ((void)0)
 #define memguard_unguard_range(_p,_l)  ((void)0)
-#define memguard_is_guarded(_p)        (0)
 #endif
 
-
-typedef struct {
-    void	(*enable)(struct domain *);
-    void	(*disable)(struct domain *);
-} vm_assist_info_t;
-extern vm_assist_info_t vm_assist_info[];
-
-
 /* Writable Pagetables */
-typedef struct {
+struct ptwr_info {
     /* Linear address where the guest is updating the p.t. page. */
     unsigned long l1va;
     /* Copy of the p.t. page, taken before guest is given write access. */
@@ -259,13 +299,9 @@ typedef struct {
     l1_pgentry_t *pl1e;
     /* Index in L2 page table where this L1 p.t. is always hooked. */
     unsigned int l2_idx; /* NB. Only used for PTWR_PT_ACTIVE. */
-} ptwr_ptinfo_t;
-
-typedef struct {
-    ptwr_ptinfo_t ptinfo[2];
-} __cacheline_aligned ptwr_info_t;
-
-extern ptwr_info_t ptwr_info[];
+    /* Info about last ptwr update batch. */
+    unsigned int prev_nr_updates;
+};
 
 #define PTWR_PT_ACTIVE 0
 #define PTWR_PT_INACTIVE 1
@@ -273,35 +309,51 @@ extern ptwr_info_t ptwr_info[];
 #define PTWR_CLEANUP_ACTIVE 1
 #define PTWR_CLEANUP_INACTIVE 2
 
-void ptwr_flush(const int);
-int ptwr_do_page_fault(unsigned long);
+int  ptwr_init(struct domain *);
+void ptwr_destroy(struct domain *);
+void ptwr_flush(struct domain *, const int);
+int  ptwr_do_page_fault(struct domain *, unsigned long);
 
-#define __cleanup_writable_pagetable(_what)                                 \
-do {                                                                        \
-    int cpu = smp_processor_id();                                           \
-    if ((_what) & PTWR_CLEANUP_ACTIVE)                                      \
-        if (ptwr_info[cpu].ptinfo[PTWR_PT_ACTIVE].l1va)                     \
-            ptwr_flush(PTWR_PT_ACTIVE);                                     \
-    if ((_what) & PTWR_CLEANUP_INACTIVE)                                    \
-        if (ptwr_info[cpu].ptinfo[PTWR_PT_INACTIVE].l1va)                   \
-            ptwr_flush(PTWR_PT_INACTIVE);                                   \
-} while ( 0 )
-
-#define cleanup_writable_pagetable(_d)                                    \
-    do {                                                                  \
-        if ( unlikely(VM_ASSIST((_d), VMASST_TYPE_writable_pagetables)) ) \
-        __cleanup_writable_pagetable(PTWR_CLEANUP_ACTIVE |                \
-                                     PTWR_CLEANUP_INACTIVE);              \
+#define cleanup_writable_pagetable(_d)                                      \
+    do {                                                                    \
+        if ( unlikely(VM_ASSIST((_d), VMASST_TYPE_writable_pagetables)) ) { \
+            if ( (_d)->arch.ptwr[PTWR_PT_ACTIVE].l1va )                     \
+                ptwr_flush((_d), PTWR_PT_ACTIVE);                           \
+            if ( (_d)->arch.ptwr[PTWR_PT_INACTIVE].l1va )                   \
+                ptwr_flush((_d), PTWR_PT_INACTIVE);                         \
+        }                                                                   \
     } while ( 0 )
 
+int audit_adjust_pgtables(struct domain *d, int dir, int noisy);
+
 #ifndef NDEBUG
-void audit_domain(struct domain *d);
+
+#define AUDIT_ALREADY_LOCKED ( 1u << 0 )
+#define AUDIT_ERRORS_OK      ( 1u << 1 )
+#define AUDIT_QUIET          ( 1u << 2 )
+
+void _audit_domain(struct domain *d, int flags);
+#define audit_domain(_d) _audit_domain((_d), AUDIT_ERRORS_OK)
 void audit_domains(void);
+
 #else
-#define audit_domain(_d) ((void)0)
-#define audit_domains()  ((void)0)
+
+#define _audit_domain(_d, _f) ((void)0)
+#define audit_domain(_d)      ((void)0)
+#define audit_domains()       ((void)0)
+
 #endif
+
+int new_guest_cr3(unsigned long pfn);
 
 void propagate_page_fault(unsigned long addr, u16 error_code);
 
+/*
+ * Caller must own d's BIGLOCK, is responsible for flushing the TLB, and must 
+ * hold a reference to the page.
+ */
+int update_grant_va_mapping(unsigned long va,
+                            l1_pgentry_t _nl1e, 
+                            struct domain *d,
+                            struct exec_domain *ed);
 #endif /* __ASM_X86_MM_H__ */

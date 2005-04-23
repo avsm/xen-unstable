@@ -21,6 +21,7 @@
 #include <linux/vt_kern.h>		/* For unblank_screen() */
 #include <linux/highmem.h>
 #include <linux/module.h>
+#include <linux/percpu.h>
 
 #include <asm/system.h>
 #include <asm/uaccess.h>
@@ -29,7 +30,7 @@
 
 extern void die(const char *,struct pt_regs *,long);
 
-pgd_t *cur_pgd;			/* XXXsmp */
+DEFINE_PER_CPU(pgd_t *, cur_pgd);
 
 /*
  * Unlock any spinlocks which will prevent us from getting the
@@ -228,10 +229,10 @@ fastcall void do_page_fault(struct pt_regs *regs, unsigned long error_code,
 	error_code |= (regs->xcs & 2) << 1;
 	if (regs->eflags & X86_EFLAGS_VM)
 		error_code |= 4;
-		
- 	if (notify_die(DIE_PAGE_FAULT, "page fault", regs, error_code, 14,
- 					SIGSEGV) == NOTIFY_STOP)
- 		return;
+
+	if (notify_die(DIE_PAGE_FAULT, "page fault", regs, error_code, 14,
+					SIGSEGV) == NOTIFY_STOP)
+		return;
 #if 0
 	/* It's safe to allow irq's after cr2 has been saved */
 	if (regs->eflags & (X86_EFLAGS_IF|VM_MASK))
@@ -453,7 +454,8 @@ no_context:
 	printk(" at virtual address %08lx\n",address);
 	printk(KERN_ALERT " printing eip:\n");
 	printk("%08lx\n", regs->eip);
-	page = ((unsigned long *) cur_pgd)[address >> 22];
+	page = ((unsigned long *) per_cpu(cur_pgd, smp_processor_id()))
+	    [address >> 22];
 	printk(KERN_ALERT "*pde = ma %08lx pa %08lx\n", page,
 	       machine_to_phys(page));
 	/*
@@ -529,7 +531,7 @@ vmalloc_fault:
 		pmd_t *pmd, *pmd_k;
 		pte_t *pte_k;
 
-		pgd = index + cur_pgd;
+		pgd = index + per_cpu(cur_pgd, smp_processor_id());
 		pgd_k = init_mm.pgd + index;
 
 		if (!pgd_present(*pgd_k))
@@ -551,7 +553,6 @@ vmalloc_fault:
 		if (!pmd_present(*pmd_k))
 			goto no_context;
 		set_pmd(pmd, *pmd_k);
-		xen_flush_page_update_queue(); /* flush PMD update */
 
 		pte_k = pte_offset_kernel(pmd_k, address);
 		if (!pte_present(*pte_k))

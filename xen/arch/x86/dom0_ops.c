@@ -15,7 +15,6 @@
 #include <xen/event.h>
 #include <asm/domain_page.h>
 #include <asm/msr.h>
-#include <asm/pdb.h>
 #include <xen/trace.h>
 #include <xen/console.h>
 #include <asm/shadow.h>
@@ -27,8 +26,6 @@
 #define TRC_DOM0OP_ENTER_BASE  0x00020000
 #define TRC_DOM0OP_LEAVE_BASE  0x00030000
 
-extern unsigned int alloc_new_dom_mem(struct domain *, unsigned int);
-
 static int msr_cpu_mask;
 static unsigned long msr_addr;
 static unsigned long msr_lo;
@@ -37,20 +34,20 @@ static unsigned long msr_hi;
 static void write_msr_for(void *unused)
 {
     if (((1 << current->processor) & msr_cpu_mask))
-        wrmsr(msr_addr, msr_lo, msr_hi);
+        (void)wrmsr_user(msr_addr, msr_lo, msr_hi);
 }
 
 static void read_msr_for(void *unused)
 {
     if (((1 << current->processor) & msr_cpu_mask))
-        rdmsr(msr_addr, msr_lo, msr_hi);
+        (void)rdmsr_user(msr_addr, msr_lo, msr_hi);
 }
 
 long arch_do_dom0_op(dom0_op_t *op, dom0_op_t *u_dom0_op)
 {
     long ret = 0;
 
-    if ( !IS_PRIV(current) )
+    if ( !IS_PRIV(current->domain) )
         return -EPERM;
 
     switch ( op->cmd )
@@ -137,10 +134,41 @@ long arch_do_dom0_op(dom0_op_t *op, dom0_op_t *u_dom0_op)
     }
     break;
 
-    case DOM0_IOPL:
+    case DOM0_IOPORT_PERMISSION:
     {
-        extern long do_iopl(domid_t, unsigned int);
-        ret = do_iopl(op->u.iopl.domain, op->u.iopl.iopl);
+        struct domain *d;
+        unsigned int fp = op->u.ioport_permission.first_port;
+        unsigned int np = op->u.ioport_permission.nr_ports;
+        unsigned int p;
+
+        ret = -EINVAL;
+        if ( (fp + np) >= 65536 )
+            break;
+
+        ret = -ESRCH;
+        if ( unlikely((d = find_domain_by_id(
+            op->u.ioport_permission.domain)) == NULL) )
+            break;
+
+        ret = -ENOMEM;
+        if ( d->arch.iobmp_mask != NULL )
+        {
+            if ( (d->arch.iobmp_mask = xmalloc_array(
+                u8, IOBMP_BYTES)) == NULL )
+                break;
+            memset(d->arch.iobmp_mask, 0xFF, IOBMP_BYTES);
+        }
+
+        ret = 0;
+        for ( p = fp; p < (fp + np); p++ )
+        {
+            if ( op->u.ioport_permission.allow_access )
+                clear_bit(p, d->arch.iobmp_mask);
+            else
+                set_bit(p, d->arch.iobmp_mask);
+        }
+
+        put_domain(d);
     }
     break;
 
@@ -299,6 +327,44 @@ long arch_do_dom0_op(dom0_op_t *op, dom0_op_t *u_dom0_op)
     }
     break;
 
+    case DOM0_GETMEMLIST:
+    {
+        int i;
+        struct domain *d = find_domain_by_id(op->u.getmemlist.domain);
+        unsigned long max_pfns = op->u.getmemlist.max_pfns;
+        unsigned long pfn;
+        unsigned long *buffer = op->u.getmemlist.buffer;
+        struct list_head *list_ent;
+
+        ret = -EINVAL;
+        if ( d != NULL )
+        {
+            ret = 0;
+
+            spin_lock(&d->page_alloc_lock);
+            list_ent = d->page_list.next;
+            for ( i = 0; (i < max_pfns) && (list_ent != &d->page_list); i++ )
+            {
+                pfn = list_entry(list_ent, struct pfn_info, list) - 
+                    frame_table;
+                if ( put_user(pfn, buffer) )
+                {
+                    ret = -EFAULT;
+                    break;
+                }
+                buffer++;
+                list_ent = frame_table[pfn].list.next;
+            }
+            spin_unlock(&d->page_alloc_lock);
+
+            op->u.getmemlist.num_pfns = i;
+            copy_to_user(u_dom0_op, op, sizeof(*op));
+            
+            put_domain(d);
+        }
+    }
+    break;
+
     default:
         ret = -ENOSYS;
 
@@ -307,49 +373,75 @@ long arch_do_dom0_op(dom0_op_t *op, dom0_op_t *u_dom0_op)
     return ret;
 }
 
-void arch_getdomaininfo_ctxt(struct domain *d, full_execution_context_t *c)
+void arch_getdomaininfo_ctxt(
+    struct exec_domain *ed, full_execution_context_t *c)
 { 
     int i;
+#ifdef __i386__  /* Remove when x86_64 VMX is implemented */
+#ifdef CONFIG_VMX
+    extern void save_vmx_execution_context(execution_context_t *);
+#endif
+#endif
 
     c->flags = 0;
     memcpy(&c->cpu_ctxt, 
-           &d->thread.user_ctxt,
-           sizeof(d->thread.user_ctxt));
-    if ( test_bit(DF_DONEFPUINIT, &d->flags) )
+           &ed->arch.user_ctxt,
+           sizeof(ed->arch.user_ctxt));
+    /* IOPL privileges are virtualised -- merge back into returned eflags. */
+    BUG_ON((c->cpu_ctxt.eflags & EF_IOPL) != 0);
+    c->cpu_ctxt.eflags |= ed->arch.iopl << 12;
+
+#ifdef __i386__
+#ifdef CONFIG_VMX
+    if ( VMX_DOMAIN(ed) )
+        save_vmx_execution_context(&c->cpu_ctxt);
+#endif
+#endif
+
+    if ( test_bit(EDF_DONEFPUINIT, &ed->ed_flags) )
         c->flags |= ECF_I387_VALID;
+    if ( KERNEL_MODE(ed, &ed->arch.user_ctxt) )
+        c->flags |= ECF_IN_KERNEL;
     memcpy(&c->fpu_ctxt,
-           &d->thread.i387,
-           sizeof(d->thread.i387));
+           &ed->arch.i387,
+           sizeof(ed->arch.i387));
     memcpy(&c->trap_ctxt,
-           d->thread.traps,
-           sizeof(d->thread.traps));
+           ed->arch.traps,
+           sizeof(ed->arch.traps));
 #ifdef ARCH_HAS_FAST_TRAP
-    if ( (d->thread.fast_trap_desc.a == 0) &&
-         (d->thread.fast_trap_desc.b == 0) )
+    if ( (ed->arch.fast_trap_desc.a == 0) &&
+         (ed->arch.fast_trap_desc.b == 0) )
         c->fast_trap_idx = 0;
     else
         c->fast_trap_idx = 
-            d->thread.fast_trap_idx;
+            ed->arch.fast_trap_idx;
 #endif
-    c->ldt_base = d->mm.ldt_base;
-    c->ldt_ents = d->mm.ldt_ents;
+    c->ldt_base = ed->arch.ldt_base;
+    c->ldt_ents = ed->arch.ldt_ents;
     c->gdt_ents = 0;
-    if ( GET_GDT_ADDRESS(d) == GDT_VIRT_START )
+    if ( GET_GDT_ADDRESS(ed) == GDT_VIRT_START(ed) )
     {
         for ( i = 0; i < 16; i++ )
             c->gdt_frames[i] = 
-                l1_pgentry_to_pagenr(d->mm.perdomain_pt[i]);
-        c->gdt_ents = GET_GDT_ENTRIES(d);
+                l1e_get_pfn(ed->arch.perdomain_ptes[i]);
+        c->gdt_ents = GET_GDT_ENTRIES(ed);
     }
-    c->guestos_ss  = d->thread.guestos_ss;
-    c->guestos_esp = d->thread.guestos_sp;
+    c->kernel_ss  = ed->arch.kernel_ss;
+    c->kernel_esp = ed->arch.kernel_sp;
     c->pt_base   = 
-        pagetable_val(d->mm.pagetable);
+        pagetable_val(ed->arch.guest_table);
     memcpy(c->debugreg, 
-           d->thread.debugreg, 
-           sizeof(d->thread.debugreg));
-    c->event_callback_cs     = d->thread.event_selector;
-    c->event_callback_eip    = d->thread.event_address;
-    c->failsafe_callback_cs  = d->thread.failsafe_selector;
-    c->failsafe_callback_eip = d->thread.failsafe_address;
+           ed->arch.debugreg, 
+           sizeof(ed->arch.debugreg));
+#if defined(__i386__)
+    c->event_callback_cs     = ed->arch.event_selector;
+    c->event_callback_eip    = ed->arch.event_address;
+    c->failsafe_callback_cs  = ed->arch.failsafe_selector;
+    c->failsafe_callback_eip = ed->arch.failsafe_address;
+#elif defined(__x86_64__)
+    c->event_callback_eip    = ed->arch.event_address;
+    c->failsafe_callback_eip = ed->arch.failsafe_address;
+    c->syscall_callback_eip  = ed->arch.syscall_address;
+#endif
+    c->vm_assist = ed->domain->vm_assist;
 }

@@ -9,6 +9,10 @@ SUBDIRS += examples
 SUBDIRS += xentrace
 SUBDIRS += python
 SUBDIRS += xfrd
+SUBDIRS += xcs
+ifndef XEN_NO_IOEMU
+SUBDIRS += ioemu
+endif
 
 .PHONY: all install clean check check_clean
 
