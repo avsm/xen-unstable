@@ -896,7 +896,8 @@ asmlinkage void __attribute__((weak)) smp_thermal_interrupt(void)
 asmlinkage void math_state_restore(void)
 {
 	struct task_struct *me = current;
-	clts();			/* Allow maths ops (or we recurse) */
+        
+        /* clts(); */ /* 'clts' is done for us by Xen during virtual trap. */
 
 	if (!used_math())
 		init_fpu(me);
@@ -948,7 +949,7 @@ void __init trap_init(void)
 #ifdef CONFIG_IA32_EMULATION
 	set_system_gate(IA32_SYSCALL_VECTOR, ia32_syscall);
 #endif
-
+       
 	/*
 	 * Should be a barrier for any external CPU state.
 	 */

@@ -26,8 +26,6 @@
 #define TRC_DOM0OP_ENTER_BASE  0x00020000
 #define TRC_DOM0OP_LEAVE_BASE  0x00030000
 
-extern unsigned int alloc_new_dom_mem(struct domain *, unsigned int);
-
 static int msr_cpu_mask;
 static unsigned long msr_addr;
 static unsigned long msr_lo;
@@ -404,6 +402,10 @@ void arch_getdomaininfo_ctxt(
         c->flags |= ECF_I387_VALID;
     if ( KERNEL_MODE(ed, &ed->arch.user_ctxt) )
         c->flags |= ECF_IN_KERNEL;
+#ifdef CONFIG_VMX
+    if (VMX_DOMAIN(ed))
+        c->flags |= ECF_VMX_GUEST;
+#endif
     memcpy(&c->fpu_ctxt,
            &ed->arch.i387,
            sizeof(ed->arch.i387));
@@ -425,7 +427,7 @@ void arch_getdomaininfo_ctxt(
     {
         for ( i = 0; i < 16; i++ )
             c->gdt_frames[i] = 
-                l1_pgentry_to_pfn(ed->arch.perdomain_ptes[i]);
+                l1e_get_pfn(ed->arch.perdomain_ptes[i]);
         c->gdt_ents = GET_GDT_ENTRIES(ed);
     }
     c->kernel_ss  = ed->arch.kernel_ss;

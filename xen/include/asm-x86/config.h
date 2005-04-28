@@ -7,9 +7,7 @@
 #ifndef __X86_CONFIG_H__
 #define __X86_CONFIG_H__
 
-#ifdef __i386__
 #define CONFIG_VMX 1
-#endif
 
 #define CONFIG_X86 1
 #define CONFIG_SHADOW 1
@@ -18,7 +16,9 @@
 #define CONFIG_X86_LOCAL_APIC 1
 #define CONFIG_X86_GOOD_APIC 1
 #define CONFIG_X86_IO_APIC 1
-#define CONFIG_X86_L1_CACHE_SHIFT 5
+
+/* Intel P4 currently has largest cache line (L2 line size is 128 bytes). */
+#define CONFIG_X86_L1_CACHE_SHIFT 7
 
 #define CONFIG_ACPI 1
 #define CONFIG_ACPI_BOOT 1
@@ -56,12 +56,10 @@
 #define OPT_CONSOLE_STR "com1,vga"
 
 /*
- * Just to keep compiler happy.
- * NB. DO NOT CHANGE SMP_CACHE_BYTES WITHOUT FIXING arch/i386/entry.S!!!
- * It depends on size of irq_cpustat_t, for example, being 64 bytes. :-)
+ * If you increase this value, please update NR_RESERVED_GDT_ENTRIES
+ * in include/public/arch-x86_xx.h
  */
-#define SMP_CACHE_BYTES 64
-#define NR_CPUS 16
+#define NR_CPUS 32
 
 /* Linkage for x86 */
 #define __ALIGN .align 16,0x90

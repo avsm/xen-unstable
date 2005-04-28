@@ -408,7 +408,7 @@ static int vmx_decode(const unsigned char *inst, struct instruction *thread_inst
 
 static int inst_copy_from_guest(unsigned char *buf, unsigned long guest_eip, int inst_len)
 {
-    unsigned long gpte;
+    l1_pgentry_t gpte;
     unsigned long mfn;
     unsigned long ma;
     unsigned char * inst_start;
@@ -419,7 +419,7 @@ static int inst_copy_from_guest(unsigned char *buf, unsigned long guest_eip, int
 
     if ((guest_eip & PAGE_MASK) == ((guest_eip + inst_len) & PAGE_MASK)) {
         gpte = gva_to_gpte(guest_eip);
-        mfn = phys_to_machine_mapping(gpte >> PAGE_SHIFT);
+        mfn = phys_to_machine_mapping(l1e_get_pfn(gpte));
         ma = (mfn << PAGE_SHIFT) | (guest_eip & (PAGE_SIZE - 1));
         inst_start = (unsigned char *)map_domain_mem(ma);
                 
@@ -483,6 +483,11 @@ static void send_mmio_req(unsigned long gpa,
     p = &vio->vp_ioreq;
 
     vm86 = inst_decoder_regs->eflags & X86_EFLAGS_VM;
+
+    if (test_bit(ARCH_VMX_IO_WAIT, &d->arch.arch_vmx.flags)) {
+        printf("VMX I/O has not yet completed\n");
+        domain_crash_synchronous();
+    }
 
     set_bit(ARCH_VMX_IO_WAIT, &d->arch.arch_vmx.flags);
     p->dir = dir;

@@ -53,10 +53,6 @@ static grant_ref_t gnttab_free_head;
 
 static grant_entry_t *shared;
 
-/* /proc/xen/grant */
-static struct proc_dir_entry *grant_pde;
-
-
 /*
  * Lock-free grant-entry allocator
  */
@@ -243,6 +239,14 @@ gnttab_release_grant_reference( grant_ref_t *private_head,
     *private_head = release;
 }
 
+/*
+ * ProcFS operations
+ */
+
+#ifdef CONFIG_PROC_FS
+
+static struct proc_dir_entry *grant_pde;
+
 static int grant_ioctl(struct inode *inode, struct file *file,
                        unsigned int cmd, unsigned long data)
 {
@@ -319,7 +323,9 @@ static int grant_write(struct file *file, const char __user *buffer,
     return -ENOSYS;
 }
 
-static int __init gnttab_init(void)
+#endif /* CONFIG_PROC_FS */
+
+int gnttab_resume(void)
 {
     gnttab_setup_table_t setup;
     unsigned long        frames[NR_GRANT_FRAMES];
@@ -329,19 +335,37 @@ static int __init gnttab_init(void)
     setup.nr_frames  = NR_GRANT_FRAMES;
     setup.frame_list = frames;
 
-    if ( HYPERVISOR_grant_table_op(GNTTABOP_setup_table, &setup, 1) != 0 )
-        BUG();
-    if ( setup.status != 0 )
-        BUG();
+    BUG_ON(HYPERVISOR_grant_table_op(GNTTABOP_setup_table, &setup, 1) != 0);
+    BUG_ON(setup.status != 0);
 
     for ( i = 0; i < NR_GRANT_FRAMES; i++ )
         set_fixmap_ma(FIX_GNTTAB_END - i, frames[i] << PAGE_SHIFT);
+
+    return 0;
+}
+
+int gnttab_suspend(void)
+{
+    int i;
+
+    for ( i = 0; i < NR_GRANT_FRAMES; i++ )
+	clear_fixmap(FIX_GNTTAB_END - i);
+
+    return 0;
+}
+
+static int __init gnttab_init(void)
+{
+    int i;
+
+    BUG_ON(gnttab_resume());
 
     shared = (grant_entry_t *)fix_to_virt(FIX_GNTTAB_END);
 
     for ( i = 0; i < NR_GRANT_ENTRIES; i++ )
         gnttab_free_list[i] = i + 1;
-
+    
+#ifdef CONFIG_PROC_FS
     /*
      *  /proc/xen/grant : used by libxc to access grant tables
      */
@@ -358,6 +382,7 @@ static int __init gnttab_init(void)
 
     grant_pde->read_proc  = &grant_read;
     grant_pde->write_proc = &grant_write;
+#endif
 
     printk("Grant table initialized\n");
     return 0;

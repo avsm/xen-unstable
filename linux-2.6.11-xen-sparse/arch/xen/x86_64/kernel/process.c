@@ -87,7 +87,9 @@ EXPORT_SYMBOL(enable_hlt);
 extern int set_timeout_timer(void);
 void xen_idle(void)
 {
-	int cpu;
+	int cpu;	
+
+	local_irq_disable();
 
 	cpu = smp_processor_id();
 	if (rcu_pending(cpu))
@@ -102,7 +104,6 @@ void xen_idle(void)
 		local_irq_enable();
 		HYPERVISOR_yield();
 	}
-        set_need_resched();
 }
 
 /*
@@ -121,7 +122,7 @@ void cpu_idle (void)
 			if (cpu_isset(cpu, cpu_idle_map))
 				cpu_clear(cpu, cpu_idle_map);
 			rmb();
-                        
+
                         __IRQ_STAT(cpu,idle_timestamp) = jiffies;
 			xen_idle();
 		}
@@ -369,7 +370,7 @@ struct task_struct *__switch_to(struct task_struct *prev_p, struct task_struct *
 	struct tss_struct *tss = &per_cpu(init_tss, cpu);
 	physdev_op_t iopl_op, iobmp_op;
 	multicall_entry_t _mcl[8], *mcl = _mcl;
- 
+
 	/*
 	 * This is basically '__unlazy_fpu', except that we queue a
 	 * multicall to indicate FPU task switch, rather than
@@ -646,7 +647,7 @@ long do_arch_prctl(struct task_struct *task, int code, unsigned long addr)
 			if (doit) {
 				/* set the selector to 0 to not confuse
 				   __switch_to */
-                                asm volatile("movl %0,%%fs" :: "r" (0));
+		asm volatile("movl %0,%%fs" :: "r" (0));
                                 ret = HYPERVISOR_set_segment_base(SEGBASE_FS, addr);
 
 			}
@@ -706,7 +707,7 @@ int dump_task_regs(struct task_struct *tsk, elf_gregset_t *regs)
 	ptregs.ss &= 0xffff;
 
 	elf_core_copy_regs(regs, &ptregs);
-        
+ 
         boot_option_idle_override = 1;
 	return 1;
 }

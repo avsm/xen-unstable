@@ -160,34 +160,18 @@ void vmx_do_launch(struct exec_domain *ed)
     unsigned int tr, cpu, error = 0;
     struct host_execution_env host_env;
     struct Xgt_desc_struct desc;
-    struct list_head *list_ent;
-    unsigned long i, pfn = 0;
+    unsigned long pfn = 0;
     struct pfn_info *page;
     execution_context_t *ec = get_execution_context();
-    struct domain *d = ed->domain;
 
-    cpu =  smp_processor_id();
-    d->arch.min_pfn = d->arch.max_pfn = 0;
-
-    spin_lock(&d->page_alloc_lock);
-    list_ent = d->page_list.next;
-
-    for ( i = 0; list_ent != &d->page_list; i++ )
-    {
-        pfn = list_entry(list_ent, struct pfn_info, list) - frame_table;
-        d->arch.min_pfn = min(d->arch.min_pfn, pfn);
-        d->arch.max_pfn = max(d->arch.max_pfn, pfn);
-        list_ent = frame_table[pfn].list.next;
-    }
-
-    spin_unlock(&d->page_alloc_lock);
+    cpu = smp_processor_id();
 
     page = (struct pfn_info *) alloc_domheap_page(NULL);
     pfn = (unsigned long) (page - frame_table);
 
     vmx_setup_platform(ed, ec);
 
-    __asm__ __volatile__ ("sgdt  (%%eax) \n" :: "a"(&desc) : "memory");
+    __asm__ __volatile__ ("sgdt  (%0) \n" :: "a"(&desc) : "memory");
     host_env.gdtr_limit = desc.size;
     host_env.gdtr_base = desc.address;
 
@@ -197,7 +181,7 @@ void vmx_do_launch(struct exec_domain *ed)
     error |= __vmwrite(GUEST_LDTR_BASE, 0);
     error |= __vmwrite(GUEST_LDTR_LIMIT, 0);
         
-    __asm__ __volatile__ ("str  (%%eax) \n" :: "a"(&tr) : "memory");
+    __asm__ __volatile__ ("str  (%0) \n" :: "a"(&tr) : "memory");
     host_env.tr_selector = tr;
     host_env.tr_limit = sizeof(struct tss_struct);
     host_env.tr_base = (unsigned long) &init_tss[cpu];
@@ -327,7 +311,11 @@ construct_init_vmcs_guest(execution_context_t *context,
     error |= __vmwrite(GUEST_EFLAGS, eflags);
 
     error |= __vmwrite(GUEST_INTERRUPTIBILITY_INFO, 0);
+#ifdef __i386__
     __asm__ __volatile__ ("mov %%dr7, %0\n" : "=r" (dr7));
+#else
+    __asm__ __volatile__ ("movq %%dr7, %0\n" : "=r" (dr7));
+#endif
     error |= __vmwrite(GUEST_DR7, dr7);
     error |= __vmwrite(GUEST_VMCS0, 0xffffffff);
     error |= __vmwrite(GUEST_VMCS1, 0xffffffff);
@@ -358,17 +346,26 @@ static inline int construct_vmcs_host(struct host_execution_env *host_env)
     error |= __vmwrite(HOST_GS_BASE, host_env->ds_base);
 
 /* Debug */
-    __asm__ __volatile__ ("sidt  (%%eax) \n" :: "a"(&desc) : "memory");
+    __asm__ __volatile__ ("sidt  (%0) \n" :: "a"(&desc) : "memory");
     host_env->idtr_limit = desc.size;
     host_env->idtr_base = desc.address;
     error |= __vmwrite(HOST_IDTR_BASE, host_env->idtr_base);
 
+#ifdef __i386__
     __asm__ __volatile__ ("movl %%cr0,%0" : "=r" (crn) : );
+#else
+    __asm__ __volatile__ ("movq %%cr0,%0" : "=r" (crn) : );
+#endif
+
     host_env->cr0 = crn;
     error |= __vmwrite(HOST_CR0, crn); /* same CR0 */
 
     /* CR3 is set in vmx_final_setup_hostos */
+#ifdef __i386__
     __asm__ __volatile__ ("movl %%cr4,%0" : "=r" (crn) : ); 
+#else
+    __asm__ __volatile__ ("movq %%cr4,%0" : "=r" (crn) : ); 
+#endif
     host_env->cr4 = crn;
     error |= __vmwrite(HOST_CR4, crn);
     error |= __vmwrite(HOST_EIP, (unsigned long) vmx_asm_vmexit_handler);

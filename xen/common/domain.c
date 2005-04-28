@@ -185,31 +185,6 @@ void domain_shutdown(u8 reason)
 }
 
 
-unsigned int alloc_new_dom_mem(struct domain *d, unsigned int kbytes)
-{
-    unsigned int alloc_pfns, nr_pages;
-    struct pfn_info *page;
-
-    nr_pages = (kbytes + ((PAGE_SIZE-1)>>10)) >> (PAGE_SHIFT - 10);
-    d->max_pages = nr_pages; /* this can now be controlled independently */
-
-    /* Grow the allocation if necessary. */
-    for ( alloc_pfns = d->tot_pages; alloc_pfns < nr_pages; alloc_pfns++ )
-    {
-        if ( unlikely((page = alloc_domheap_page(d)) == NULL) )
-        {
-            domain_relinquish_resources(d);
-            return list_empty(&page_scrub_list) ? -ENOMEM : -EAGAIN;
-        }
-
-        /* Initialise the machine-to-phys mapping for this page. */
-        set_machinetophys(page_to_pfn(page), alloc_pfns);
-    }
-
-    return 0;
-}
- 
-
 /* Release resources belonging to task @p. */
 void domain_destruct(struct domain *d)
 {
@@ -282,8 +257,7 @@ int set_info_guest(struct domain *p, dom0_setdomaininfo_t *setdomaininfo)
     set_bit(DF_CONSTRUCTED, &p->d_flags);
 
  out:    
-    if ( c != NULL )
-        xfree(c);
+    xfree(c);
     return rc;
 }
 
@@ -338,8 +312,7 @@ long do_boot_vcpu(unsigned long vcpu, full_execution_context_t *ctxt)
     return 0;
 
  out:
-    if ( c != NULL )
-        xfree(c);
+    xfree(c);
     arch_free_exec_domain_struct(d->exec_domain[vcpu]);
     d->exec_domain[vcpu] = NULL;
     return rc;

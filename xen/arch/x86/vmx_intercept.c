@@ -37,7 +37,7 @@ int vmx_io_intercept(ioreq_t *p)
     struct exec_domain *d = current;
     struct vmx_handler_t *handler = &(d->arch.arch_vmx.vmx_platform.vmx_handler);
     int i;
-    unsigned addr, offset;
+    unsigned long addr, offset;
     for (i = 0; i < handler->num_slot; i++) {
         addr   = handler->hdl_list[i].addr;
         offset = handler->hdl_list[i].offset;
@@ -222,7 +222,7 @@ void vmx_hooks_assist(struct exec_domain *d)
         /* frequency(ms) of pit */
         vpit->period = DIV_ROUND(((vpit->init_val) * 1000), PIT_FREQ); 
         if (vpit->period < 1) {
-            printk("VMX_PIT: guest programmed too small an init_val: %lx\n",
+            printk("VMX_PIT: guest programmed too small an init_val: %x\n",
                    vpit->init_val);
             vpit->period = 1;
         }

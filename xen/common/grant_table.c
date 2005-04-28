@@ -255,11 +255,11 @@ __gnttab_activate_grant_ref(
     if ( (host_virt_addr != 0) && (dev_hst_ro_flags & GNTMAP_host_map) )
     {
         /* Write update into the pagetable. */
-        rc = update_grant_va_mapping( host_virt_addr,
-                                (frame << PAGE_SHIFT) | _PAGE_PRESENT  |
-                                                        _PAGE_ACCESSED |
-                                                        _PAGE_DIRTY    |
-                       ((dev_hst_ro_flags & GNTMAP_readonly) ? 0 : _PAGE_RW),
+        l1_pgentry_t pte;
+        pte = l1e_create_pfn(frame, _PAGE_PRESENT | _PAGE_ACCESSED | _PAGE_DIRTY);
+        if ( !(dev_hst_ro_flags & GNTMAP_readonly) )
+            l1e_add_flags(&pte,_PAGE_RW);
+        rc = update_grant_va_mapping( host_virt_addr, pte, 
                        mapping_d, mapping_ed );
 
         /*
@@ -341,7 +341,7 @@ __gnttab_map_grant_ref(
     if ( ((host_virt_addr != 0) || (dev_hst_ro_flags & GNTMAP_host_map)) &&
          unlikely(!__addr_ok(host_virt_addr)))
     {
-        DPRINTK("Bad virtual address (%x) or flags (%x).\n",
+        DPRINTK("Bad virtual address (%lx) or flags (%x).\n",
                 host_virt_addr, dev_hst_ro_flags);
         (void)__put_user(GNTST_bad_virt_addr, &uop->handle);
         return GNTST_bad_gntref;
@@ -437,7 +437,7 @@ gnttab_map_grant_ref(
     gnttab_map_grant_ref_t *uop, unsigned int count)
 {
     int i, flush = 0;
-    unsigned long va;
+    unsigned long va = 0;
 
     for ( i = 0; i < count; i++ )
         if ( __gnttab_map_grant_ref(&uop[i], &va) == 0 )
@@ -552,7 +552,7 @@ __gnttab_unmap_grant_ref(
 
         if ( unlikely(__get_user(_ol1e, (unsigned long *)pl1e) != 0) )
         {
-            DPRINTK("Could not find PTE entry for address %x\n", virt);
+            DPRINTK("Could not find PTE entry for address %lx\n", virt);
             rc = -EINVAL;
             goto unmap_out;
         }
@@ -563,7 +563,7 @@ __gnttab_unmap_grant_ref(
          */
         if ( unlikely((_ol1e >> PAGE_SHIFT) != frame ))
         {
-            DPRINTK("PTE entry %x for address %x doesn't match frame %x\n",
+            DPRINTK("PTE entry %lx for address %lx doesn't match frame %lx\n",
                     _ol1e, virt, frame);
             rc = -EINVAL;
             goto unmap_out;
@@ -572,7 +572,7 @@ __gnttab_unmap_grant_ref(
         /* Delete pagetable entry. */
         if ( unlikely(__put_user(0, (unsigned long *)pl1e)))
         {
-            DPRINTK("Cannot delete PTE entry at %x for virtual address %x\n",
+            DPRINTK("Cannot delete PTE entry at %p for virtual address %lx\n",
                     pl1e, virt);
             rc = -EINVAL;
             goto unmap_out;
@@ -633,7 +633,7 @@ gnttab_unmap_grant_ref(
     gnttab_unmap_grant_ref_t *uop, unsigned int count)
 {
     int i, flush = 0;
-    unsigned long va;
+    unsigned long va = 0;
 
     for ( i = 0; i < count; i++ )
         if ( __gnttab_unmap_grant_ref(&uop[i], &va) == 0 )
@@ -912,7 +912,7 @@ gnttab_check_unmap(
             }
 
             /* gotcha */
-            DPRINTK("Grant unref rd(%d) ld(%d) frm(%x) flgs(%x).\n",
+            DPRINTK("Grant unref rd(%d) ld(%d) frm(%lx) flgs(%x).\n",
                     rd->id, ld->id, frame, readonly);
 
             if ( readonly )
@@ -985,7 +985,7 @@ gnttab_prepare_for_transfer(
 
         if ( unlikely(target_pfn >= max_page ) )
         {
-            DPRINTK("Bad pfn (%x)\n", target_pfn);
+            DPRINTK("Bad pfn (%lx)\n", target_pfn);
             goto fail;
         }
 
@@ -1050,7 +1050,7 @@ gnttab_notify_transfer(
     pfn = sha->frame;
 
     if ( unlikely(pfn >= max_page ) )
-        DPRINTK("Bad pfn (%x)\n", pfn);
+        DPRINTK("Bad pfn (%lx)\n", pfn);
     else
     {
         machine_to_phys_mapping[frame] = pfn;
@@ -1122,8 +1122,7 @@ grant_table_create(
  no_mem:
     if ( t != NULL )
     {
-        if ( t->active != NULL )
-            xfree(t->active);
+        xfree(t->active);
         if ( t->maptrack != NULL )
             free_xenheap_page((unsigned long)t->maptrack);
         xfree(t);

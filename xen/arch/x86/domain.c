@@ -180,15 +180,23 @@ void dump_pageframe_info(struct domain *d)
     {
         list_for_each_entry ( page, &d->page_list, list )
         {
-            printk("Page %08x: caf=%08x, taf=%08x\n",
-                   page_to_phys(page), page->count_info,
+            printk("Page %p: caf=%08x, taf=%08x\n",
+                   _p(page_to_phys(page)), page->count_info,
                    page->u.inuse.type_info);
         }
     }
+
+    list_for_each_entry ( page, &d->xenpage_list, list )
+    {
+        printk("XenPage %p: caf=%08x, taf=%08x\n",
+               _p(page_to_phys(page)), page->count_info,
+               page->u.inuse.type_info);
+    }
+
     
     page = virt_to_page(d->shared_info);
-    printk("Shared_info@%08x: caf=%08x, taf=%08x\n",
-           page_to_phys(page), page->count_info,
+    printk("Shared_info@%p: caf=%08x, taf=%08x\n",
+           _p(page_to_phys(page)), page->count_info,
            page->u.inuse.type_info);
 }
 
@@ -260,11 +268,13 @@ void arch_do_createdomain(struct exec_domain *ed)
         d->arch.mm_perdomain_l2 = (l2_pgentry_t *)alloc_xenheap_page();
         memset(d->arch.mm_perdomain_l2, 0, PAGE_SIZE);
         d->arch.mm_perdomain_l2[l2_table_offset(PERDOMAIN_VIRT_START)] = 
-            mk_l2_pgentry(__pa(d->arch.mm_perdomain_pt) | __PAGE_HYPERVISOR);
+            l2e_create_phys(__pa(d->arch.mm_perdomain_pt),
+                            __PAGE_HYPERVISOR);
         d->arch.mm_perdomain_l3 = (l3_pgentry_t *)alloc_xenheap_page();
         memset(d->arch.mm_perdomain_l3, 0, PAGE_SIZE);
         d->arch.mm_perdomain_l3[l3_table_offset(PERDOMAIN_VIRT_START)] = 
-            mk_l3_pgentry(__pa(d->arch.mm_perdomain_l2) | __PAGE_HYPERVISOR);
+            l3e_create_phys(__pa(d->arch.mm_perdomain_l2),
+                            __PAGE_HYPERVISOR);
 #endif
 
         (void)ptwr_init(d);
@@ -622,17 +632,17 @@ static void load_segments(struct exec_domain *p, struct exec_domain *n)
         else
             regs->cs &= ~3;
 
-        if ( put_user(regs->ss,     rsp- 1) |
-             put_user(regs->rsp,    rsp- 2) |
-             put_user(regs->rflags, rsp- 3) |
-             put_user(regs->cs,     rsp- 4) |
-             put_user(regs->rip,    rsp- 5) |
-             put_user(regs->gs,     rsp- 6) |
-             put_user(regs->fs,     rsp- 7) |
-             put_user(regs->es,     rsp- 8) |
-             put_user(regs->ds,     rsp- 9) |
-             put_user(regs->r11,    rsp-10) |
-             put_user(regs->rcx,    rsp-11) )
+        if ( put_user(regs->ss,             rsp- 1) |
+             put_user(regs->rsp,            rsp- 2) |
+             put_user(regs->rflags,         rsp- 3) |
+             put_user(regs->cs,             rsp- 4) |
+             put_user(regs->rip,            rsp- 5) |
+             put_user(n->arch.user_ctxt.gs, rsp- 6) |
+             put_user(n->arch.user_ctxt.fs, rsp- 7) |
+             put_user(n->arch.user_ctxt.es, rsp- 8) |
+             put_user(n->arch.user_ctxt.ds, rsp- 9) |
+             put_user(regs->r11,            rsp-10) |
+             put_user(regs->rcx,            rsp-11) )
         {
             DPRINTK("Error while creating failsafe callback frame.\n");
             domain_crash();
@@ -727,7 +737,7 @@ static void __context_switch(void)
     {
         memcpy(&p->arch.user_ctxt,
                stack_ec, 
-               sizeof(*stack_ec));
+               CTXT_SWITCH_STACK_BYTES);
         unlazy_fpu(p);
         CLEAR_FAST_TRAP(&p->arch);
         save_segments(p);
@@ -737,7 +747,7 @@ static void __context_switch(void)
     {
         memcpy(stack_ec,
                &n->arch.user_ctxt,
-               sizeof(*stack_ec));
+               CTXT_SWITCH_STACK_BYTES);
 
         /* Maybe switch the debug registers. */
         if ( unlikely(n->arch.debugreg[7]) )
@@ -976,28 +986,29 @@ void domain_relinquish_resources(struct domain *d)
     /* Release device mappings of other domains */
     gnttab_release_dev_mappings(d->grant_table);
 
-    /* Exit shadow mode before deconstructing final guest page table. */
-    shadow_mode_disable(d);
-
     /* Drop the in-use references to page-table bases. */
     for_each_exec_domain ( d, ed )
     {
         if ( pagetable_val(ed->arch.guest_table) != 0 )
         {
-            put_page_and_type(&frame_table[
-                pagetable_val(ed->arch.guest_table) >> PAGE_SHIFT]);
+            (shadow_mode_enabled(d) ? put_page : put_page_and_type)
+                (&frame_table[pagetable_val(
+                    ed->arch.guest_table) >> PAGE_SHIFT]);
             ed->arch.guest_table = mk_pagetable(0);
         }
 
         if ( pagetable_val(ed->arch.guest_table_user) != 0 )
         {
-            put_page_and_type(&frame_table[
-                pagetable_val(ed->arch.guest_table_user) >> PAGE_SHIFT]);
+            (shadow_mode_enabled(d) ? put_page : put_page_and_type)
+                (&frame_table[pagetable_val(
+                    ed->arch.guest_table_user) >> PAGE_SHIFT]);
             ed->arch.guest_table_user = mk_pagetable(0);
         }
 
         vmx_relinquish_resources(ed);
     }
+
+    shadow_mode_disable(d);
 
     /*
      * Relinquish GDT mappings. No need for explicit unmapping of the LDT as 
