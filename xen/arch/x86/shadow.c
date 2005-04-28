@@ -981,12 +981,12 @@ int __shadow_mode_enable(struct domain *d, unsigned int mode)
     return 0;
 
  nomem:
-    if ( (new_modes & SHM_enable) && (d->arch.shadow_ht != NULL) )
+    if ( (new_modes & SHM_enable) )
     {
         xfree(d->arch.shadow_ht);
         d->arch.shadow_ht = NULL;
     }
-    if ( (new_modes & SHM_log_dirty) && (d->arch.shadow_dirty_bitmap != NULL) )
+    if ( (new_modes & SHM_log_dirty) )
     {
         xfree(d->arch.shadow_dirty_bitmap);
         d->arch.shadow_dirty_bitmap = NULL;
@@ -2421,7 +2421,7 @@ void __shadow_sync_all(struct domain *d)
     free_out_of_sync_state(d);
 }
 
-int shadow_fault(unsigned long va, struct xen_regs *regs)
+int shadow_fault(unsigned long va, struct cpu_user_regs *regs)
 {
     l1_pgentry_t gpte, spte, orig_gpte;
     struct exec_domain *ed = current;

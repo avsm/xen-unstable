@@ -21,7 +21,7 @@
 
 extern long arch_do_dom0_op(dom0_op_t *op, dom0_op_t *u_dom0_op);
 extern void arch_getdomaininfo_ctxt(
-    struct exec_domain *, full_execution_context_t *);
+    struct exec_domain *, struct vcpu_guest_context *);
 
 static inline int is_free_domid(domid_t dom)
 {
@@ -279,7 +279,7 @@ long do_dom0_op(dom0_op_t *u_dom0_op)
 
     case DOM0_GETDOMAININFO:
     { 
-        full_execution_context_t *c;
+        struct vcpu_guest_context *c;
         struct domain            *d;
         struct exec_domain       *ed;
 
@@ -331,7 +331,7 @@ long do_dom0_op(dom0_op_t *u_dom0_op)
 
         if ( op->u.getdomaininfo.ctxt != NULL )
         {
-            if ( (c = xmalloc(full_execution_context_t)) == NULL )
+            if ( (c = xmalloc(struct vcpu_guest_context)) == NULL )
             {
                 ret = -ENOMEM;
                 put_domain(d);
@@ -349,8 +349,7 @@ long do_dom0_op(dom0_op_t *u_dom0_op)
             if ( copy_to_user(op->u.getdomaininfo.ctxt, c, sizeof(*c)) )
                 ret = -EINVAL;
 
-            if ( c != NULL )
-                xfree(c);
+            xfree(c);
         }
 
         if ( copy_to_user(u_dom0_op, op, sizeof(*op)) )     
