@@ -14,19 +14,14 @@
 #include <xen/sched.h>
 #include <xen/event.h>
 #include <asm/domain_page.h>
-#include <asm/pdb.h>
 #include <xen/trace.h>
 #include <xen/console.h>
-#include <asm/shadow.h>
+#include <xen/physdev.h>
 #include <public/sched_ctl.h>
 
-#define TRC_DOM0OP_ENTER_BASE  0x00020000
-#define TRC_DOM0OP_LEAVE_BASE  0x00030000
-
-extern unsigned int alloc_new_dom_mem(struct domain *, unsigned int);
 extern long arch_do_dom0_op(dom0_op_t *op, dom0_op_t *u_dom0_op);
 extern void arch_getdomaininfo_ctxt(
-    struct domain *, full_execution_context_t *);
+    struct exec_domain *, struct vcpu_guest_context *);
 
 static inline int is_free_domid(domid_t dom)
 {
@@ -96,7 +91,7 @@ long do_dom0_op(dom0_op_t *u_dom0_op)
     long ret = 0;
     dom0_op_t curop, *op = &curop;
 
-    if ( !IS_PRIV(current) )
+    if ( !IS_PRIV(current->domain) )
         return -EPERM;
 
     if ( copy_from_user(op, u_dom0_op, sizeof(*op)) )
@@ -105,20 +100,16 @@ long do_dom0_op(dom0_op_t *u_dom0_op)
     if ( op->interface_version != DOM0_INTERFACE_VERSION )
         return -EACCES;
 
-    TRACE_5D(TRC_DOM0OP_ENTER_BASE + op->cmd, 
-             0, op->u.dummy[0], op->u.dummy[1], 
-             op->u.dummy[2], op->u.dummy[3] );
-
     switch ( op->cmd )
     {
 
-    case DOM0_BUILDDOMAIN:
+    case DOM0_SETDOMAININFO:
     {
-        struct domain *d = find_domain_by_id(op->u.builddomain.domain);
-        ret = -EINVAL;
+        struct domain *d = find_domain_by_id(op->u.setdomaininfo.domain);
+        ret = -ESRCH;
         if ( d != NULL )
         {
-            ret = final_setup_guestos(d, &op->u.builddomain);
+            ret = set_info_guest(d, &op->u.setdomaininfo);
             put_domain(d);
         }
     }
@@ -131,7 +122,7 @@ long do_dom0_op(dom0_op_t *u_dom0_op)
         if ( d != NULL )
         {
             ret = -EINVAL;
-            if ( d != current )
+            if ( d != current->domain )
             {
                 domain_pause_by_systemcontroller(d);
                 ret = 0;
@@ -148,7 +139,8 @@ long do_dom0_op(dom0_op_t *u_dom0_op)
         if ( d != NULL )
         {
             ret = -EINVAL;
-            if ( test_bit(DF_CONSTRUCTED, &d->flags) )
+            if ( (d != current->domain) && 
+                 test_bit(DF_CONSTRUCTED, &d->d_flags) )
             {
                 domain_unpause_by_systemcontroller(d);
                 ret = 0;
@@ -160,9 +152,12 @@ long do_dom0_op(dom0_op_t *u_dom0_op)
 
     case DOM0_CREATEDOMAIN:
     {
-        struct domain *d;
-        unsigned int   pro;
-        domid_t        dom;
+        struct domain      *d;
+        unsigned int        pro;
+        domid_t             dom;
+        struct exec_domain *ed;
+        unsigned int        i, ht, cnt[NR_CPUS] = { 0 };
+
 
         dom = op->u.createdomain.domain;
         if ( (dom > 0) && (dom < DOMID_FIRST_RESERVED) )
@@ -172,42 +167,31 @@ long do_dom0_op(dom0_op_t *u_dom0_op)
                 break;
         }
         else if ( (ret = allocate_domid(&dom)) != 0 )
-            break;
-
-        if ( op->u.createdomain.cpu == -1 )
         {
-            /* Do an initial placement. Pick the least-populated CPU. */
-            struct domain *d;
-            unsigned int i, ht, cnt[NR_CPUS] = { 0 };
-
-            read_lock(&domlist_lock);
-            for_each_domain ( d )
-                cnt[d->processor]++;
-            read_unlock(&domlist_lock);
-
-            /* If we're on a HT system, we only use the first HT for dom0,
-               other domains will all share the second HT of each CPU.
-	       Since dom0 is on CPU 0, we favour high numbered CPUs in
-	       the event of a tie */
-            ht = opt_noht ? 1 : ht_per_core;
-            pro = ht-1;
-            for ( i = pro; i < smp_num_cpus; i += ht )
-		if ( cnt[i] <= cnt[pro] )
-		    pro = i;
+            break;
         }
-        else
-            pro = op->u.createdomain.cpu % smp_num_cpus;
+
+        /* Do an initial CPU placement. Pick the least-populated CPU. */
+        read_lock(&domlist_lock);
+        for_each_domain ( d )
+            for_each_exec_domain ( d, ed )
+                cnt[ed->processor]++;
+        read_unlock(&domlist_lock);
+        
+        /*
+         * If we're on a HT system, we only use the first HT for dom0, other 
+         * domains will all share the second HT of each CPU. Since dom0 is on 
+	     * CPU 0, we favour high numbered CPUs in the event of a tie.
+         */
+        ht = opt_noht ? 1 : ht_per_core;
+        pro = ht-1;
+        for ( i = pro; i < smp_num_cpus; i += ht )
+            if ( cnt[i] <= cnt[pro] )
+                pro = i;
 
         ret = -ENOMEM;
         if ( (d = do_createdomain(dom, pro)) == NULL )
             break;
-
-        ret = alloc_new_dom_mem(d, op->u.createdomain.memory_kb);
-        if ( ret != 0 ) 
-        {
-            domain_kill(d);
-            break;
-        }
 
         ret = 0;
         
@@ -223,7 +207,7 @@ long do_dom0_op(dom0_op_t *u_dom0_op)
         if ( d != NULL )
         {
             ret = -EINVAL;
-            if ( d != current )
+            if ( d != current->domain )
             {
                 domain_kill(d);
                 ret = 0;
@@ -237,6 +221,7 @@ long do_dom0_op(dom0_op_t *u_dom0_op)
     {
         domid_t dom = op->u.pincpudomain.domain;
         struct domain *d = find_domain_by_id(dom);
+        struct exec_domain *ed;
         int cpu = op->u.pincpudomain.cpu;
 
         if ( d == NULL )
@@ -245,7 +230,15 @@ long do_dom0_op(dom0_op_t *u_dom0_op)
             break;
         }
         
-        if ( d == current )
+        ed = d->exec_domain[op->u.pincpudomain.exec_domain];
+        if ( ed == NULL )
+        {
+            ret = -ESRCH;
+            put_domain(d);
+            break;
+        }
+
+        if ( ed == current )
         {
             ret = -EINVAL;
             put_domain(d);
@@ -254,17 +247,16 @@ long do_dom0_op(dom0_op_t *u_dom0_op)
 
         if ( cpu == -1 )
         {
-            clear_bit(DF_CPUPINNED, &d->flags);
+            clear_bit(EDF_CPUPINNED, &ed->ed_flags);
         }
         else
         {
-            domain_pause(d);
-            synchronise_pagetables(~0UL);
-            if ( d->processor != (cpu % smp_num_cpus) )
-                set_bit(DF_MIGRATED, &d->flags);
-            set_bit(DF_CPUPINNED, &d->flags);
-            d->processor = cpu % smp_num_cpus;
-            domain_unpause(d);
+            exec_domain_pause(ed);
+            if ( ed->processor != (cpu % smp_num_cpus) )
+                set_bit(EDF_MIGRATED, &ed->ed_flags);
+            set_bit(EDF_CPUPINNED, &ed->ed_flags);
+            ed->processor = cpu % smp_num_cpus;
+            exec_domain_unpause(ed);
         }
 
         put_domain(d);
@@ -285,48 +277,11 @@ long do_dom0_op(dom0_op_t *u_dom0_op)
     }
     break;
 
-    case DOM0_GETMEMLIST:
-    {
-        int i;
-        struct domain *d = find_domain_by_id(op->u.getmemlist.domain);
-        unsigned long max_pfns = op->u.getmemlist.max_pfns;
-        unsigned long pfn;
-        unsigned long *buffer = op->u.getmemlist.buffer;
-        struct list_head *list_ent;
-
-        ret = -EINVAL;
-        if ( d != NULL )
-        {
-            ret = 0;
-
-            spin_lock(&d->page_alloc_lock);
-            list_ent = d->page_list.next;
-            for ( i = 0; (i < max_pfns) && (list_ent != &d->page_list); i++ )
-            {
-                pfn = list_entry(list_ent, struct pfn_info, list) - 
-                    frame_table;
-                if ( put_user(pfn, buffer) )
-                {
-                    ret = -EFAULT;
-                    break;
-                }
-                buffer++;
-                list_ent = frame_table[pfn].list.next;
-            }
-            spin_unlock(&d->page_alloc_lock);
-
-            op->u.getmemlist.num_pfns = i;
-            copy_to_user(u_dom0_op, op, sizeof(*op));
-            
-            put_domain(d);
-        }
-    }
-    break;
-
     case DOM0_GETDOMAININFO:
     { 
-        full_execution_context_t *c;
+        struct vcpu_guest_context *c;
         struct domain            *d;
+        struct exec_domain       *ed;
 
         read_lock(&domlist_lock);
 
@@ -346,47 +301,55 @@ long do_dom0_op(dom0_op_t *u_dom0_op)
         read_unlock(&domlist_lock);
 
         op->u.getdomaininfo.domain = d->id;
-        
-        op->u.getdomaininfo.flags =
-            (test_bit(DF_DYING,     &d->flags) ? DOMFLAGS_DYING    : 0) |
-            (test_bit(DF_CRASHED,   &d->flags) ? DOMFLAGS_CRASHED  : 0) |
-            (test_bit(DF_SHUTDOWN,  &d->flags) ? DOMFLAGS_SHUTDOWN : 0) |
-            (test_bit(DF_CTRLPAUSE, &d->flags) ? DOMFLAGS_PAUSED   : 0) |
-            (test_bit(DF_BLOCKED,   &d->flags) ? DOMFLAGS_BLOCKED  : 0) |
-            (test_bit(DF_RUNNING,   &d->flags) ? DOMFLAGS_RUNNING  : 0);
 
-        op->u.getdomaininfo.flags |= d->processor << DOMFLAGS_CPUSHIFT;
+        if ( (op->u.getdomaininfo.exec_domain >= MAX_VIRT_CPUS) ||
+             !d->exec_domain[op->u.getdomaininfo.exec_domain] )
+        {
+            ret = -EINVAL;
+            break;
+        }
+        
+        ed = d->exec_domain[op->u.getdomaininfo.exec_domain];
+
+        op->u.getdomaininfo.flags =
+            (test_bit( DF_DYING,      &d->d_flags)  ? DOMFLAGS_DYING    : 0) |
+            (test_bit( DF_CRASHED,    &d->d_flags)  ? DOMFLAGS_CRASHED  : 0) |
+            (test_bit( DF_SHUTDOWN,   &d->d_flags)  ? DOMFLAGS_SHUTDOWN : 0) |
+            (test_bit(EDF_CTRLPAUSE, &ed->ed_flags) ? DOMFLAGS_PAUSED   : 0) |
+            (test_bit(EDF_BLOCKED,   &ed->ed_flags) ? DOMFLAGS_BLOCKED  : 0) |
+            (test_bit(EDF_RUNNING,   &ed->ed_flags) ? DOMFLAGS_RUNNING  : 0);
+
+        op->u.getdomaininfo.flags |= ed->processor << DOMFLAGS_CPUSHIFT;
         op->u.getdomaininfo.flags |= 
             d->shutdown_code << DOMFLAGS_SHUTDOWNSHIFT;
 
         op->u.getdomaininfo.tot_pages   = d->tot_pages;
         op->u.getdomaininfo.max_pages   = d->max_pages;
-        op->u.getdomaininfo.cpu_time    = d->cpu_time;
+        op->u.getdomaininfo.cpu_time    = ed->cpu_time;
         op->u.getdomaininfo.shared_info_frame = 
             __pa(d->shared_info) >> PAGE_SHIFT;
 
         if ( op->u.getdomaininfo.ctxt != NULL )
         {
-            if ( (c = xmalloc(sizeof(*c))) == NULL )
+            if ( (c = xmalloc(struct vcpu_guest_context)) == NULL )
             {
                 ret = -ENOMEM;
                 put_domain(d);
                 break;
             }
 
-            if ( d != current )
-                domain_pause(d);
+            if ( ed != current )
+                exec_domain_pause(ed);
 
-            arch_getdomaininfo_ctxt(d,c);
+            arch_getdomaininfo_ctxt(ed,c);
 
-            if ( d != current )
-                domain_unpause(d);
+            if ( ed != current )
+                exec_domain_unpause(ed);
 
             if ( copy_to_user(op->u.getdomaininfo.ctxt, c, sizeof(*c)) )
                 ret = -EINVAL;
 
-            if ( c != NULL )
-                xfree(c);
+            xfree(c);
         }
 
         if ( copy_to_user(u_dom0_op, op, sizeof(*op)) )     
@@ -395,16 +358,6 @@ long do_dom0_op(dom0_op_t *u_dom0_op)
         put_domain(d);
     }
     break;
-
-#ifdef XEN_DEBUGGER
-    case DOM0_DEBUG:
-    {
-        pdb_do_debug(op);
-        copy_to_user(u_dom0_op, op, sizeof(*op));
-        ret = 0;
-    }
-    break;
-#endif
 
     case DOM0_SETTIME:
     {
@@ -416,9 +369,9 @@ long do_dom0_op(dom0_op_t *u_dom0_op)
     break;
 
 #ifdef TRACE_BUFFER
-    case DOM0_GETTBUFS:
+    case DOM0_TBUFCONTROL:
     {
-        ret = get_tb_info(&op->u.gettbufs);
+        ret = tb_control(&op->u.tbufcontrol);
         copy_to_user(u_dom0_op, op, sizeof(*op));
     }
     break;
@@ -434,7 +387,6 @@ long do_dom0_op(dom0_op_t *u_dom0_op)
 
     case DOM0_PCIDEV_ACCESS:
     {
-        extern int physdev_pci_access_modify(domid_t, int, int, int, int);
         ret = physdev_pci_access_modify(op->u.pcidev_access.domain, 
                                         op->u.pcidev_access.bus,
                                         op->u.pcidev_access.dev,
@@ -451,48 +403,14 @@ long do_dom0_op(dom0_op_t *u_dom0_op)
     }
     break;
 
-    case DOM0_SETDOMAININITIALMEM:
-    {
-        struct domain *d; 
-        ret = -ESRCH;
-        d = find_domain_by_id(op->u.setdomaininitialmem.domain);
-        if ( d != NULL )
-        { 
-            /* should only be used *before* domain is built. */
-            if ( !test_bit(DF_CONSTRUCTED, &d->flags) )
-                ret = alloc_new_dom_mem( 
-                    d, op->u.setdomaininitialmem.initial_memkb );
-            else
-                ret = -EINVAL;
-            put_domain(d);
-        }
-    }
-    break;
-
     case DOM0_SETDOMAINMAXMEM:
     {
         struct domain *d; 
         ret = -ESRCH;
-        d = find_domain_by_id( op->u.setdomainmaxmem.domain );
+        d = find_domain_by_id(op->u.setdomainmaxmem.domain);
         if ( d != NULL )
         {
-            d->max_pages = 
-                (op->u.setdomainmaxmem.max_memkb+PAGE_SIZE-1)>> PAGE_SHIFT;
-            put_domain(d);
-            ret = 0;
-        }
-    }
-    break;
-
-    case DOM0_SETDOMAINVMASSIST:
-    {
-        struct domain *d; 
-        ret = -ESRCH;
-        d = find_domain_by_id( op->u.setdomainvmassist.domain );
-        if ( d != NULL )
-        {
-            vm_assist(d, op->u.setdomainvmassist.cmd,
-                      op->u.setdomainvmassist.type);
+            d->max_pages = op->u.setdomainmaxmem.max_memkb >> (PAGE_SHIFT-10);
             put_domain(d);
             ret = 0;
         }
@@ -514,9 +432,15 @@ long do_dom0_op(dom0_op_t *u_dom0_op)
 
     }
 
-    TRACE_5D(TRC_DOM0OP_LEAVE_BASE + op->cmd, ret,
-             op->u.dummy[0], op->u.dummy[1], op->u.dummy[2], op->u.dummy[3]);
-
-
     return ret;
 }
+
+/*
+ * Local variables:
+ * mode: C
+ * c-set-style: "BSD"
+ * c-basic-offset: 4
+ * tab-width: 4
+ * indent-tabs-mode: nil
+ * End:
+ */

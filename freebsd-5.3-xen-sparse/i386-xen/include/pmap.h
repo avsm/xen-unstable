@@ -149,8 +149,8 @@
  */
 
 #ifdef SMP
-#define MPPTDI	(NPDEPTD-1)	  	  /* per cpu ptd entry */
-#define	KPTDI 	(MPPTDI-NKPDE-XEN_PAGES	  /* start of kernel virtual pde's */
+#define MPPTDI	(NPDEPTD-1-XEN_PAGES)	  	  /* per cpu ptd entry */
+#define	KPTDI 	(MPPTDI-NKPDE)  /* start of kernel virtual pde's */
 #else
 #define	KPTDI	(NPDEPTD-NKPDE-XEN_PAGES) /* start of kernel virtual pde's */
 #endif	/* SMP */
@@ -253,8 +253,8 @@ pte_load_store(pt_entry_t *ptep, pt_entry_t v)
 	return (r);
 }
 
-#define	pte_store(ptep, pte)	PT_SET_VA_MA(ptep, pte, TRUE);
-#define pte_clear(pte)          PT_CLEAR_VA(pte, TRUE);
+#define	pte_store(ptep, pte)	PT_SET_VA(ptep, pte, TRUE)
+#define pte_clear(pte)          PT_CLEAR_VA(pte, TRUE)
 
 
 #endif /* _KERNEL */

@@ -46,6 +46,7 @@
 #include <linux/devfs_fs_kernel.h>
 #include <asm-xen/xen-public/xen.h>
 #include <asm-xen/xen-public/io/blkif.h>
+#include <asm-xen/xen-public/io/ring.h>
 #include <asm/io.h>
 #include <asm/atomic.h>
 #include <asm/uaccess.h>
@@ -101,6 +102,10 @@ extern int blkif_ioctl(struct inode *inode, struct file *filep,
 extern int blkif_check(dev_t dev);
 extern int blkif_revalidate(dev_t dev);
 extern void blkif_control_send(blkif_request_t *req, blkif_response_t *rsp);
+#ifdef CONFIG_XEN_BLKDEV_GRANT
+extern void blkif_control_probe_send(
+    blkif_request_t *req, blkif_response_t *rsp, unsigned long address);
+#endif
 extern void do_blkif_request (request_queue_t *rq); 
 
 extern void xlvbd_update_vbds(void);

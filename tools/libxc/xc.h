@@ -10,6 +10,7 @@
 #define __XC_H__
 
 #include <stdint.h>
+
 typedef uint8_t            u8;
 typedef uint16_t           u16;
 typedef uint32_t           u32;
@@ -23,11 +24,26 @@ typedef int64_t            s64;
 #include <xen/dom0_ops.h>
 #include <xen/event_channel.h>
 #include <xen/sched_ctl.h>
-#include <xen/io/domain_controller.h>
 
-/*\
+/*
+ *  DEFINITIONS FOR CPU BARRIERS
+ */ 
+
+#if defined(__i386__)
+#define mb()  __asm__ __volatile__ ( "lock; addl $0,0(%%esp)" : : : "memory" )
+#define rmb() __asm__ __volatile__ ( "lock; addl $0,0(%%esp)" : : : "memory" )
+#define wmb() __asm__ __volatile__ ( "" : : : "memory")
+#elif defined(__x86_64__)
+#define mb()  __asm__ __volatile__ ( "mfence" : : : "memory")
+#define rmb() __asm__ __volatile__ ( "lfence" : : : "memory")
+#define wmb() __asm__ __volatile__ ( "" : : : "memory")
+#else
+#error "Define barriers"
+#endif
+
+/*
  *  INITIALIZATION FUNCTIONS
-\*/ 
+ */ 
 
 /**
  * This function opens a handle to the hypervisor interface.  This function can
@@ -55,9 +71,9 @@ int xc_interface_open(void);
  */
 int xc_interface_close(int xc_handle);
 
-/*\
+/*
  * DOMAIN MANAGEMENT FUNCTIONS
-\*/
+ */
 
 typedef struct {
     u32           domid;
@@ -142,13 +158,15 @@ int xc_domain_getinfo(int xc_handle,
  */
 int xc_domain_getfullinfo(int xc_handle,
                           u32 domid,
+                          u32 vcpu,
                           xc_domaininfo_t *info,
-                          full_execution_context_t *ctxt);
+                          vcpu_guest_context_t *ctxt);
 int xc_domain_setcpuweight(int xc_handle,
                            u32 domid,
                            float weight);
 long long xc_domain_get_cpu_usage(int xc_handle,
-                                  domid_t domid);
+                                  domid_t domid,
+                                  int vcpu);
 
 
 typedef dom0_shadow_control_stats_t xc_shadow_control_stats_t;
@@ -195,7 +213,8 @@ int xc_linux_build(int xc_handle,
                    const char *ramdisk_name,
                    const char *cmdline,
                    unsigned int control_evtchn,
-                   unsigned long flags);
+                   unsigned long flags,
+                   unsigned int vcpus);
 
 int
 xc_plan9_build (int xc_handle,
@@ -204,6 +223,17 @@ xc_plan9_build (int xc_handle,
                 const char *cmdline, 
 		unsigned int control_evtchn, 
 		unsigned long flags);
+
+struct mem_map;
+int xc_vmx_build(int xc_handle,
+                 u32 domid,
+                 int memsize,
+                 const char *image_name,
+                 struct mem_map *memmap,
+                 const char *ramdisk_name,
+                 const char *cmdline,
+                 unsigned int control_evtchn,
+                 unsigned long flags);
 
 int xc_bvtsched_global_set(int xc_handle,
                            unsigned long ctx_allow);
@@ -227,25 +257,11 @@ int xc_bvtsched_domain_get(int xc_handle,
                            long long *warpl,
                            long long *warpu);
 
-int xc_atropos_domain_set(int xc_handle,
-                          u32 domid,
-                          u64 period, u64 slice, u64 latency,
-                          int xtratime);
-
-int xc_atropos_domain_get(int xc_handle,
-                          u32 domid,
-                          u64* period, u64 *slice, u64 *latency,
-                          int *xtratime);
-
-int xc_rrobin_global_set(int xc_handle, u64 slice);
-
-int xc_rrobin_global_get(int xc_handle, u64 *slice);
-
 typedef evtchn_status_t xc_evtchn_status_t;
 
-/*\
+/*
  * EVENT CHANNEL FUNCTIONS
-\*/
+ */
 
 /**
  * This function allocates an unbound port.  Ports are named endpoints used for
@@ -337,24 +353,20 @@ int xc_physinfo(int xc_handle,
 int xc_sched_id(int xc_handle,
                 int *sched_id);
 
-int xc_domain_setinitialmem(int xc_handle,
-                            u32 domid, 
-                            unsigned int initial_memkb);
-
 int xc_domain_setmaxmem(int xc_handle,
                         u32 domid, 
                         unsigned int max_memkb);
-
-int xc_domain_setvmassist(int xc_handle,
-                          u32 domid, 
-                          unsigned int cmd,
-                          unsigned int type);
 
 typedef dom0_perfc_desc_t xc_perfc_desc_t;
 /* IMPORTANT: The caller is responsible for mlock()'ing the @desc array. */
 int xc_perfc_control(int xc_handle,
                      u32 op,
                      xc_perfc_desc_t *desc);
+
+/* read/write msr */
+long long xc_msr_read(int xc_handle, int cpu_mask, int msr);
+int xc_msr_write(int xc_handle, int cpu_mask, int msr, unsigned int low,
+                  unsigned int high);
 
 /**
  * Memory maps a range within one domain to a local address range.  Mappings
@@ -377,5 +389,65 @@ void *xc_map_foreign_range(int xc_handle, u32 dom,
 
 void *xc_map_foreign_batch(int xc_handle, u32 dom, int prot,
                            unsigned long *arr, int num );
+
+int xc_get_pfn_list(int xc_handle, u32 domid, unsigned long *pfn_buf, 
+		    unsigned long max_pfns);
+
+/*\
+ *  GRANT TABLE FUNCTIONS
+\*/ 
+
+/**
+ * This function opens a handle to the more restricted grant table hypervisor
+ * interface. This may be used where the standard interface is not
+ * available because the domain is not privileged.
+ * This function can  be called multiple times within a single process.
+ * Multiple processes can have an open hypervisor interface at the same time.
+ *
+ * Each call to this function should have a corresponding call to
+ * xc_grant_interface_close().
+ *
+ * This function can fail if a Xen-enabled kernel is not currently running.
+ *
+ * @return a handle to the hypervisor grant table interface or -1 on failure
+ */
+int xc_grant_interface_open(void);
+
+/**
+ * This function closes an open grant table hypervisor interface.
+ *
+ * This function can fail if the handle does not represent an open interface or
+ * if there were problems closing the interface.
+ *
+ * @parm xc_handle a handle to an open grant table hypervisor interface
+ * @return 0 on success, -1 otherwise.
+ */
+int xc_grant_interface_close(int xc_handle);
+
+int xc_gnttab_map_grant_ref(int         xc_handle,
+                            memory_t    host_virt_addr,
+                            u32         dom,
+                            u16         ref,
+                            u16         flags,
+                            s16        *handle,
+                            memory_t   *dev_bus_addr);
+
+int xc_gnttab_unmap_grant_ref(int       xc_handle,
+                              memory_t  host_virt_addr,
+                              memory_t  dev_bus_addr,
+                              u16       handle,
+                              s16      *status);
+
+int xc_gnttab_setup_table(int        xc_handle,
+                          u32        dom,
+                          u16        nr_frames,
+                          s16       *status,
+                          memory_t **frame_list);
+
+/* Grant debug builds only: */
+int xc_gnttab_dump_table(int        xc_handle,
+                         u32        dom,
+                         s16       *status);
+
 
 #endif /* __XC_H__ */
