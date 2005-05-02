@@ -43,13 +43,9 @@ typedef struct sched_adjdom_cmd dom0_adjustdom_t;
 
 #define DOM0_CREATEDOMAIN      8
 typedef struct {
-    /* IN parameters. */
-    memory_t     memory_kb;
-    u32          cpu;
     /* IN/OUT parameters. */
-    /* If 0, domain is allocated. If non-zero use it unless in use. */
-    domid_t      domain;
-    /* OUT parameters. */
+    /* Identifier for new domain (auto-allocate if zero is specified). */
+    domid_t domain;
 } dom0_createdomain_t;
 
 #define DOM0_DESTROYDOMAIN     9
@@ -87,7 +83,7 @@ typedef struct {
 #define DOMFLAGS_SHUTDOWNMASK 255 /* DOMFLAGS_SHUTDOWN guest-supplied code.  */
 #define DOMFLAGS_SHUTDOWNSHIFT 16
     u32      flags;
-    full_execution_context_t *ctxt;   /* NB. IN/OUT variable. */
+    vcpu_guest_context_t *ctxt;   /* NB. IN/OUT variable. */
     memory_t tot_pages;
     memory_t max_pages;
     memory_t shared_info_frame;       /* MFN of shared_info struct */
@@ -100,7 +96,7 @@ typedef struct {
     domid_t                   domain;
     u16                       exec_domain;
     /* IN/OUT parameters */
-    full_execution_context_t *ctxt;
+    vcpu_guest_context_t *ctxt;
 } dom0_setdomaininfo_t;
 
 #define DOM0_MSR              15
@@ -267,13 +263,6 @@ typedef struct {
     dom0_shadow_control_stats_t stats;
 } dom0_shadow_control_t;
 
-#define DOM0_SETDOMAININITIALMEM   27
-typedef struct {
-    /* IN variables. */
-    domid_t     domain;
-    memory_t    initial_memkb;
-} dom0_setdomaininitialmem_t;
-
 #define DOM0_SETDOMAINMAXMEM   28
 typedef struct {
     /* IN variables. */
@@ -390,7 +379,6 @@ typedef struct {
         dom0_pcidev_access_t     pcidev_access;
         dom0_sched_id_t          sched_id;
         dom0_shadow_control_t    shadow_control;
-        dom0_setdomaininitialmem_t setdomaininitialmem;
         dom0_setdomainmaxmem_t   setdomainmaxmem;
         dom0_getpageframeinfo2_t getpageframeinfo2;
         dom0_add_memtype_t       add_memtype;

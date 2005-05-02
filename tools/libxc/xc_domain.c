@@ -14,21 +14,41 @@ int xc_domain_create(int xc_handle,
                      float cpu_weight,
                      u32 *pdomid)
 {
-    int err;
+    int err, errno_saved;
     dom0_op_t op;
 
     op.cmd = DOM0_CREATEDOMAIN;
     op.u.createdomain.domain = (domid_t)*pdomid;
-    op.u.createdomain.memory_kb = mem_kb;
-    op.u.createdomain.cpu = cpu;
+    if ( (err = do_dom0_op(xc_handle, &op)) != 0 )
+        return err;
 
-    if ( (err = do_dom0_op(xc_handle, &op)) == 0 )
+    *pdomid = (u16)op.u.createdomain.domain;
+
+    if ( (cpu != -1) &&
+         ((err = xc_domain_pincpu(xc_handle, *pdomid, cpu)) != 0) )
+        goto fail;
+
+    if ( (err = xc_domain_setcpuweight(xc_handle, *pdomid, cpu_weight)) != 0 )
+        goto fail;
+
+    if ( (err = xc_domain_setmaxmem(xc_handle, *pdomid, mem_kb)) != 0 )
+        goto fail;
+
+    if ( (err = do_dom_mem_op(xc_handle, MEMOP_increase_reservation,
+                              NULL, mem_kb/4, 0, *pdomid)) != (mem_kb/4) )
     {
-        *pdomid = (u16)op.u.createdomain.domain;
-        
-         err = xc_domain_setcpuweight(xc_handle, *pdomid, cpu_weight);
+        if ( err > 0 )
+            errno = ENOMEM;
+        err = -1;
+        goto fail;
     }
 
+    return err;
+
+ fail:
+    errno_saved = errno;
+    (void)xc_domain_destroy(xc_handle, *pdomid);
+    errno = errno_saved;
     return err;
 }    
 
@@ -124,9 +144,9 @@ int xc_domain_getfullinfo(int xc_handle,
                           u32 domid,
                           u32 vcpu,
                           xc_domaininfo_t *info,
-                          full_execution_context_t *ctxt)
+                          vcpu_guest_context_t *ctxt)
 {
-    int rc;
+    int rc, errno_saved;
     dom0_op_t op;
 
     op.cmd = DOM0_GETDOMAININFO;
@@ -134,12 +154,23 @@ int xc_domain_getfullinfo(int xc_handle,
     op.u.getdomaininfo.exec_domain = (u16)vcpu;
     op.u.getdomaininfo.ctxt = ctxt;
 
+    if ( (ctxt != NULL) &&
+         ((rc = mlock(ctxt, sizeof(*ctxt))) != 0) )
+        return rc;
+
     rc = do_dom0_op(xc_handle, &op);
 
-    if ( info )
+    if ( ctxt != NULL )
+    {
+        errno_saved = errno;
+        (void)munlock(ctxt, sizeof(*ctxt));
+        errno = errno_saved;
+    }
+
+    if ( info != NULL )
         memcpy(info, &op.u.getdomaininfo, sizeof(*info));
 
-    if ( ((u16)op.u.getdomaininfo.domain != domid) && rc > 0 )
+    if ( ((u16)op.u.getdomaininfo.domain != domid) && (rc > 0) )
         return -ESRCH;
     else
         return rc;
@@ -211,18 +242,6 @@ int xc_domain_setcpuweight(int xc_handle,
     }
 
     return ret;
-}
-
-
-int xc_domain_setinitialmem(int xc_handle,
-                            u32 domid, 
-                            unsigned int initial_memkb)
-{
-    dom0_op_t op;
-    op.cmd = DOM0_SETDOMAININITIALMEM;
-    op.u.setdomaininitialmem.domain = (domid_t)domid;
-    op.u.setdomaininitialmem.initial_memkb = initial_memkb;
-    return do_dom0_op(xc_handle, &op);
 }
 
 int xc_domain_setmaxmem(int xc_handle,

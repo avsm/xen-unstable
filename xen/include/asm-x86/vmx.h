@@ -25,7 +25,7 @@
 #include <asm/processor.h>
 #include <asm/vmx_vmcs.h>
 
-extern void vmx_asm_vmexit_handler(struct xen_regs);
+extern void vmx_asm_vmexit_handler(struct cpu_user_regs);
 extern void vmx_asm_do_resume(void);
 extern void vmx_asm_do_launch(void);
 extern void vmx_intr_assist(struct exec_domain *d);
@@ -89,6 +89,7 @@ extern unsigned int cpu_rev;
 #define TYPE_MOV_TO_CR                  (0 << 4) 
 #define TYPE_MOV_FROM_CR                (1 << 4)
 #define TYPE_CLTS                       (2 << 4)
+#define	TYPE_LMSW			(3 << 4)
 #define CONTROL_REG_ACCESS_REG          0x700   /* 10:8, general purpose register */
 #define REG_EAX                         (0 << 8) 
 #define REG_ECX                         (1 << 8) 
@@ -98,6 +99,7 @@ extern unsigned int cpu_rev;
 #define REG_EBP                         (5 << 8) 
 #define REG_ESI                         (6 << 8) 
 #define REG_EDI                         (7 << 8) 
+#define	LMSW_SOURCE_DATA		(0xFFFF << 16) /* 16:31 lmsw source */
 
 /*
  * Exit Qualifications for MOV for Debug Register Access
@@ -194,7 +196,7 @@ static inline int __vmpclear (u64 addr)
     return 0;
 }
 
-static inline int __vmread (unsigned int field, void *value)
+static inline int __vmread (unsigned long field, void *value)
 {
     unsigned long eflags;
     unsigned long ecx = 0;
@@ -213,7 +215,7 @@ static inline int __vmread (unsigned int field, void *value)
     return 0;
 }
 
-static inline int __vmwrite (unsigned int field, unsigned int value)
+static inline int __vmwrite (unsigned long field, unsigned long value)
 {
     unsigned long eflags;
 

@@ -2,7 +2,9 @@
 #include <linux/config.h>
 
 .section __xen_guest
-	.ascii	"GUEST_OS=linux,GUEST_VER=2.6,XEN_VER=3.0,VIRT_BASE=0xC0000000"
+	.ascii	"GUEST_OS=linux,GUEST_VER=2.6"
+	.ascii	",XEN_VER=3.0"
+	.ascii	",VIRT_BASE=0xC0000000"
 	.ascii	",LOADER=generic"
 	.byte	0
 
@@ -67,10 +69,10 @@ checkCPUtype:
 
 	incb ready
 
-	xorl %eax,%eax		# Clear FS/GS and LDT
+	xorl %eax,%eax			# Clear FS/GS and LDT
 	movl %eax,%fs
 	movl %eax,%gs
-	cld		# gcc2 wants the direction flag cleared at all times
+	cld			# gcc2 wants the direction flag cleared at all times
 
 #ifdef CONFIG_SMP
 	movb ready, %cl	

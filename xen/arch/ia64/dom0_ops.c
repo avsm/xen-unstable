@@ -24,8 +24,6 @@
 #define TRC_DOM0OP_ENTER_BASE  0x00020000
 #define TRC_DOM0OP_LEAVE_BASE  0x00030000
 
-extern unsigned int alloc_new_dom_mem(struct domain *, unsigned int);
-
 static int msr_cpu_mask;
 static unsigned long msr_addr;
 static unsigned long msr_lo;
@@ -49,7 +47,7 @@ long arch_do_dom0_op(dom0_op_t *op, dom0_op_t *u_dom0_op)
     return ret;
 }
 
-void arch_getdomaininfo_ctxt(struct domain *d, full_execution_context_t *c)
+void arch_getdomaininfo_ctxt(struct domain *d, struct vcpu_guest_context *c)
 { 
     int i;
 

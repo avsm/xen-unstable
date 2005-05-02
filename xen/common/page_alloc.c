@@ -171,7 +171,7 @@ void init_boot_pages(unsigned long ps, unsigned long pe)
 
         if ( (bad_pfn < (bitmap_size*8)) && !allocated_in_map(bad_pfn) )
         {
-            printk("Marking page %p as bad\n", bad_pfn);
+            printk("Marking page %lx as bad\n", bad_pfn);
             map_alloc(bad_pfn, 1);
         }
     }
@@ -562,7 +562,8 @@ void free_domheap_pages(struct pfn_info *pg, unsigned int order)
         for ( i = 0; i < (1 << order); i++ )
         {
             shadow_drop_references(d, &pg[i]);
-            ASSERT((pg[i].u.inuse.type_info & PGT_count_mask) == 0);
+            ASSERT(((pg[i].u.inuse.type_info & PGT_count_mask) == 0) ||
+                   shadow_tainted_refcnts(d));
             pg[i].tlbflush_timestamp  = tlbflush_current_time();
             pg[i].u.free.cpu_mask     = d->cpuset;
             list_del(&pg[i].list);

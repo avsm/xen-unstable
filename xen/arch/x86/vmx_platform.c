@@ -39,17 +39,17 @@
 #define DECODE_failure  0
 
 #if defined (__x86_64__)
-static void store_xen_regs(struct xen_regs *regs)
+static void store_cpu_user_regs(struct cpu_user_regs *regs)
 {
 
 }
 
-static long get_reg_value(int size, int index, int seg, struct xen_regs *regs) 
+static long get_reg_value(int size, int index, int seg, struct cpu_user_regs *regs) 
 {
     return 0;
 }
 #elif defined (__i386__)
-static void store_xen_regs(struct xen_regs *regs)
+static void store_cpu_user_regs(struct cpu_user_regs *regs)
 {
     __vmread(GUEST_SS_SELECTOR, &regs->ss);
     __vmread(GUEST_ESP, &regs->esp);
@@ -60,7 +60,7 @@ static void store_xen_regs(struct xen_regs *regs)
     __vmread(GUEST_EIP, &regs->eip);
 }
 
-static long get_reg_value(int size, int index, int seg, struct xen_regs *regs)
+static long get_reg_value(int size, int index, int seg, struct cpu_user_regs *regs)
 {                    
     /*               
      * Reference the db_reg[] table
@@ -408,7 +408,7 @@ static int vmx_decode(const unsigned char *inst, struct instruction *thread_inst
 
 static int inst_copy_from_guest(unsigned char *buf, unsigned long guest_eip, int inst_len)
 {
-    unsigned long gpte;
+    l1_pgentry_t gpte;
     unsigned long mfn;
     unsigned long ma;
     unsigned char * inst_start;
@@ -419,7 +419,7 @@ static int inst_copy_from_guest(unsigned char *buf, unsigned long guest_eip, int
 
     if ((guest_eip & PAGE_MASK) == ((guest_eip + inst_len) & PAGE_MASK)) {
         gpte = gva_to_gpte(guest_eip);
-        mfn = phys_to_machine_mapping(gpte >> PAGE_SHIFT);
+        mfn = phys_to_machine_mapping(l1e_get_pfn(gpte));
         ma = (mfn << PAGE_SHIFT) | (guest_eip & (PAGE_SIZE - 1));
         inst_start = (unsigned char *)map_domain_mem(ma);
                 
@@ -468,7 +468,7 @@ static void send_mmio_req(unsigned long gpa,
     ioreq_t *p;
     int vm86;
     struct mi_per_cpu_info *mpci_p;
-    struct xen_regs *inst_decoder_regs;
+    struct cpu_user_regs *inst_decoder_regs;
     extern long evtchn_send(int lport);
     extern long do_block(void);
 
@@ -483,6 +483,11 @@ static void send_mmio_req(unsigned long gpa,
     p = &vio->vp_ioreq;
 
     vm86 = inst_decoder_regs->eflags & X86_EFLAGS_VM;
+
+    if (test_bit(ARCH_VMX_IO_WAIT, &d->arch.arch_vmx.flags)) {
+        printf("VMX I/O has not yet completed\n");
+        domain_crash_synchronous();
+    }
 
     set_bit(ARCH_VMX_IO_WAIT, &d->arch.arch_vmx.flags);
     p->dir = dir;
@@ -523,7 +528,7 @@ void handle_mmio(unsigned long va, unsigned long gpa)
     unsigned long eip, eflags, cs;
     unsigned long inst_len, inst_addr;
     struct mi_per_cpu_info *mpci_p;
-    struct xen_regs *inst_decoder_regs;
+    struct cpu_user_regs *inst_decoder_regs;
     struct instruction mmio_inst;
     unsigned char inst[MAX_INST_LEN];
     int vm86, ret;
@@ -564,7 +569,7 @@ void handle_mmio(unsigned long va, unsigned long gpa)
         domain_crash_synchronous();
 
     __vmwrite(GUEST_EIP, eip + inst_len);
-    store_xen_regs(inst_decoder_regs);
+    store_cpu_user_regs(inst_decoder_regs);
 
     // Only handle "mov" and "movs" instructions!
     if (!strncmp((char *)mmio_inst.i_name, "movz", 4)) {

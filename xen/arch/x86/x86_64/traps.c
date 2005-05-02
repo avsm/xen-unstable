@@ -24,9 +24,10 @@ static inline int kernel_text_address(unsigned long addr)
 void show_guest_stack(void)
 {
     int i;
-    execution_context_t *ec = get_execution_context();
-    unsigned long *stack = (unsigned long *)ec->rsp;
-    printk("Guest RIP is %lx\n   ", ec->rip);
+    struct cpu_user_regs *regs = get_cpu_user_regs();
+    unsigned long *stack = (unsigned long *)regs->rsp;
+
+    printk("Guest RIP is %016lx\n   ", regs->rip);
 
     for ( i = 0; i < kstack_depth_to_print; i++ )
     {
@@ -34,7 +35,7 @@ void show_guest_stack(void)
             break;
         if ( i && ((i % 8) == 0) )
             printk("\n    ");
-            printk("%p ", *stack++);
+            printk("%016lx ", *stack++);
     }
     printk("\n");
     
@@ -53,7 +54,7 @@ void show_trace(unsigned long *rsp)
         if (kernel_text_address(addr)) {
             if (i && ((i % 6) == 0))
                 printk("\n   ");
-            printk("[<%p>] ", addr);
+            printk("[<%016lx>] ", addr);
             i++;
         }
     }
@@ -75,26 +76,26 @@ void show_stack(unsigned long *rsp)
         if ( i && ((i % 8) == 0) )
             printk("\n    ");
         if ( kernel_text_address(*stack) )
-            printk("[%p] ", *stack++);
+            printk("[%016lx] ", *stack++);
         else
-            printk("%p ", *stack++);            
+            printk("%016lx ", *stack++);            
     }
     printk("\n");
 
     show_trace(rsp);
 }
 
-void show_registers(struct xen_regs *regs)
+void show_registers(struct cpu_user_regs *regs)
 {
-    printk("CPU:    %d\nEIP:    %04lx:[<%p>]      \nEFLAGS: %p\n",
+    printk("CPU:    %d\nEIP:    %04lx:[<%016lx>]      \nEFLAGS: %016lx\n",
            smp_processor_id(), 0xffff & regs->cs, regs->rip, regs->eflags);
-    printk("rax: %p   rbx: %p   rcx: %p   rdx: %p\n",
+    printk("rax: %016lx   rbx: %016lx   rcx: %016lx   rdx: %016lx\n",
            regs->rax, regs->rbx, regs->rcx, regs->rdx);
-    printk("rsi: %p   rdi: %p   rbp: %p   rsp: %p\n",
+    printk("rsi: %016lx   rdi: %016lx   rbp: %016lx   rsp: %016lx\n",
            regs->rsi, regs->rdi, regs->rbp, regs->rsp);
-    printk("r8:  %p   r9:  %p   r10: %p   r11: %p\n",
+    printk("r8:  %016lx   r9:  %016lx   r10: %016lx   r11: %016lx\n",
            regs->r8,  regs->r9,  regs->r10, regs->r11);
-    printk("r12: %p   r13: %p   r14: %p   r15: %p\n",
+    printk("r12: %016lx   r13: %016lx   r14: %016lx   r15: %016lx\n",
            regs->r12, regs->r13, regs->r14, regs->r15);
 
     show_stack((unsigned long *)regs->rsp);
@@ -104,33 +105,33 @@ void show_page_walk(unsigned long addr)
 {
     unsigned long page = read_cr3();
     
-    printk("Pagetable walk from %p:\n", addr);
+    printk("Pagetable walk from %016lx:\n", addr);
 
     page &= PAGE_MASK;
     page = ((unsigned long *) __va(page))[l4_table_offset(addr)];
-    printk(" L4 = %p\n", page);
+    printk(" L4 = %016lx\n", page);
     if ( !(page & _PAGE_PRESENT) )
         return;
 
     page &= PAGE_MASK;
     page = ((unsigned long *) __va(page))[l3_table_offset(addr)];
-    printk("  L3 = %p\n", page);
+    printk("  L3 = %016lx\n", page);
     if ( !(page & _PAGE_PRESENT) )
         return;
 
     page &= PAGE_MASK;
     page = ((unsigned long *) __va(page))[l2_table_offset(addr)];
-    printk("   L2 = %p %s\n", page, (page & _PAGE_PSE) ? "(2MB)" : "");
+    printk("   L2 = %016lx %s\n", page, (page & _PAGE_PSE) ? "(2MB)" : "");
     if ( !(page & _PAGE_PRESENT) || (page & _PAGE_PSE) )
         return;
 
     page &= PAGE_MASK;
     page = ((unsigned long *) __va(page))[l1_table_offset(addr)];
-    printk("    L1 = %p\n", page);
+    printk("    L1 = %016lx\n", page);
 }
 
 asmlinkage void double_fault(void);
-asmlinkage void do_double_fault(struct xen_regs *regs)
+asmlinkage void do_double_fault(struct cpu_user_regs *regs)
 {
     /* Disable the NMI watchdog. It's useless now. */
     watchdog_on = 0;
@@ -254,9 +255,9 @@ long do_set_callbacks(unsigned long event_address,
 {
     struct exec_domain *d = current;
 
-    d->arch.event_address    = event_address;
-    d->arch.failsafe_address = failsafe_address;
-    d->arch.syscall_address  = syscall_address;
+    d->arch.guest_context.event_callback_eip    = event_address;
+    d->arch.guest_context.failsafe_callback_eip = failsafe_address;
+    d->arch.guest_context.syscall_callback_eip  = syscall_address;
 
     return 0;
 }

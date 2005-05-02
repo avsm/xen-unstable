@@ -22,24 +22,15 @@
 #include <asm/config.h>
 #include <asm/vmx_cpu.h>
 #include <asm/vmx_platform.h>
+#include <public/vmx_assist.h>
 
 extern int start_vmx(void);
 extern void stop_vmx(void);
 
 void vmx_enter_scheduler(void);
 
-union vmcs_arbytes {
-    struct arbyte_fields {
-        unsigned int 
-        seg_type: 4, s: 1, dpl: 2, p: 1, 
-        reserved0: 4, avl: 1, reserved1: 1,     
-        default_ops_size: 1, g: 1, null_bit: 1, 
-        reserved2: 15;
-    }  __attribute__((packed)) fields;
-    unsigned int bytes;
-};
-
 #define VMX_CPU_STATE_PG_ENABLED        0       
+#define	VMX_CPU_STATE_ASSIST_ENABLED	1
 #define VMCS_SIZE                       0x1000
 
 struct vmcs_struct {
@@ -74,8 +65,8 @@ void free_vmcs(struct vmcs_struct *);
 int  load_vmcs(struct arch_vmx_struct *, u64);
 int  store_vmcs(struct arch_vmx_struct *, u64);
 void dump_vmcs(void);
-int  construct_vmcs(struct arch_vmx_struct *, execution_context_t *, 
-                    full_execution_context_t *, int);
+int  construct_vmcs(struct arch_vmx_struct *, struct cpu_user_regs *, 
+                    struct vcpu_guest_context *, int);
 
 #define VMCS_USE_HOST_ENV       1
 #define VMCS_USE_SEPARATE_ENV   0
