@@ -1,28 +1,21 @@
 
 verbose     ?= n
 debug       ?= n
-debugger    ?= n
 perfc       ?= n
 trace       ?= n
 optimize    ?= y
+domu_debug  ?= n
+crash_debug ?= n
 
-# Currently supported architectures: x86_32, x86_64
-COMPILE_ARCH    ?= $(shell uname -m | sed -e s/i.86/x86_32/)
-TARGET_ARCH     ?= $(COMPILE_ARCH)
-
-# Set ARCH/SUBARCH appropriately.
-override COMPILE_SUBARCH := $(COMPILE_ARCH)
-override TARGET_SUBARCH  := $(TARGET_ARCH)
-override COMPILE_ARCH    := $(patsubst x86%,x86,$(COMPILE_ARCH))
-override TARGET_ARCH     := $(patsubst x86%,x86,$(TARGET_ARCH))
+include $(BASEDIR)/../Config.mk
 
 TARGET  := $(BASEDIR)/xen
 HDRS    := $(wildcard $(BASEDIR)/include/xen/*.h)
-HDRS    += $(wildcard $(BASEDIR)/include/scsi/*.h)
 HDRS    += $(wildcard $(BASEDIR)/include/public/*.h)
 HDRS    += $(wildcard $(BASEDIR)/include/asm-$(TARGET_ARCH)/*.h)
 HDRS    += $(wildcard $(BASEDIR)/include/asm-$(TARGET_ARCH)/$(TARGET_SUBARCH)/*.h)
-# compile.h is always regenerated, but other files shouldn't be rebuilt
+# Do not depend on auto-generated header files.
+HDRS    := $(subst $(BASEDIR)/include/asm-$(TARGET_ARCH)/asm-offsets.h,,$(HDRS))
 HDRS    := $(subst $(BASEDIR)/include/xen/banner.h,,$(HDRS))
 HDRS    := $(subst $(BASEDIR)/include/xen/compile.h,,$(HDRS))
 
@@ -38,10 +31,8 @@ ALL_OBJS += $(BASEDIR)/drivers/acpi/driver.o
 ALL_OBJS += $(BASEDIR)/drivers/pci/driver.o
 ALL_OBJS += $(BASEDIR)/arch/$(TARGET_ARCH)/arch.o
 
-HOSTCC     = gcc
-HOSTCFLAGS = -Wall -Wstrict-prototypes -O2 -fomit-frame-pointer 
 
-test-gcc-flag = $(shell gcc -v --help 2>&1 | grep -q " $(1) " && echo $(1))
+test-gcc-flag = $(shell $(CC) -v --help 2>&1 | grep -q " $(1) " && echo $(1))
 
 include $(BASEDIR)/arch/$(TARGET_ARCH)/Rules.mk
 
@@ -51,11 +42,15 @@ ifeq ($(verbose),y)
 CFLAGS += -DVERBOSE
 endif
 else
-CFLAGS += -DVERBOSE
+CFLAGS += -g -DVERBOSE
 endif
 
-ifeq ($(debugger),y)
-CFLAGS += -DXEN_DEBUGGER
+ifeq ($(domu_debug),y)
+CFLAGS += -DDOMU_DEBUG
+endif
+
+ifeq ($(crash_debug),y)
+CFLAGS += -g -DCRASH_DEBUG
 endif
 
 ifeq ($(perfc),y)
