@@ -163,6 +163,7 @@ ln -sf ../asm-i386/mmu.h
 ln -sf ../asm-i386/mmx.h 
 ln -sf ../asm-i386/mpspec.h 
 ln -sf ../asm-i386/msgbuf.h 
+ln -sf ../asm-i386/msr.h 
 ln -sf ../asm-i386/mtrr.h 
 ln -sf ../asm-i386/namei.h 
 ln -sf ../asm-i386/param.h 
@@ -209,9 +210,9 @@ ln -sf ../../${LINUX_26}/include/asm-xen/ctrl_if.h
 ln -sf ../../${LINUX_26}/include/asm-xen/evtchn.h
 ln -sf ../../${LINUX_26}/include/asm-xen/gnttab.h
 ln -sf ../../${LINUX_26}/include/asm-xen/hypervisor.h
-ln -sf ../../${LINUX_26}/include/asm-xen/multicall.h
 ln -sf ../../${LINUX_26}/include/asm-xen/xen_proc.h
 ln -sf ../../${LINUX_26}/include/asm-xen/asm-i386/synch_bitops.h
+ln -sf ../../${LINUX_26}/include/asm-xen/asm-i386/hypercall.h
 
 mkdir -p linux-public && cd linux-public
 ln -sf ../../../${LINUX_26}/include/asm-xen/linux-public/privcmd.h
@@ -231,7 +232,6 @@ ln -sf ../../../${LINUX_26}/arch/xen/kernel/fixup.c
 ln -sf ../../../${LINUX_26}/arch/xen/kernel/gnttab.c
 ln -sf ../../../${LINUX_26}/arch/xen/kernel/reboot.c
 ln -sf ../../../${LINUX_26}/arch/xen/kernel/skbuff.c
-ln -sf ../../../${LINUX_26}/arch/xen/i386/kernel/ioport.c
 ln -sf ../../../${LINUX_26}/arch/xen/i386/kernel/pci-dma.c
 
 cd ${AD}/arch/xen/lib
@@ -282,4 +282,12 @@ ln -sf ../../../../../${LINUX_26}/drivers/xen/blkback/vbd.c
 cd ${AD}/arch/xen/drivers/blkif/frontend
 ln -sf ../../../../../${LINUX_26}/drivers/xen/blkfront/blkfront.c
 
+cd ${AD}/arch/xen/drivers/usbif/frontend
+ln -sf ../../../../../${LINUX_26}/drivers/xen/usbfront/usbfront.c main.c
+ln -sf ../../../../../${LINUX_26}/drivers/xen/usbfront/xhci.h
 
+cd ${AD}/arch/xen/drivers/usbif/backend
+ln -sf ../../../../../${LINUX_26}/drivers/xen/usbback/common.h
+ln -sf ../../../../../${LINUX_26}/drivers/xen/usbback/control.c
+ln -sf ../../../../../${LINUX_26}/drivers/xen/usbback/interface.c
+ln -sf ../../../../../${LINUX_26}/drivers/xen/usbback/usbback.c main.c

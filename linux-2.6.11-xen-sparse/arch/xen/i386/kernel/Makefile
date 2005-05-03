@@ -10,9 +10,9 @@ extra-y := head.o init_task.o
 
 obj-y	:= process.o signal.o entry.o traps.o \
 		time.o ioport.o ldt.o setup.o \
-		pci-dma.o i386_ksyms.o
+		pci-dma.o i386_ksyms.o irq.o
 
-c-obj-y	:= semaphore.o irq.o vm86.o \
+c-obj-y	:= semaphore.o vm86.o \
 		ptrace.o sys_i386.o \
 		i387.o dmi_scan.o bootflag.o \
 		doublefault.o quirks.o
@@ -27,10 +27,11 @@ c-obj-$(CONFIG_X86_MSR)		+= msr.o
 c-obj-$(CONFIG_X86_CPUID)	+= cpuid.o
 obj-$(CONFIG_MICROCODE)		+= microcode.o
 c-obj-$(CONFIG_APM)		+= apm.o
-c-obj-$(CONFIG_X86_SMP)		+= smp.o smpboot.o
-c-obj-$(CONFIG_X86_TRAMPOLINE)	+= trampoline.o
+obj-$(CONFIG_X86_SMP)		+= smp.o smpboot.o
+#obj-$(CONFIG_X86_TRAMPOLINE)	+= trampoline.o
 c-obj-$(CONFIG_X86_MPPARSE)	+= mpparse.o
-c-obj-$(CONFIG_X86_LOCAL_APIC)	+= apic.o nmi.o
+obj-$(CONFIG_X86_LOCAL_APIC)	+= apic.o
+c-obj-$(CONFIG_X86_LOCAL_APIC)	+= nmi.o
 c-obj-$(CONFIG_X86_IO_APIC)	+= io_apic.o
 c-obj-$(CONFIG_X86_NUMAQ)	+= numaq.o
 c-obj-$(CONFIG_X86_SUMMIT_NUMA)	+= summit.o

@@ -7,17 +7,17 @@
 #include <xen/config.h>
 #include <xen/init.h>
 #include <xen/lib.h>
+#include <xen/sched.h>
 #include <xen/errno.h>
 #include <xen/sched.h>
-#include <xen/softirq.h>
 #include <xen/mm.h>
 #include <xen/event.h>
 #include <xen/time.h>
 #include <xen/console.h>
-#include <asm/shadow.h>
+#include <xen/softirq.h>
 #include <public/dom0_ops.h>
 #include <asm/domain_page.h>
-#include <public/io/domain_controller.h>
+#include <asm/debugger.h>
 
 /* Both these structures are protected by the domlist_lock. */
 rwlock_t domlist_lock = RW_LOCK_UNLOCKED;
@@ -29,20 +29,22 @@ struct domain *dom0;
 struct domain *do_createdomain(domid_t dom_id, unsigned int cpu)
 {
     struct domain *d, **pd;
+    struct exec_domain *ed;
 
     if ( (d = alloc_domain_struct()) == NULL )
         return NULL;
 
-    atomic_set(&d->refcnt, 1);
-    atomic_set(&d->pausecnt, 0);
+    ed = d->exec_domain[0];
 
-    shadow_lock_init(d);
+    atomic_set(&d->refcnt, 1);
+    atomic_set(&ed->pausecnt, 0);
 
     d->id          = dom_id;
-    d->processor   = cpu;
-    d->create_time = NOW();
+    ed->processor  = cpu;
  
-    memcpy(&d->thread, &idle0_task.thread, sizeof(d->thread));
+    spin_lock_init(&d->time_lock);
+
+    spin_lock_init(&d->big_lock);
 
     spin_lock_init(&d->page_alloc_lock);
     INIT_LIST_HEAD(&d->page_list);
@@ -60,9 +62,9 @@ struct domain *do_createdomain(domid_t dom_id, unsigned int cpu)
         return NULL;
     }
     
-    arch_do_createdomain(d);
+    arch_do_createdomain(ed);
     
-    sched_add_domain(d);
+    sched_add_domain(ed);
 
     if ( d->id != IDLE_DOMAIN_ID )
     {
@@ -104,35 +106,23 @@ struct domain *find_domain_by_id(domid_t dom)
 }
 
 
-/* Return the most recently created domain. */
-struct domain *find_last_domain(void)
-{
-    struct domain *d, *dlast;
-
-    read_lock(&domlist_lock);
-    dlast = domain_list;
-    d = dlast->next_list;
-    while ( d != NULL )
-    {
-        if ( d->create_time > dlast->create_time )
-            dlast = d;
-        d = d->next_list;
-    }
-    if ( !get_domain(dlast) )
-        dlast = NULL;
-    read_unlock(&domlist_lock);
-
-    return dlast;
-}
-
+#ifndef CONFIG_IA64
+extern void physdev_destroy_state(struct domain *d);
+#else
+#define physdev_destroy_state(_d) ((void)0)
+#endif
 
 void domain_kill(struct domain *d)
 {
+    struct exec_domain *ed;
+
     domain_pause(d);
-    if ( !test_and_set_bit(DF_DYING, &d->flags) )
+    if ( !test_and_set_bit(DF_DYING, &d->d_flags) )
     {
-        sched_rem_domain(d);
-        domain_relinquish_memory(d);
+        for_each_exec_domain(d, ed)
+            sched_rem_domain(ed);
+        domain_relinquish_resources(d);
+        physdev_destroy_state(d);
         put_domain(d);
     }
 }
@@ -140,13 +130,15 @@ void domain_kill(struct domain *d)
 
 void domain_crash(void)
 {
-    if ( current->id == 0 )
+    struct domain *d = current->domain;
+
+    if ( d->id == 0 )
         BUG();
 
-    set_bit(DF_CRASHED, &current->flags);
+    set_bit(DF_CRASHED, &d->d_flags);
 
-    send_guest_virq(dom0, VIRQ_DOM_EXC);
-    
+    send_guest_virq(dom0->exec_domain[0], VIRQ_DOM_EXC);
+
     raise_softirq(SCHEDULE_SOFTIRQ);
 }
 
@@ -158,12 +150,17 @@ void domain_crash_synchronous(void)
         do_softirq();
 }
 
+
 void domain_shutdown(u8 reason)
 {
-    if ( current->id == 0 )
+    struct domain *d = current->domain;
+
+    if ( d->id == 0 )
     {
         extern void machine_restart(char *);
         extern void machine_halt(void);
+
+        debugger_trap_immediate();
 
         if ( reason == SHUTDOWN_poweroff ) 
         {
@@ -177,40 +174,16 @@ void domain_shutdown(u8 reason)
         }
     }
 
-    if ( (current->shutdown_code = reason) == SHUTDOWN_crash )
-        set_bit(DF_CRASHED, &current->flags);
+    if ( (d->shutdown_code = reason) == SHUTDOWN_crash )
+        set_bit(DF_CRASHED, &d->d_flags);
     else
-        set_bit(DF_SHUTDOWN, &current->flags);
+        set_bit(DF_SHUTDOWN, &d->d_flags);
 
-    send_guest_virq(dom0, VIRQ_DOM_EXC);
+    send_guest_virq(dom0->exec_domain[0], VIRQ_DOM_EXC);
 
     raise_softirq(SCHEDULE_SOFTIRQ);
 }
 
-unsigned int alloc_new_dom_mem(struct domain *d, unsigned int kbytes)
-{
-    unsigned int alloc_pfns, nr_pages;
-    struct pfn_info *page;
-
-    nr_pages = (kbytes + ((PAGE_SIZE-1)>>10)) >> (PAGE_SHIFT - 10);
-    d->max_pages = nr_pages; /* this can now be controlled independently */
-
-    /* Grow the allocation if necessary. */
-    for ( alloc_pfns = d->tot_pages; alloc_pfns < nr_pages; alloc_pfns++ )
-    {
-        if ( unlikely((page = alloc_domheap_page(d)) == NULL) )
-        {
-            domain_relinquish_memory(d);
-            return list_empty(&page_scrub_list) ? -ENOMEM : -EAGAIN;
-        }
-
-        /* Initialise the machine-to-phys mapping for this page. */
-        set_machinetophys(page_to_pfn(page), alloc_pfns);
-    }
-
-    return 0;
-}
- 
 
 /* Release resources belonging to task @p. */
 void domain_destruct(struct domain *d)
@@ -218,7 +191,7 @@ void domain_destruct(struct domain *d)
     struct domain **pd;
     atomic_t      old, new;
 
-    if ( !test_bit(DF_DYING, &d->flags) )
+    if ( !test_bit(DF_DYING, &d->d_flags) )
         BUG();
 
     /* May be already destructed, or get_domain() can race us. */
@@ -251,38 +224,97 @@ void domain_destruct(struct domain *d)
 
 
 /*
- * final_setup_guestos is used for final setup and launching of domains other
- * than domain 0. ie. the domains that are being built by the userspace dom0
- * domain builder.
+ * set_info_guest is used for final setup, launching, and state modification 
+ * of domains other than domain 0. ie. the domains that are being built by 
+ * the userspace dom0 domain builder.
  */
-int final_setup_guestos(struct domain *p, dom0_builddomain_t *builddomain)
+int set_info_guest(struct domain *p, dom0_setdomaininfo_t *setdomaininfo)
 {
     int rc = 0;
-    full_execution_context_t *c;
+    struct vcpu_guest_context *c = NULL;
+    unsigned long vcpu = setdomaininfo->exec_domain;
+    struct exec_domain *ed; 
 
-    if ( (c = xmalloc(sizeof(*c))) == NULL )
+    if ( (vcpu >= MAX_VIRT_CPUS) || ((ed = p->exec_domain[vcpu]) == NULL) )
+        return -EINVAL;
+    
+    if (test_bit(DF_CONSTRUCTED, &p->d_flags) && 
+        !test_bit(EDF_CTRLPAUSE, &ed->ed_flags))
+        return -EINVAL;
+
+    if ( (c = xmalloc(struct vcpu_guest_context)) == NULL )
         return -ENOMEM;
 
-    if ( test_bit(DF_CONSTRUCTED, &p->flags) )
-    {
-        rc = -EINVAL;
-        goto out;
-    }
-
-    if ( copy_from_user(c, builddomain->ctxt, sizeof(*c)) )
+    if ( copy_from_user(c, setdomaininfo->ctxt, sizeof(*c)) )
     {
         rc = -EFAULT;
         goto out;
     }
     
-    if ( (rc = arch_final_setup_guestos(p,c)) != 0 )
+    if ( (rc = arch_set_info_guest(ed, c)) != 0 )
         goto out;
 
-    set_bit(DF_CONSTRUCTED, &p->flags);
+    set_bit(DF_CONSTRUCTED, &p->d_flags);
 
  out:    
-    if ( c != NULL )
-        xfree(c);
+    xfree(c);
+    return rc;
+}
+
+/*
+ * final_setup_guest is used for final setup and launching of domains other
+ * than domain 0. ie. the domains that are being built by the userspace dom0
+ * domain builder.
+ */
+long do_boot_vcpu(unsigned long vcpu, struct vcpu_guest_context *ctxt) 
+{
+    struct domain *d = current->domain;
+    struct exec_domain *ed;
+    int rc = 0;
+    struct vcpu_guest_context *c;
+
+    if ( (vcpu >= MAX_VIRT_CPUS) || (d->exec_domain[vcpu] != NULL) )
+        return -EINVAL;
+
+    if ( alloc_exec_domain_struct(d, vcpu) == NULL )
+        return -ENOMEM;
+
+    if ( (c = xmalloc(struct vcpu_guest_context)) == NULL )
+    {
+        rc = -ENOMEM;
+        goto out;
+    }
+
+    if ( copy_from_user(c, ctxt, sizeof(*c)) )
+    {
+        rc = -EFAULT;
+        goto out;
+    }
+
+    ed = d->exec_domain[vcpu];
+
+    atomic_set(&ed->pausecnt, 0);
+
+    memcpy(&ed->arch, &idle0_exec_domain.arch, sizeof(ed->arch));
+
+    arch_do_boot_vcpu(ed);
+
+    if ( (rc = arch_set_info_guest(ed, c)) != 0 )
+        goto out;
+
+    sched_add_domain(ed);
+
+    /* domain_unpause_by_systemcontroller */
+    if ( test_and_clear_bit(EDF_CTRLPAUSE, &ed->ed_flags) )
+        domain_wake(ed);
+
+    xfree(c);
+    return 0;
+
+ out:
+    xfree(c);
+    arch_free_exec_domain_struct(d->exec_domain[vcpu]);
+    d->exec_domain[vcpu] = NULL;
     return rc;
 }
 
@@ -295,15 +327,21 @@ long vm_assist(struct domain *p, unsigned int cmd, unsigned int type)
     {
     case VMASST_CMD_enable:
         set_bit(type, &p->vm_assist);
-        if (vm_assist_info[type].enable)
-            (*vm_assist_info[type].enable)(p);
         return 0;
     case VMASST_CMD_disable:
         clear_bit(type, &p->vm_assist);
-        if (vm_assist_info[type].disable)
-            (*vm_assist_info[type].disable)(p);
         return 0;
     }
 
     return -ENOSYS;
 }
+
+/*
+ * Local variables:
+ * mode: C
+ * c-set-style: "BSD"
+ * c-basic-offset: 4
+ * tab-width: 4
+ * indent-tabs-mode: nil
+ * End:
+ */
