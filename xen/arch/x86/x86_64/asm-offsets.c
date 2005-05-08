@@ -4,6 +4,8 @@
  * to extract and format the required data.
  */
 
+#include <xen/config.h>
+#include <xen/perfc.h>
 #include <xen/sched.h>
 
 #define DEFINE(_sym, _val) \
@@ -13,45 +15,57 @@
 #define OFFSET(_sym, _str, _mem) \
     DEFINE(_sym, offsetof(_str, _mem));
 
+/* base-2 logarithm */
+#define __L2(_x)  (((_x) & 0x00000002) ?   1 : 0)
+#define __L4(_x)  (((_x) & 0x0000000c) ? ( 2 + __L2( (_x)>> 2)) : __L2( _x))
+#define __L8(_x)  (((_x) & 0x000000f0) ? ( 4 + __L4( (_x)>> 4)) : __L4( _x))
+#define __L16(_x) (((_x) & 0x0000ff00) ? ( 8 + __L8( (_x)>> 8)) : __L8( _x))
+#define LOG_2(_x) (((_x) & 0xffff0000) ? (16 + __L16((_x)>>16)) : __L16(_x))
+
 void __dummy__(void)
 {
-    OFFSET(XREGS_r15, struct xen_regs, r15);
-    OFFSET(XREGS_r14, struct xen_regs, r14);
-    OFFSET(XREGS_r13, struct xen_regs, r13);
-    OFFSET(XREGS_r12, struct xen_regs, r12);
-    OFFSET(XREGS_rbp, struct xen_regs, rbp);
-    OFFSET(XREGS_rbx, struct xen_regs, rbx);
-    OFFSET(XREGS_r11, struct xen_regs, r11);
-    OFFSET(XREGS_r10, struct xen_regs, r10);
-    OFFSET(XREGS_r9, struct xen_regs, r9);
-    OFFSET(XREGS_r8, struct xen_regs, r8);
-    OFFSET(XREGS_rax, struct xen_regs, rax);
-    OFFSET(XREGS_rcx, struct xen_regs, rcx);
-    OFFSET(XREGS_rdx, struct xen_regs, rdx);
-    OFFSET(XREGS_rsi, struct xen_regs, rsi);
-    OFFSET(XREGS_rdi, struct xen_regs, rdi);
-    OFFSET(XREGS_orig_rax, struct xen_regs, orig_rax);
-    OFFSET(XREGS_rip, struct xen_regs, rip);
-    OFFSET(XREGS_cs, struct xen_regs, cs);
-    OFFSET(XREGS_eflags, struct xen_regs, eflags);
-    OFFSET(XREGS_rsp, struct xen_regs, rsp);
-    OFFSET(XREGS_ss, struct xen_regs, ss);
+    OFFSET(UREGS_r15, struct cpu_user_regs, r15);
+    OFFSET(UREGS_r14, struct cpu_user_regs, r14);
+    OFFSET(UREGS_r13, struct cpu_user_regs, r13);
+    OFFSET(UREGS_r12, struct cpu_user_regs, r12);
+    OFFSET(UREGS_rbp, struct cpu_user_regs, rbp);
+    OFFSET(UREGS_rbx, struct cpu_user_regs, rbx);
+    OFFSET(UREGS_r11, struct cpu_user_regs, r11);
+    OFFSET(UREGS_r10, struct cpu_user_regs, r10);
+    OFFSET(UREGS_r9, struct cpu_user_regs, r9);
+    OFFSET(UREGS_r8, struct cpu_user_regs, r8);
+    OFFSET(UREGS_rax, struct cpu_user_regs, rax);
+    OFFSET(UREGS_rcx, struct cpu_user_regs, rcx);
+    OFFSET(UREGS_rdx, struct cpu_user_regs, rdx);
+    OFFSET(UREGS_rsi, struct cpu_user_regs, rsi);
+    OFFSET(UREGS_rdi, struct cpu_user_regs, rdi);
+    OFFSET(UREGS_error_code, struct cpu_user_regs, error_code);
+    OFFSET(UREGS_entry_vector, struct cpu_user_regs, entry_vector);
+    OFFSET(UREGS_rip, struct cpu_user_regs, rip);
+    OFFSET(UREGS_cs, struct cpu_user_regs, cs);
+    OFFSET(UREGS_eflags, struct cpu_user_regs, eflags);
+    OFFSET(UREGS_rsp, struct cpu_user_regs, rsp);
+    OFFSET(UREGS_ss, struct cpu_user_regs, ss);
+    OFFSET(UREGS_kernel_sizeof, struct cpu_user_regs, es);
+    DEFINE(UREGS_user_sizeof, sizeof(struct cpu_user_regs));
     BLANK();
 
-    OFFSET(DOMAIN_processor, struct domain, processor);
-    OFFSET(DOMAIN_shared_info, struct domain, shared_info);
-    OFFSET(DOMAIN_event_sel, struct domain, thread.event_selector);
-    OFFSET(DOMAIN_event_addr, struct domain, thread.event_address);
-    OFFSET(DOMAIN_failsafe_sel, struct domain, thread.failsafe_selector);
-    OFFSET(DOMAIN_failsafe_addr, struct domain, thread.failsafe_address);
-    OFFSET(DOMAIN_trap_bounce, struct domain, thread.trap_bounce);
-    OFFSET(DOMAIN_thread_flags, struct domain, thread.flags);
+    OFFSET(EDOMAIN_processor, struct exec_domain, processor);
+    OFFSET(EDOMAIN_vcpu_info, struct exec_domain, vcpu_info);
+    OFFSET(EDOMAIN_trap_bounce, struct exec_domain, arch.trap_bounce);
+    OFFSET(EDOMAIN_thread_flags, struct exec_domain, arch.flags);
+    OFFSET(EDOMAIN_event_addr, struct exec_domain,
+           arch.guest_context.event_callback_eip);
+    OFFSET(EDOMAIN_failsafe_addr, struct exec_domain,
+           arch.guest_context.failsafe_callback_eip);
+    OFFSET(EDOMAIN_syscall_addr, struct exec_domain,
+           arch.guest_context.syscall_callback_eip);
+    OFFSET(EDOMAIN_kernel_sp, struct exec_domain,
+           arch.guest_context.kernel_sp);
     BLANK();
 
-    OFFSET(SHINFO_upcall_pending, shared_info_t, 
-           vcpu_data[0].evtchn_upcall_pending);
-    OFFSET(SHINFO_upcall_mask, shared_info_t, 
-           vcpu_data[0].evtchn_upcall_mask);
+    OFFSET(VCPUINFO_upcall_pending, vcpu_info_t, evtchn_upcall_pending);
+    OFFSET(VCPUINFO_upcall_mask, vcpu_info_t, evtchn_upcall_mask);
     BLANK();
 
     OFFSET(TRAPBOUNCE_error_code, struct trap_bounce, error_code);
@@ -61,6 +75,12 @@ void __dummy__(void)
     OFFSET(TRAPBOUNCE_eip, struct trap_bounce, eip);
     BLANK();
 
+#if PERF_COUNTERS
+    OFFSET(PERFC_hypercalls, struct perfcounter, hypercalls);
+    OFFSET(PERFC_exceptions, struct perfcounter, exceptions);
+    BLANK();
+#endif
+
     OFFSET(MULTICALL_op, multicall_entry_t, op);
     OFFSET(MULTICALL_arg0, multicall_entry_t, args[0]);
     OFFSET(MULTICALL_arg1, multicall_entry_t, args[1]);
@@ -68,4 +88,7 @@ void __dummy__(void)
     OFFSET(MULTICALL_arg3, multicall_entry_t, args[3]);
     OFFSET(MULTICALL_arg4, multicall_entry_t, args[4]);
     OFFSET(MULTICALL_result, multicall_entry_t, args[5]);
+    BLANK();
+
+    DEFINE(IRQSTAT_shift, LOG_2(sizeof(irq_cpustat_t)));
 }
