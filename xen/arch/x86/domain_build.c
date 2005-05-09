@@ -114,7 +114,7 @@ int construct_dom0(struct domain *d,
     /* Sanity! */
     if ( d->id != 0 ) 
         BUG();
-    if ( test_bit(DF_CONSTRUCTED, &d->d_flags) ) 
+    if ( test_bit(DF_CONSTRUCTED, &d->flags) ) 
         BUG();
 
     memset(&dsi, 0, sizeof(struct domain_setup_info));
@@ -184,9 +184,9 @@ int construct_dom0(struct domain *d,
 
     printk("PHYSICAL MEMORY ARRANGEMENT:\n"
            " Dom0 alloc.:   %p->%p",
-           alloc_start, alloc_end);
+           _p(alloc_start), _p(alloc_end));
     if ( d->tot_pages < nr_pages )
-        printk(" (%d pages to be allocated)",
+        printk(" (%lu pages to be allocated)",
                nr_pages - d->tot_pages);
     printk("\nVIRTUAL MEMORY ARRANGEMENT:\n"
            " Loaded kernel: %p->%p\n"
@@ -196,14 +196,14 @@ int construct_dom0(struct domain *d,
            " Start info:    %p->%p\n"
            " Boot stack:    %p->%p\n"
            " TOTAL:         %p->%p\n",
-           dsi.v_kernstart, dsi.v_kernend, 
-           vinitrd_start, vinitrd_end,
-           vphysmap_start, vphysmap_end,
-           vpt_start, vpt_end,
-           vstartinfo_start, vstartinfo_end,
-           vstack_start, vstack_end,
-           dsi.v_start, v_end);
-    printk(" ENTRY ADDRESS: %p\n", dsi.v_kernentry);
+           _p(dsi.v_kernstart), _p(dsi.v_kernend), 
+           _p(vinitrd_start), _p(vinitrd_end),
+           _p(vphysmap_start), _p(vphysmap_end),
+           _p(vpt_start), _p(vpt_end),
+           _p(vstartinfo_start), _p(vstartinfo_end),
+           _p(vstack_start), _p(vstack_end),
+           _p(dsi.v_start), _p(v_end));
+    printk(" ENTRY ADDRESS: %p\n", _p(dsi.v_kernentry));
 
     if ( (v_end - dsi.v_start) > (nr_pages * PAGE_SIZE) )
     {
@@ -222,13 +222,14 @@ int construct_dom0(struct domain *d,
      * We're basically forcing default RPLs to 1, so that our "what privilege
      * level are we returning to?" logic works.
      */
-    ed->arch.failsafe_selector = FLAT_KERNEL_CS;
-    ed->arch.event_selector    = FLAT_KERNEL_CS;
-    ed->arch.kernel_ss = FLAT_KERNEL_SS;
+    ed->arch.guest_context.kernel_ss = FLAT_KERNEL_SS;
     for ( i = 0; i < 256; i++ ) 
-        ed->arch.traps[i].cs = FLAT_KERNEL_CS;
+        ed->arch.guest_context.trap_ctxt[i].cs = FLAT_KERNEL_CS;
 
 #if defined(__i386__)
+
+    ed->arch.guest_context.failsafe_callback_cs = FLAT_KERNEL_CS;
+    ed->arch.guest_context.event_callback_cs    = FLAT_KERNEL_CS;
 
     /*
      * Protect the lowest 1GB of memory. We use a temporary mapping there
@@ -508,7 +509,7 @@ int construct_dom0(struct domain *d,
     {
         si->mod_start = vinitrd_start;
         si->mod_len   = initrd_len;
-        printk("Initrd len 0x%lx, start at 0x%p\n",
+        printk("Initrd len 0x%lx, start at 0x%lx\n",
                si->mod_len, si->mod_start);
     }
 
@@ -539,14 +540,14 @@ int construct_dom0(struct domain *d,
     /* DOM0 gets access to everything. */
     physdev_init_dom0(d);
 
-    set_bit(DF_CONSTRUCTED, &d->d_flags);
+    set_bit(DF_CONSTRUCTED, &d->flags);
 
     new_thread(ed, dsi.v_kernentry, vstack_end, vstartinfo_start);
 
     if ( opt_dom0_shadow || opt_dom0_translate )
     {
         shadow_mode_enable(d, (opt_dom0_translate
-                               ? SHM_enable | SHM_translate
+                               ? SHM_enable | SHM_refcounts | SHM_translate
                                : SHM_enable));
         if ( opt_dom0_translate )
         {
@@ -569,7 +570,7 @@ int construct_dom0(struct domain *d,
             idle_pg_table[1] = root_create_phys(pagetable_val(d->arch.phys_table),
                                                 __PAGE_HYPERVISOR);
             translate_l2pgtable(d, (l1_pgentry_t *)(1u << L2_PAGETABLE_SHIFT),
-                                pagetable_val(ed->arch.guest_table) >> PAGE_SHIFT);
+                                pagetable_get_pfn(ed->arch.guest_table));
             idle_pg_table[1] = root_empty();
             local_flush_tlb();
         }

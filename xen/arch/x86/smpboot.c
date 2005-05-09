@@ -115,7 +115,8 @@ void __init smp_alloc_memory(void)
 void __init smp_store_cpu_info(int id)
 {
     cpu_data[id] = boot_cpu_data;
-    identify_cpu(&cpu_data[id]);
+    if (id != 0)
+        identify_cpu(&cpu_data[id]);
 }
 
 /*
@@ -359,9 +360,6 @@ void __init smp_callin(void)
      * Save our processor parameters
      */
     smp_store_cpu_info(cpuid);
-
-    if (nmi_watchdog == NMI_LOCAL_APIC)
-        setup_apic_nmi_watchdog();
 
     /*
      * Allow the master to continue.
@@ -660,7 +658,7 @@ static void __init do_boot_cpu (int apicid)
 
     ed = idle->exec_domain[0];
 
-    set_bit(DF_IDLETASK, &idle->d_flags);
+    set_bit(DF_IDLETASK, &idle->flags);
 
     ed->arch.monitor_table = mk_pagetable(__pa(idle_pg_table));
 

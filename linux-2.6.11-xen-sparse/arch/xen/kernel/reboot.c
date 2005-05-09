@@ -77,15 +77,19 @@ static void __do_suspend(void)
 #define netif_resume()  do{}while(0)
 #endif
 
-
 #ifdef CONFIG_XEN_USB_FRONTEND
     extern void usbif_resume();
 #else
 #define usbif_resume() do{}while(0)
 #endif
 
+#ifdef CONFIG_XEN_BLKDEV_GRANT
     extern int gnttab_suspend(void);
     extern int gnttab_resume(void);
+#else
+#define gnttab_suspend() do{}while(0)
+#define gnttab_resume()  do{}while(0)
+#endif
 
     extern void time_suspend(void);
     extern void time_resume(void);
@@ -125,11 +129,7 @@ static void __do_suspend(void)
     memcpy(&xen_start_info, &suspend_record->resume_info,
            sizeof(xen_start_info));
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,0)
-    set_fixmap_ma(FIX_SHARED_INFO, xen_start_info.shared_info);
-#else
     set_fixmap(FIX_SHARED_INFO, xen_start_info.shared_info);
-#endif
 
     HYPERVISOR_shared_info = (shared_info_t *)fix_to_virt(FIX_SHARED_INFO);
 

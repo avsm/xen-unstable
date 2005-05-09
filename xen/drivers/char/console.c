@@ -260,7 +260,7 @@ static void switch_serial_input(void)
     }
 }
 
-static void __serial_rx(unsigned char c, struct xen_regs *regs)
+static void __serial_rx(unsigned char c, struct cpu_user_regs *regs)
 {
     if ( xen_rx )
     {
@@ -274,7 +274,7 @@ static void __serial_rx(unsigned char c, struct xen_regs *regs)
     }
 }
 
-static void serial_rx(unsigned char c, struct xen_regs *regs)
+static void serial_rx(unsigned char c, struct cpu_user_regs *regs)
 {
     static int switch_code_count = 0;
 
@@ -493,10 +493,10 @@ int irq_console_getc(void)
 /* Send output direct to console, or buffer it? */
 int debugtrace_send_to_console;
 
-static unsigned char *debugtrace_buf; /* Debug-trace buffer */
-static unsigned int   debugtrace_prd; /* Producer index     */
-static unsigned int   debugtrace_kilobytes = 128, debugtrace_bytes;
-static spinlock_t debugtrace_lock = SPIN_LOCK_UNLOCKED;
+static char        *debugtrace_buf; /* Debug-trace buffer */
+static unsigned int debugtrace_prd; /* Producer index     */
+static unsigned int debugtrace_kilobytes = 128, debugtrace_bytes;
+static spinlock_t   debugtrace_lock = SPIN_LOCK_UNLOCKED;
 integer_param("debugtrace", debugtrace_kilobytes);
 
 void debugtrace_dump(void)
@@ -535,9 +535,9 @@ void debugtrace_printk(const char *fmt, ...)
 {
     static char    buf[1024];
 
-    va_list        args;
-    unsigned char *p;
-    unsigned long  flags;
+    va_list       args;
+    char         *p;
+    unsigned long flags;
 
     if ( debugtrace_bytes == 0 )
         return;
@@ -582,7 +582,7 @@ static int __init debugtrace_init(void)
         return 0;
 
     order = get_order(bytes);
-    debugtrace_buf = (unsigned char *)alloc_xenheap_pages(order);
+    debugtrace_buf = (char *)alloc_xenheap_pages(order);
     ASSERT(debugtrace_buf != NULL);
 
     memset(debugtrace_buf, '\0', bytes);
@@ -635,14 +635,6 @@ void panic(const char *fmt, ...)
     watchdog_on = 0;
     mdelay(5000);
     machine_restart(0);
-}
-
-
-void __out_of_line_bug(int line)
-{
-    printk("kernel BUG in header file at line %d\n", line);
-    BUG();
-    for ( ; ; ) ;
 }
 
 /*

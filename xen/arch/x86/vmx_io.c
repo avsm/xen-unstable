@@ -38,7 +38,7 @@
 extern long do_block();
   
 #if defined (__i386__)
-static void load_xen_regs(struct xen_regs *regs)
+static void load_cpu_user_regs(struct cpu_user_regs *regs)
 { 
     /*
      * Write the guest register value into VMCS
@@ -50,7 +50,7 @@ static void load_xen_regs(struct xen_regs *regs)
     __vmwrite(GUEST_EIP, regs->eip);
 }
 
-static void set_reg_value (int size, int index, int seg, struct xen_regs *regs, long value)
+static void set_reg_value (int size, int index, int seg, struct cpu_user_regs *regs, long value)
 {
     switch (size) {
     case BYTE:
@@ -170,12 +170,12 @@ static void set_reg_value (int size, int index, int seg, struct xen_regs *regs, 
     }
 }
 #else
-static void load_xen_regs(struct xen_regs *regs)
+static void load_cpu_user_regs(struct cpu_user_regs *regs)
 { 
 	/* XXX: TBD */
 	return;
 }
-static void set_reg_value (int size, int index, int seg, struct xen_regs *regs, long value)
+static void set_reg_value (int size, int index, int seg, struct cpu_user_regs *regs, long value)
 {
 	/* XXX: TBD */
 	return;
@@ -187,11 +187,11 @@ void vmx_io_assist(struct exec_domain *ed)
     vcpu_iodata_t *vio;
     ioreq_t *p;
     struct domain *d = ed->domain;
-    execution_context_t *ec = get_execution_context();
+    struct cpu_user_regs *regs = get_cpu_user_regs();
     unsigned long old_eax;
     int sign;
     struct mi_per_cpu_info *mpci_p;
-    struct xen_regs *inst_decoder_regs;
+    struct cpu_user_regs *inst_decoder_regs;
 
     mpci_p = &ed->arch.arch_vmx.vmx_platform.mpci;
     inst_decoder_regs = mpci_p->inst_decoder_regs;
@@ -230,8 +230,8 @@ void vmx_io_assist(struct exec_domain *ed)
     sign = (p->df) ? -1 : 1;
     if (p->port_mm) {
         if (p->pdata_valid) {
-            ec->esi += sign * p->count * p->size;
-            ec->edi += sign * p->count * p->size;
+            regs->esi += sign * p->count * p->size;
+            regs->edi += sign * p->count * p->size;
         } else {
             if (p->dir == IOREQ_WRITE) {
                 return;
@@ -244,45 +244,45 @@ void vmx_io_assist(struct exec_domain *ed)
             if (ed->arch.arch_vmx.vmx_platform.mpci.mmio_target & WZEROEXTEND) {
                 p->u.data = p->u.data & 0xffff;
             }        
-            set_reg_value(size, index, 0, (struct xen_regs *)ec, p->u.data);
+            set_reg_value(size, index, 0, regs, p->u.data);
 
         }
-        load_xen_regs((struct xen_regs *)ec);
+        load_cpu_user_regs(regs);
         return;
     }
 
     if (p->dir == IOREQ_WRITE) {
         if (p->pdata_valid) {
-            ec->esi += sign * p->count * p->size;
-            ec->ecx -= p->count;
+            regs->esi += sign * p->count * p->size;
+            regs->ecx -= p->count;
         }
         return;
     } else {
         if (p->pdata_valid) {
-            ec->edi += sign * p->count * p->size;
-            ec->ecx -= p->count;
+            regs->edi += sign * p->count * p->size;
+            regs->ecx -= p->count;
             return;
         }
     }
 
-    old_eax = ec->eax;
+    old_eax = regs->eax;
 
     switch(p->size) {
     case 1:
-        ec->eax = (old_eax & 0xffffff00) | (p->u.data & 0xff);
+        regs->eax = (old_eax & 0xffffff00) | (p->u.data & 0xff);
         break;
     case 2:
-        ec->eax = (old_eax & 0xffff0000) | (p->u.data & 0xffff);
+        regs->eax = (old_eax & 0xffff0000) | (p->u.data & 0xffff);
         break;
     case 4:
-        ec->eax = (p->u.data & 0xffffffff);
+        regs->eax = (p->u.data & 0xffffffff);
         break;
     default:
         BUG();
     }
 }
 
-#ifdef __i386__
+#if defined(__i386__) || defined(__x86_64__)
 static inline int __fls(u32 word)
 {
     int bit;
@@ -296,53 +296,52 @@ static inline int __fls(u32 word)
 #define __fls(x) 	generic_fls(x)
 static __inline__ int generic_fls(u32 x)
 {
-	int r = 32;
+    int r = 31;
 
-	if (!x)
-		return 0;
-	if (!(x & 0xffff0000u)) {
-		x <<= 16;
-		r -= 16;
-	}
-	if (!(x & 0xff000000u)) {
-		x <<= 8;
-		r -= 8;
-	}
-	if (!(x & 0xf0000000u)) {
-		x <<= 4;
-		r -= 4;
-	}
-	if (!(x & 0xc0000000u)) {
-		x <<= 2;
-		r -= 2;
-	}
-	if (!(x & 0x80000000u)) {
-                x <<= 1;
-                r -= 1;
-	}
-	return r;
+    if (!x)
+        return -1;
+    if (!(x & 0xffff0000u)) {
+        x <<= 16;
+        r -= 16;
+    }
+    if (!(x & 0xff000000u)) {
+        x <<= 8;
+        r -= 8;
+    }
+    if (!(x & 0xf0000000u)) {
+        x <<= 4;
+        r -= 4;
+    }
+    if (!(x & 0xc0000000u)) {
+        x <<= 2;
+        r -= 2;
+    }
+    if (!(x & 0x80000000u)) {
+        x <<= 1;
+        r -= 1;
+    }
+    return r;
 }
 #endif
-
 
 /* Simple minded Local APIC priority implementation. Fix later */
 static __inline__ int find_highest_irq(u32 *pintr)
 {
     if (pintr[7])
-        return __fls(pintr[7]) + (255-32*1);
+        return __fls(pintr[7]) + (256-32*1);
     if (pintr[6])
-        return __fls(pintr[6]) + (255-32*2);
+        return __fls(pintr[6]) + (256-32*2);
     if (pintr[5])
-        return __fls(pintr[5]) + (255-32*3);
+        return __fls(pintr[5]) + (256-32*3);
     if (pintr[4])
-        return __fls(pintr[4]) + (255-32*4);
+        return __fls(pintr[4]) + (256-32*4);
     if (pintr[3])
-        return __fls(pintr[3]) + (255-32*5);
+        return __fls(pintr[3]) + (256-32*5);
     if (pintr[2])
-        return __fls(pintr[2]) + (255-32*6);
+        return __fls(pintr[2]) + (256-32*6);
     if (pintr[1])
-        return __fls(pintr[1]) + (255-32*7);
-    return (__fls(pintr[0])-1);
+        return __fls(pintr[1]) + (256-32*7);
+    return __fls(pintr[0]);
 }
 
 /*

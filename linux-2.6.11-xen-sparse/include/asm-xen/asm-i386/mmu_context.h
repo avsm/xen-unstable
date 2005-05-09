@@ -16,7 +16,7 @@ void destroy_context(struct mm_struct *mm);
 
 static inline void enter_lazy_tlb(struct mm_struct *mm, struct task_struct *tsk)
 {
-#if 0 /* XEN */
+#if 0 /* XEN: no lazy tlb */
 	unsigned cpu = smp_processor_id();
 	if (per_cpu(cpu_tlbstate, cpu).state == TLBSTATE_OK)
 		per_cpu(cpu_tlbstate, cpu).state = TLBSTATE_LAZY;
@@ -41,6 +41,9 @@ static inline void __prepare_arch_switch(void)
 		: : "r" (0) );
 }
 
+extern void mm_pin(struct mm_struct *mm);
+extern void mm_unpin(struct mm_struct *mm);
+
 static inline void switch_mm(struct mm_struct *prev,
 			     struct mm_struct *next,
 			     struct task_struct *tsk)
@@ -49,9 +52,12 @@ static inline void switch_mm(struct mm_struct *prev,
 	struct mmuext_op _op[2], *op = _op;
 
 	if (likely(prev != next)) {
+		if (!next->context.pinned)
+			mm_pin(next);
+
 		/* stop flush ipis for the previous mm */
 		cpu_clear(cpu, prev->cpu_vm_mask);
-#if 0 /* XEN */
+#if 0 /* XEN: no lazy tlb */
 		per_cpu(cpu_tlbstate, cpu).state = TLBSTATE_OK;
 		per_cpu(cpu_tlbstate, cpu).active_mm = next;
 #endif
@@ -76,7 +82,7 @@ static inline void switch_mm(struct mm_struct *prev,
 
 		BUG_ON(HYPERVISOR_mmuext_op(_op, op-_op, NULL, DOMID_SELF));
 	}
-#if 0 /* XEN */
+#if 0 /* XEN: no lazy tlb */
 	else {
 		per_cpu(cpu_tlbstate, cpu).state = TLBSTATE_OK;
 		BUG_ON(per_cpu(cpu_tlbstate, cpu).active_mm != next);
@@ -95,8 +101,7 @@ static inline void switch_mm(struct mm_struct *prev,
 #define deactivate_mm(tsk, mm) \
 	asm("movl %0,%%fs ; movl %0,%%gs": :"r" (0))
 
-#define activate_mm(prev, next) do {		\
-	switch_mm((prev),(next),NULL);		\
-} while (0)
+#define activate_mm(prev, next) \
+	switch_mm((prev),(next),NULL)
 
 #endif

@@ -361,6 +361,7 @@ static void __init pagetable_init (void)
 	make_page_writable(old_pgd);
 	__flush_tlb_all();
 	free_bootmem(__pa(old_pgd), PAGE_SIZE);
+	init_mm.context.pinned = 1;
 
 	kernel_physical_mapping_init(pgd_base);
 	remap_numa_kva();
@@ -562,7 +563,7 @@ void __init paging_init(void)
 	zone_sizes_init();
 
 	/* Switch to the real shared_info page, and clear the dummy page. */
-	set_fixmap_ma(FIX_SHARED_INFO, xen_start_info.shared_info);
+	set_fixmap(FIX_SHARED_INFO, xen_start_info.shared_info);
 	HYPERVISOR_shared_info = (shared_info_t *)fix_to_virt(FIX_SHARED_INFO);
 	memset(empty_zero_page, 0, sizeof(empty_zero_page));
 
@@ -570,10 +571,11 @@ void __init paging_init(void)
 	/* Setup mapping of lower 1st MB */
 	for (i = 0; i < NR_FIX_ISAMAPS; i++)
 		if (xen_start_info.flags & SIF_PRIVILEGED)
-			set_fixmap_ma(FIX_ISAMAP_BEGIN - i, i * PAGE_SIZE);
+			set_fixmap(FIX_ISAMAP_BEGIN - i, i * PAGE_SIZE);
 		else
-			set_fixmap_ma_ro(FIX_ISAMAP_BEGIN - i,
-					 virt_to_machine(empty_zero_page));
+			__set_fixmap(FIX_ISAMAP_BEGIN - i,
+				     virt_to_machine(empty_zero_page),
+				     PAGE_KERNEL_RO);
 #endif
 }
 
@@ -710,18 +712,9 @@ void __init mem_init(void)
 
 kmem_cache_t *pgd_cache;
 kmem_cache_t *pmd_cache;
-kmem_cache_t *pte_cache;
 
 void __init pgtable_cache_init(void)
 {
-	pte_cache = kmem_cache_create("pte",
-				PTRS_PER_PTE*sizeof(pte_t),
-				PTRS_PER_PTE*sizeof(pte_t),
-				0,
-				pte_ctor,
-				pte_dtor);
-	if (!pte_cache)
-		panic("pgtable_cache_init(): Cannot create pte cache");
 	if (PTRS_PER_PMD > 1) {
 		pmd_cache = kmem_cache_create("pmd",
 					PTRS_PER_PMD*sizeof(pmd_t),

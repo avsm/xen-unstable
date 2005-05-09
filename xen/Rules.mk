@@ -28,7 +28,6 @@ OBJS    += $(patsubst %.c,%.o,$(C_SRCS))
 ALL_OBJS := $(BASEDIR)/common/common.o
 ALL_OBJS += $(BASEDIR)/drivers/char/driver.o
 ALL_OBJS += $(BASEDIR)/drivers/acpi/driver.o
-ALL_OBJS += $(BASEDIR)/drivers/pci/driver.o
 ALL_OBJS += $(BASEDIR)/arch/$(TARGET_ARCH)/arch.o
 
 
@@ -42,7 +41,7 @@ ifeq ($(verbose),y)
 CFLAGS += -DVERBOSE
 endif
 else
-CFLAGS += -DVERBOSE
+CFLAGS += -g -DVERBOSE
 endif
 
 ifeq ($(domu_debug),y)

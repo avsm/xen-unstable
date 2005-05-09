@@ -380,8 +380,6 @@ printk(const char *fmt, ...)
         (void)HYPERVISOR_console_write(buf, ret);
 }
 
-#define PANIC_IF(exp) if (unlikely(exp)) {printk("%s failed\n",#exp); panic("%s: %s:%d", #exp, __FILE__, __LINE__);} 
-
 
 #define XPQUEUE_SIZE 128
 #ifdef SMP
@@ -474,7 +472,7 @@ xen_machphys_update(unsigned long mfn, unsigned long pfn)
 }
 
 void
-xen_queue_pt_update(pt_entry_t *ptr, pt_entry_t val)
+xen_queue_pt_update(vm_paddr_t ptr, vm_paddr_t val)
 {
     SET_VCPU();
     

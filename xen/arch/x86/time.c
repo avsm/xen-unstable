@@ -51,7 +51,7 @@ static s_time_t        stime_irq;       /* System time at last 'time update' */
 static unsigned long   wc_sec, wc_usec; /* UTC time at last 'time update'.   */
 static rwlock_t        time_lock = RW_LOCK_UNLOCKED;
 
-void timer_interrupt(int irq, void *dev_id, struct xen_regs *regs)
+void timer_interrupt(int irq, void *dev_id, struct cpu_user_regs *regs)
 {
     write_lock_irq(&time_lock);
 
@@ -360,7 +360,6 @@ int __init init_xen_time()
     wc_sec  = get_cmos_time();
 
     printk("Time init:\n");
-    printk(".... System Time: %lldns\n", NOW());
     printk(".... cpu_freq:    %08X:%08X\n", (u32)(cpu_freq>>32),(u32)cpu_freq);
     printk(".... scale:       %08X:%08X\n", (u32)(scale>>32),(u32)scale);
     printk(".... Wall Clock:  %lds %ldus\n", wc_sec, wc_usec);

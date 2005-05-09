@@ -171,7 +171,7 @@ void init_boot_pages(unsigned long ps, unsigned long pe)
 
         if ( (bad_pfn < (bitmap_size*8)) && !allocated_in_map(bad_pfn) )
         {
-            printk("Marking page %p as bad\n", bad_pfn);
+            printk("Marking page %lx as bad\n", bad_pfn);
             map_alloc(bad_pfn, 1);
         }
     }
@@ -503,13 +503,13 @@ struct pfn_info *alloc_domheap_pages(struct domain *d, unsigned int order)
 
     spin_lock(&d->page_alloc_lock);
 
-    if ( unlikely(test_bit(DF_DYING, &d->d_flags)) ||
+    if ( unlikely(test_bit(DF_DYING, &d->flags)) ||
          unlikely((d->tot_pages + (1 << order)) > d->max_pages) )
     {
         DPRINTK("Over-allocation for domain %u: %u > %u\n",
                 d->id, d->tot_pages + (1 << order), d->max_pages);
         DPRINTK("...or the domain is dying (%d)\n", 
-                !!test_bit(DF_DYING, &d->d_flags));
+                !!test_bit(DF_DYING, &d->flags));
         spin_unlock(&d->page_alloc_lock);
         free_heap_pages(MEMZONE_DOM, pg, order);
         return NULL;
@@ -562,7 +562,8 @@ void free_domheap_pages(struct pfn_info *pg, unsigned int order)
         for ( i = 0; i < (1 << order); i++ )
         {
             shadow_drop_references(d, &pg[i]);
-            ASSERT((pg[i].u.inuse.type_info & PGT_count_mask) == 0);
+            ASSERT(((pg[i].u.inuse.type_info & PGT_count_mask) == 0) ||
+                   shadow_tainted_refcnts(d));
             pg[i].tlbflush_timestamp  = tlbflush_current_time();
             pg[i].u.free.cpu_mask     = d->cpuset;
             list_del(&pg[i].list);
@@ -573,7 +574,7 @@ void free_domheap_pages(struct pfn_info *pg, unsigned int order)
 
         spin_unlock_recursive(&d->page_alloc_lock);
 
-        if ( likely(!test_bit(DF_DYING, &d->d_flags)) )
+        if ( likely(!test_bit(DF_DYING, &d->flags)) )
         {
             free_heap_pages(MEMZONE_DOM, pg, order);
         }

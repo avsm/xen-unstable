@@ -22,6 +22,7 @@ extern start_info_t *xen_start_info;
  * be MACHINE addresses.
  */
 
+static inline void HYPERVISOR_crash(void) __dead2;
 
 void MULTICALL_flush_page_update_queue(void);
 
@@ -88,11 +89,13 @@ static inline int
 HYPERVISOR_set_gdt(unsigned long *frame_list, int entries)
 {
     int ret;
+    unsigned long ign1, ign2;
+
     __asm__ __volatile__ (
         TRAP_INSTR
-        : "=a" (ret) : "0" (__HYPERVISOR_set_gdt), 
-        "b" (frame_list), "c" (entries) : "memory" );
-
+        : "=a" (ret), "=b" (ign1), "=c" (ign2)
+        : "0" (__HYPERVISOR_set_gdt), "1" (frame_list), "2" (entries)
+        : "memory" );
 
     return ret;
 }
@@ -197,6 +200,23 @@ HYPERVISOR_suspend(unsigned long srec)
         "S" (srec) : "memory" );
 
     return ret;
+}
+
+
+static inline void
+HYPERVISOR_crash(void) 
+{
+    int ret;
+    unsigned long ign1;
+    __asm__ __volatile__ (
+        TRAP_INSTR
+        : "=a" (ret), "=b" (ign1)
+        : "0" (__HYPERVISOR_sched_op),
+	"1" (SCHEDOP_shutdown | (SHUTDOWN_crash << SCHEDOP_reasonshift))
+        : "memory" );
+
+	for (;;) ; /* eliminate noreturn error */ 
+
 }
 
 static inline long 
@@ -417,6 +437,22 @@ HYPERVISOR_vm_assist(unsigned int cmd, unsigned int type)
         TRAP_INSTR
         : "=a" (ret) : "0" (__HYPERVISOR_vm_assist),
         "b" (cmd), "c" (type) : "memory" );
+
+    return ret;
+}
+
+static inline int
+HYPERVISOR_boot_vcpu(
+    unsigned long vcpu, vcpu_guest_context_t *ctxt)
+{
+    int ret;
+    unsigned long ign1, ign2;
+
+    __asm__ __volatile__ (
+        TRAP_INSTR
+        : "=a" (ret), "=b" (ign1), "=c" (ign2)
+	: "0" (__HYPERVISOR_boot_vcpu), "1" (vcpu), "2" (ctxt)
+	: "memory");
 
     return ret;
 }

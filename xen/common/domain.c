@@ -50,10 +50,6 @@ struct domain *do_createdomain(domid_t dom_id, unsigned int cpu)
     INIT_LIST_HEAD(&d->page_list);
     INIT_LIST_HEAD(&d->xenpage_list);
 
-    /* Per-domain PCI-device list. */
-    spin_lock_init(&d->pcidev_lock);
-    INIT_LIST_HEAD(&d->pcidev_list);
-    
     if ( (d->id != IDLE_DOMAIN_ID) &&
          ((init_event_channels(d) != 0) || (grant_table_create(d) != 0)) )
     {
@@ -70,12 +66,12 @@ struct domain *do_createdomain(domid_t dom_id, unsigned int cpu)
     {
         write_lock(&domlist_lock);
         pd = &domain_list; /* NB. domain_list maintained in order of dom_id. */
-        for ( pd = &domain_list; *pd != NULL; pd = &(*pd)->next_list )
+        for ( pd = &domain_list; *pd != NULL; pd = &(*pd)->next_in_list )
             if ( (*pd)->id > d->id )
                 break;
-        d->next_list = *pd;
+        d->next_in_list = *pd;
         *pd = d;
-        d->next_hash = domain_hash[DOMAIN_HASH(dom_id)];
+        d->next_in_hashbucket = domain_hash[DOMAIN_HASH(dom_id)];
         domain_hash[DOMAIN_HASH(dom_id)] = d;
         write_unlock(&domlist_lock);
     }
@@ -98,7 +94,7 @@ struct domain *find_domain_by_id(domid_t dom)
                 d = NULL;
             break;
         }
-        d = d->next_hash;
+        d = d->next_in_hashbucket;
     }
     read_unlock(&domlist_lock);
 
@@ -106,23 +102,16 @@ struct domain *find_domain_by_id(domid_t dom)
 }
 
 
-#ifndef CONFIG_IA64
-extern void physdev_destroy_state(struct domain *d);
-#else
-#define physdev_destroy_state(_d) ((void)0)
-#endif
-
 void domain_kill(struct domain *d)
 {
     struct exec_domain *ed;
 
     domain_pause(d);
-    if ( !test_and_set_bit(DF_DYING, &d->d_flags) )
+    if ( !test_and_set_bit(DF_DYING, &d->flags) )
     {
         for_each_exec_domain(d, ed)
             sched_rem_domain(ed);
         domain_relinquish_resources(d);
-        physdev_destroy_state(d);
         put_domain(d);
     }
 }
@@ -135,7 +124,7 @@ void domain_crash(void)
     if ( d->id == 0 )
         BUG();
 
-    set_bit(DF_CRASHED, &d->d_flags);
+    set_bit(DF_CRASHED, &d->flags);
 
     send_guest_virq(dom0->exec_domain[0], VIRQ_DOM_EXC);
 
@@ -175,9 +164,9 @@ void domain_shutdown(u8 reason)
     }
 
     if ( (d->shutdown_code = reason) == SHUTDOWN_crash )
-        set_bit(DF_CRASHED, &d->d_flags);
+        set_bit(DF_CRASHED, &d->flags);
     else
-        set_bit(DF_SHUTDOWN, &d->d_flags);
+        set_bit(DF_SHUTDOWN, &d->flags);
 
     send_guest_virq(dom0->exec_domain[0], VIRQ_DOM_EXC);
 
@@ -185,38 +174,13 @@ void domain_shutdown(u8 reason)
 }
 
 
-unsigned int alloc_new_dom_mem(struct domain *d, unsigned int kbytes)
-{
-    unsigned int alloc_pfns, nr_pages;
-    struct pfn_info *page;
-
-    nr_pages = (kbytes + ((PAGE_SIZE-1)>>10)) >> (PAGE_SHIFT - 10);
-    d->max_pages = nr_pages; /* this can now be controlled independently */
-
-    /* Grow the allocation if necessary. */
-    for ( alloc_pfns = d->tot_pages; alloc_pfns < nr_pages; alloc_pfns++ )
-    {
-        if ( unlikely((page = alloc_domheap_page(d)) == NULL) )
-        {
-            domain_relinquish_resources(d);
-            return list_empty(&page_scrub_list) ? -ENOMEM : -EAGAIN;
-        }
-
-        /* Initialise the machine-to-phys mapping for this page. */
-        set_machinetophys(page_to_pfn(page), alloc_pfns);
-    }
-
-    return 0;
-}
- 
-
 /* Release resources belonging to task @p. */
 void domain_destruct(struct domain *d)
 {
     struct domain **pd;
     atomic_t      old, new;
 
-    if ( !test_bit(DF_DYING, &d->d_flags) )
+    if ( !test_bit(DF_DYING, &d->flags) )
         BUG();
 
     /* May be already destructed, or get_domain() can race us. */
@@ -230,12 +194,12 @@ void domain_destruct(struct domain *d)
     write_lock(&domlist_lock);
     pd = &domain_list;
     while ( *pd != d ) 
-        pd = &(*pd)->next_list;
-    *pd = d->next_list;
+        pd = &(*pd)->next_in_list;
+    *pd = d->next_in_list;
     pd = &domain_hash[DOMAIN_HASH(d->id)];
     while ( *pd != d ) 
-        pd = &(*pd)->next_hash;
-    *pd = d->next_hash;
+        pd = &(*pd)->next_in_hashbucket;
+    *pd = d->next_in_hashbucket;
     write_unlock(&domlist_lock);
 
     destroy_event_channels(d);
@@ -256,18 +220,18 @@ void domain_destruct(struct domain *d)
 int set_info_guest(struct domain *p, dom0_setdomaininfo_t *setdomaininfo)
 {
     int rc = 0;
-    full_execution_context_t *c = NULL;
+    struct vcpu_guest_context *c = NULL;
     unsigned long vcpu = setdomaininfo->exec_domain;
     struct exec_domain *ed; 
 
     if ( (vcpu >= MAX_VIRT_CPUS) || ((ed = p->exec_domain[vcpu]) == NULL) )
         return -EINVAL;
     
-    if (test_bit(DF_CONSTRUCTED, &p->d_flags) && 
-        !test_bit(EDF_CTRLPAUSE, &ed->ed_flags))
+    if (test_bit(DF_CONSTRUCTED, &p->flags) && 
+        !test_bit(EDF_CTRLPAUSE, &ed->flags))
         return -EINVAL;
 
-    if ( (c = xmalloc(full_execution_context_t)) == NULL )
+    if ( (c = xmalloc(struct vcpu_guest_context)) == NULL )
         return -ENOMEM;
 
     if ( copy_from_user(c, setdomaininfo->ctxt, sizeof(*c)) )
@@ -279,11 +243,10 @@ int set_info_guest(struct domain *p, dom0_setdomaininfo_t *setdomaininfo)
     if ( (rc = arch_set_info_guest(ed, c)) != 0 )
         goto out;
 
-    set_bit(DF_CONSTRUCTED, &p->d_flags);
+    set_bit(DF_CONSTRUCTED, &p->flags);
 
  out:    
-    if ( c != NULL )
-        xfree(c);
+    xfree(c);
     return rc;
 }
 
@@ -292,12 +255,12 @@ int set_info_guest(struct domain *p, dom0_setdomaininfo_t *setdomaininfo)
  * than domain 0. ie. the domains that are being built by the userspace dom0
  * domain builder.
  */
-long do_boot_vcpu(unsigned long vcpu, full_execution_context_t *ctxt) 
+long do_boot_vcpu(unsigned long vcpu, struct vcpu_guest_context *ctxt) 
 {
     struct domain *d = current->domain;
     struct exec_domain *ed;
     int rc = 0;
-    full_execution_context_t *c;
+    struct vcpu_guest_context *c;
 
     if ( (vcpu >= MAX_VIRT_CPUS) || (d->exec_domain[vcpu] != NULL) )
         return -EINVAL;
@@ -305,7 +268,7 @@ long do_boot_vcpu(unsigned long vcpu, full_execution_context_t *ctxt)
     if ( alloc_exec_domain_struct(d, vcpu) == NULL )
         return -ENOMEM;
 
-    if ( (c = xmalloc(full_execution_context_t)) == NULL )
+    if ( (c = xmalloc(struct vcpu_guest_context)) == NULL )
     {
         rc = -ENOMEM;
         goto out;
@@ -331,15 +294,14 @@ long do_boot_vcpu(unsigned long vcpu, full_execution_context_t *ctxt)
     sched_add_domain(ed);
 
     /* domain_unpause_by_systemcontroller */
-    if ( test_and_clear_bit(EDF_CTRLPAUSE, &ed->ed_flags) )
+    if ( test_and_clear_bit(EDF_CTRLPAUSE, &ed->flags) )
         domain_wake(ed);
 
     xfree(c);
     return 0;
 
  out:
-    if ( c != NULL )
-        xfree(c);
+    xfree(c);
     arch_free_exec_domain_struct(d->exec_domain[vcpu]);
     d->exec_domain[vcpu] = NULL;
     return rc;

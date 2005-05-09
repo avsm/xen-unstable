@@ -388,11 +388,11 @@ static void __init start_of_day(void)
     if ( smp_found_config ) 
         get_smp_config();
 #endif
+    init_apic_mappings(); /* make APICs addressable in our pagetables. */
     scheduler_init();	
     init_IRQ();  /* installs simple interrupt wrappers. Starts HZ clock. */
     trap_init();
     time_init(); /* installs software handler for HZ clock. */
-    init_apic_mappings(); /* make APICs addressable in our pagetables. */
 
     arch_init_memory();
 
@@ -581,7 +581,7 @@ void __init __start_xen(multiboot_info_t *mbi)
     if ( dom0 == NULL )
         panic("Error creating domain 0\n");
 
-    set_bit(DF_PRIVILEGED, &dom0->d_flags);
+    set_bit(DF_PRIVILEGED, &dom0->flags);
 
     /* Grab the DOM0 command line. Skip past the image name. */
     cmdline = (char *)(mod[0].string ? __va(mod[0].string) : NULL);

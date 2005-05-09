@@ -100,7 +100,7 @@ struct host_execution_env {
 
 #define round_pgdown(_p) ((_p)&PAGE_MASK) /* coped from domain.c */
 
-int vmx_setup_platform(struct exec_domain *d, execution_context_t *context)
+int vmx_setup_platform(struct exec_domain *d, struct cpu_user_regs *regs)
 {
     int i;
     unsigned int n;
@@ -108,15 +108,15 @@ int vmx_setup_platform(struct exec_domain *d, execution_context_t *context)
     struct e820entry *e820p;
     unsigned long gpfn = 0;
 
-    context->ebx = 0;   /* Linux expects ebx to be 0 for boot proc */
+    regs->ebx = 0;   /* Linux expects ebx to be 0 for boot proc */
 
-    n = context->ecx;
+    n = regs->ecx;
     if (n > 32) {
         VMX_DBG_LOG(DBG_LEVEL_1, "Too many e820 entries: %d", n);
         return -1;
     }
 
-    addr = context->edi;
+    addr = regs->edi;
     offset = (addr & ~PAGE_MASK);
     addr = round_pgdown(addr);
     mpfn = phys_to_machine_mapping(addr >> PAGE_SHIFT);
@@ -160,32 +160,16 @@ void vmx_do_launch(struct exec_domain *ed)
     unsigned int tr, cpu, error = 0;
     struct host_execution_env host_env;
     struct Xgt_desc_struct desc;
-    struct list_head *list_ent;
-    unsigned long i, pfn = 0;
+    unsigned long pfn = 0;
     struct pfn_info *page;
-    execution_context_t *ec = get_execution_context();
-    struct domain *d = ed->domain;
+    struct cpu_user_regs *regs = get_cpu_user_regs();
 
-    cpu =  smp_processor_id();
-    d->arch.min_pfn = d->arch.max_pfn = 0;
-
-    spin_lock(&d->page_alloc_lock);
-    list_ent = d->page_list.next;
-
-    for ( i = 0; list_ent != &d->page_list; i++ )
-    {
-        pfn = list_entry(list_ent, struct pfn_info, list) - frame_table;
-        d->arch.min_pfn = min(d->arch.min_pfn, pfn);
-        d->arch.max_pfn = max(d->arch.max_pfn, pfn);
-        list_ent = frame_table[pfn].list.next;
-    }
-
-    spin_unlock(&d->page_alloc_lock);
+    cpu = smp_processor_id();
 
     page = (struct pfn_info *) alloc_domheap_page(NULL);
     pfn = (unsigned long) (page - frame_table);
 
-    vmx_setup_platform(ed, ec);
+    vmx_setup_platform(ed, regs);
 
     __asm__ __volatile__ ("sgdt  (%0) \n" :: "a"(&desc) : "memory");
     host_env.gdtr_limit = desc.size;
@@ -218,8 +202,8 @@ void vmx_do_launch(struct exec_domain *ed)
  * Initially set the same environement as host.
  */
 static inline int 
-construct_init_vmcs_guest(execution_context_t *context, 
-                          full_execution_context_t *full_context,
+construct_init_vmcs_guest(struct cpu_user_regs *regs, 
+                          struct vcpu_guest_context *ctxt,
                           struct host_execution_env *host_env)
 {
     int error = 0;
@@ -248,12 +232,12 @@ construct_init_vmcs_guest(execution_context_t *context,
     error |= __vmwrite(CR3_TARGET_COUNT, 0);
 
     /* Guest Selectors */
-    error |= __vmwrite(GUEST_CS_SELECTOR, context->cs);
-    error |= __vmwrite(GUEST_ES_SELECTOR, context->es);
-    error |= __vmwrite(GUEST_SS_SELECTOR, context->ss);
-    error |= __vmwrite(GUEST_DS_SELECTOR, context->ds);
-    error |= __vmwrite(GUEST_FS_SELECTOR, context->fs);
-    error |= __vmwrite(GUEST_GS_SELECTOR, context->gs);
+    error |= __vmwrite(GUEST_CS_SELECTOR, regs->cs);
+    error |= __vmwrite(GUEST_ES_SELECTOR, regs->es);
+    error |= __vmwrite(GUEST_SS_SELECTOR, regs->ss);
+    error |= __vmwrite(GUEST_DS_SELECTOR, regs->ds);
+    error |= __vmwrite(GUEST_FS_SELECTOR, regs->fs);
+    error |= __vmwrite(GUEST_GS_SELECTOR, regs->gs);
 
     /* Guest segment Limits */
     error |= __vmwrite(GUEST_CS_LIMIT, GUEST_SEGMENT_LIMIT);
@@ -284,10 +268,10 @@ construct_init_vmcs_guest(execution_context_t *context,
     arbytes.fields.seg_type = 0xb;          /* type = 0xb */
     error |= __vmwrite(GUEST_CS_AR_BYTES, arbytes.bytes);
 
-    error |= __vmwrite(GUEST_GDTR_BASE, context->edx);
-    context->edx = 0;
-    error |= __vmwrite(GUEST_GDTR_LIMIT, context->eax);
-    context->eax = 0;
+    error |= __vmwrite(GUEST_GDTR_BASE, regs->edx);
+    regs->edx = 0;
+    error |= __vmwrite(GUEST_GDTR_LIMIT, regs->eax);
+    regs->eax = 0;
 
     arbytes.fields.s = 0;                   /* not code or data segement */
     arbytes.fields.seg_type = 0x2;          /* LTD */
@@ -318,10 +302,10 @@ construct_init_vmcs_guest(execution_context_t *context,
     error |= __vmwrite(GUEST_GS_BASE, host_env->ds_base);
     error |= __vmwrite(GUEST_IDTR_BASE, host_env->idtr_base);
 
-    error |= __vmwrite(GUEST_ESP, context->esp);
-    error |= __vmwrite(GUEST_EIP, context->eip);
+    error |= __vmwrite(GUEST_ESP, regs->esp);
+    error |= __vmwrite(GUEST_EIP, regs->eip);
 
-    eflags = context->eflags & ~VMCS_EFLAGS_RESERVED_0; /* clear 0s */
+    eflags = regs->eflags & ~VMCS_EFLAGS_RESERVED_0; /* clear 0s */
     eflags |= VMCS_EFLAGS_RESERVED_1; /* set 1s */
 
     error |= __vmwrite(GUEST_EFLAGS, eflags);
@@ -396,8 +380,8 @@ static inline int construct_vmcs_host(struct host_execution_env *host_env)
  */
 
 int construct_vmcs(struct arch_vmx_struct *arch_vmx,
-                   execution_context_t *context,
-                   full_execution_context_t *full_context,
+                   struct cpu_user_regs *regs,
+                   struct vcpu_guest_context *ctxt,
                    int use_host_env)
 {
     int error;
@@ -431,7 +415,7 @@ int construct_vmcs(struct arch_vmx_struct *arch_vmx,
         return -EINVAL;         
     }
     /* guest selectors */
-    if ((error = construct_init_vmcs_guest(context, full_context, &host_env))) {
+    if ((error = construct_init_vmcs_guest(regs, ctxt, &host_env))) {
         printk("construct_vmcs: construct_vmcs_guest failed\n");
         return -EINVAL;         
     }       

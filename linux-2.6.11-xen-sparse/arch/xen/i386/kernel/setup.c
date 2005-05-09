@@ -40,6 +40,7 @@
 #include <linux/efi.h>
 #include <linux/init.h>
 #include <linux/edd.h>
+#include <linux/kernel.h>
 #include <linux/percpu.h>
 #include <linux/notifier.h>
 #include <video/edid.h>
@@ -59,14 +60,10 @@
 /* Allows setting of maximum possible memory size  */
 static unsigned long xen_override_max_pfn;
 
-extern struct notifier_block *panic_notifier_list;
 static int xen_panic_event(struct notifier_block *, unsigned long, void *);
 static struct notifier_block xen_panic_block = {
-	xen_panic_event,
-        NULL,
-        0 /* try to go last */
+	xen_panic_event, NULL, 0 /* try to go last */
 };
-
 
 int disable_pse __initdata = 0;
 
@@ -782,7 +779,7 @@ static void __init parse_cmdline_early (char ** cmdline_p)
 			noexec_setup(from + 7);
 
 
-#ifdef  CONFIG_X86_SMP
+#ifdef  CONFIG_X86_MPPARSE
 		/*
 		 * If the BIOS enumerates physical processors before logical,
 		 * maxcpus=N at enumeration-time can be used to disable HT.
@@ -900,6 +897,7 @@ efi_find_max_pfn(unsigned long start, unsigned long end, void *arg)
 	}
 	return 0;
 }
+
 
 /*
  * Find the highest page frame number we have available
@@ -1134,12 +1132,6 @@ static unsigned long __init setup_memory(void)
 	 * Reserve low memory region for sleep support.
 	 */
 	acpi_reserve_bootmem();
-#endif
-#ifdef CONFIG_X86_FIND_SMP_CONFIG
-	/*
-	 * Find and reserve possible boot-time SMP configuration:
-	 */
-	find_smp_config();
 #endif
 
 #ifdef CONFIG_BLK_DEV_INITRD
@@ -1397,22 +1389,21 @@ static void set_mca_bus(int x) { }
  */
 void __init setup_arch(char **cmdline_p)
 {
-	int i,j;
+	int i, j;
 	physdev_op_t op;
 	unsigned long max_low_pfn;
 
 	/* Force a quick death if the kernel panics. */
 	extern int panic_timeout;
-	if ( panic_timeout == 0 )
+	if (panic_timeout == 0)
 		panic_timeout = 1;
 
 	/* Register a call for panic conditions. */
 	notifier_chain_register(&panic_notifier_list, &xen_panic_block);
 
-	HYPERVISOR_vm_assist(
-		VMASST_CMD_enable, VMASST_TYPE_4gb_segments);
-	HYPERVISOR_vm_assist(
-		VMASST_CMD_enable, VMASST_TYPE_writable_pagetables);
+	HYPERVISOR_vm_assist(VMASST_CMD_enable, VMASST_TYPE_4gb_segments);
+	HYPERVISOR_vm_assist(VMASST_CMD_enable,
+			     VMASST_TYPE_writable_pagetables);
 
 	memcpy(&boot_cpu_data, &new_cpu_data, sizeof(new_cpu_data));
 	early_cpu_init();
@@ -1478,7 +1469,8 @@ void __init setup_arch(char **cmdline_p)
 	init_mm.start_code = (unsigned long) _text;
 	init_mm.end_code = (unsigned long) _etext;
 	init_mm.end_data = (unsigned long) _edata;
-	init_mm.brk = (PFN_UP(__pa(xen_start_info.pt_base)) + xen_start_info.nr_pt_frames) << PAGE_SHIFT;
+	init_mm.brk = (PFN_UP(__pa(xen_start_info.pt_base)) +
+		       xen_start_info.nr_pt_frames) << PAGE_SHIFT;
 
 	/* XEN: This is nonsense: kernel may not even be contiguous in RAM. */
 	/*code_resource.start = virt_to_phys(_text);*/
@@ -1505,13 +1497,20 @@ void __init setup_arch(char **cmdline_p)
 #endif
 	paging_init();
 
+#ifdef CONFIG_X86_FIND_SMP_CONFIG
+	/*
+	 * Find and reserve possible boot-time SMP configuration:
+	 */
+	find_smp_config();
+#endif
+
 	/* Make sure we have a correctly sized P->M table. */
 	if (max_pfn != xen_start_info.nr_pages) {
 		phys_to_machine_mapping = alloc_bootmem_low_pages(
 			max_pfn * sizeof(unsigned long));
 
 		if (max_pfn > xen_start_info.nr_pages) {
-			/* set to INVALID_P2M_ENTRY */                        
+			/* set to INVALID_P2M_ENTRY */
 			memset(phys_to_machine_mapping, ~0,
 				max_pfn * sizeof(unsigned long));
 			memcpy(phys_to_machine_mapping,
@@ -1568,6 +1567,10 @@ void __init setup_arch(char **cmdline_p)
 	if (efi_enabled)
 		efi_map_memmap();
 
+	op.cmd             = PHYSDEVOP_SET_IOPL;
+	op.u.set_iopl.iopl = current->thread.io_pl = 1;
+	HYPERVISOR_physdev_op(&op);
+
 	/*
 	 * Parse the ACPI tables for possible boot-time SMP configuration.
 	 */
@@ -1584,10 +1587,6 @@ void __init setup_arch(char **cmdline_p)
 	noirqdebug_setup("");
 
 	register_memory();
-
-	op.cmd             = PHYSDEVOP_SET_IOPL;
-	op.u.set_iopl.iopl = current->thread.io_pl = 1;
-	HYPERVISOR_physdev_op(&op);
 
 	if (xen_start_info.flags & SIF_INITDOMAIN) {
 		if (!(xen_start_info.flags & SIF_PRIVILEGED))
@@ -1617,15 +1616,13 @@ void __init setup_arch(char **cmdline_p)
 	}
 }
 
-
 static int
 xen_panic_event(struct notifier_block *this, unsigned long event, void *ptr)
 {
-     HYPERVISOR_crash();    
-     /* we're never actually going to get here... */
-     return NOTIFY_DONE;
+	HYPERVISOR_crash();    
+	/* we're never actually going to get here... */
+	return NOTIFY_DONE;
 }
-
 
 #include "setup_arch_post.h"
 /*

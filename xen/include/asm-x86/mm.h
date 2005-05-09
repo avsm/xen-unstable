@@ -150,7 +150,7 @@ extern void invalidate_shadow_ldt(struct exec_domain *d);
 extern int shadow_remove_all_write_access(
     struct domain *d, unsigned long gpfn, unsigned long gmfn);
 extern u32 shadow_remove_all_access( struct domain *d, unsigned long gmfn);
-extern int _shadow_mode_enabled(struct domain *d);
+extern int _shadow_mode_refcounts(struct domain *d);
 
 static inline void put_page(struct pfn_info *page)
 {
@@ -182,8 +182,8 @@ static inline int get_page(struct pfn_info *page,
              unlikely((nx & PGC_count_mask) == 0) || /* Count overflow? */
              unlikely(d != _domain) )                /* Wrong owner? */
         {
-            if ( !_shadow_mode_enabled(domain) )
-                DPRINTK("Error pfn %p: rd=%p, od=%p, caf=%08x, taf=%08x\n",
+            if ( !_shadow_mode_refcounts(domain) )
+                DPRINTK("Error pfn %lx: rd=%p, od=%p, caf=%08x, taf=%08x\n",
                         page_to_pfn(page), domain, unpickle_domptr(d),
                         x, page->u.inuse.type_info);
             return 0;
@@ -263,9 +263,9 @@ static inline unsigned long phys_to_machine_mapping(unsigned long pfn)
     unsigned long mfn;
     l1_pgentry_t pte;
 
-    if (!__copy_from_user(&pte, (__phys_to_machine_mapping + pfn),
-			  sizeof(pte))
-	&& (l1e_get_flags(pte) & _PAGE_PRESENT) )
+    if ( (__copy_from_user(&pte, &__phys_to_machine_mapping[pfn],
+                           sizeof(pte)) == 0) &&
+         (l1e_get_flags(pte) & _PAGE_PRESENT) )
 	mfn = l1e_get_pfn(pte);
     else
 	mfn = INVALID_MFN;
@@ -301,6 +301,8 @@ struct ptwr_info {
     unsigned int l2_idx; /* NB. Only used for PTWR_PT_ACTIVE. */
     /* Info about last ptwr update batch. */
     unsigned int prev_nr_updates;
+    /* Exec domain which created writable mapping. */
+    struct exec_domain *ed;
 };
 
 #define PTWR_PT_ACTIVE 0
@@ -313,14 +315,21 @@ int  ptwr_init(struct domain *);
 void ptwr_destroy(struct domain *);
 void ptwr_flush(struct domain *, const int);
 int  ptwr_do_page_fault(struct domain *, unsigned long);
+int  revalidate_l1(struct domain *, l1_pgentry_t *, l1_pgentry_t *);
 
 #define cleanup_writable_pagetable(_d)                                      \
     do {                                                                    \
-        if ( unlikely(VM_ASSIST((_d), VMASST_TYPE_writable_pagetables)) ) { \
-            if ( (_d)->arch.ptwr[PTWR_PT_ACTIVE].l1va )                     \
-                ptwr_flush((_d), PTWR_PT_ACTIVE);                           \
-            if ( (_d)->arch.ptwr[PTWR_PT_INACTIVE].l1va )                   \
-                ptwr_flush((_d), PTWR_PT_INACTIVE);                         \
+        if ( likely(VM_ASSIST((_d), VMASST_TYPE_writable_pagetables)) )     \
+        {                                                                   \
+            if ( likely(!shadow_mode_enabled(_d)) )                         \
+            {                                                               \
+                if ( (_d)->arch.ptwr[PTWR_PT_ACTIVE].l1va )                 \
+                    ptwr_flush((_d), PTWR_PT_ACTIVE);                       \
+                if ( (_d)->arch.ptwr[PTWR_PT_INACTIVE].l1va )               \
+                    ptwr_flush((_d), PTWR_PT_INACTIVE);                     \
+            }                                                               \
+            else                                                            \
+                shadow_sync_all(_d);                                        \
         }                                                                   \
     } while ( 0 )
 
@@ -328,9 +337,9 @@ int audit_adjust_pgtables(struct domain *d, int dir, int noisy);
 
 #ifndef NDEBUG
 
-#define AUDIT_ALREADY_LOCKED ( 1u << 0 )
-#define AUDIT_ERRORS_OK      ( 1u << 1 )
-#define AUDIT_QUIET          ( 1u << 2 )
+#define AUDIT_SHADOW_ALREADY_LOCKED ( 1u << 0 )
+#define AUDIT_ERRORS_OK             ( 1u << 1 )
+#define AUDIT_QUIET                 ( 1u << 2 )
 
 void _audit_domain(struct domain *d, int flags);
 #define audit_domain(_d) _audit_domain((_d), AUDIT_ERRORS_OK)
