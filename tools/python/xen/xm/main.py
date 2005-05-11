@@ -661,7 +661,8 @@ class ProgConsole(Prog):
             self.err("No console information")
         port = sxp.child_value(console, "console_port")
         from xen.util import console_client
-        console_client.connect("localhost", int(port))
+        path = "/var/lib/xend/console-%s" % port
+        console_client.connect("localhost", int(port), path=path)
 
 xm.prog(ProgConsole)
 
