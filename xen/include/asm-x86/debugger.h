@@ -17,6 +17,14 @@
  *  hook to drop into a debug session. It can also be used to hook off
  *  deliberately caused traps (which you then handle and return non-zero)
  *  but really these should be hooked off 'debugger_trap_entry'.
+ *
+ * 3. debugger_trap_immediate():
+ *  Called if we want to drop into a debugger now.  This is essentially the
+ *  same as debugger_trap_fatal, except that we use the current register state
+ *  rather than the state which was in effect when we took the trap.
+ *  Essentially, if we're dying because of an unhandled exception, we call
+ *  debugger_trap_fatal; if we're dying because of a panic() we call
+ *  debugger_trap_immediate().
  */
 
 #ifndef __X86_DEBUGGER_H__
@@ -30,89 +38,73 @@
 #define DEBUGGER_trap_fatal(_v, _r) \
     if ( debugger_trap_fatal(_v, _r) ) return EXCRET_fault_fixed;
 
-#ifdef XEN_DEBUGGER
+#if defined(CRASH_DEBUG)
 
-#include <asm/pdb.h>
-
-static inline int debugger_trap_entry(
-    unsigned int vector, struct xen_regs *regs)
-{
-    int ret = 0;
-
-    switch ( vector )
-    {
-    case TRAP_debug:
-        if ( pdb_initialized )
-        {
-            pdb_handle_debug_trap(regs, regs->error_code);
-            ret = 1; /* early exit */
-        }
-        break;
-
-    case TRAP_int3:
-        if ( pdb_initialized && (pdb_handle_exception(vector, regs) == 0) )
-            ret = 1; /* early exit */
-        break;
-
-    case TRAP_gp_fault:        
-        if ( (VM86_MODE(regs) || !RING_0(regs)) &&
-             ((regs->error_code & 3) == 2) &&
-             pdb_initialized && (pdb_ctx.system_call != 0) )
-        {
-            unsigned long cr3 = read_cr3();
-            if ( cr3 == pdb_ctx.ptbr )
-                pdb_linux_syscall_enter_bkpt(
-                    regs, regs->error_code, 
-                    current->thread.traps + (regs->error_code>>3));
-        }
-        break;
-    }
-
-    return ret;
-}
+extern int __trap_to_cdb(struct cpu_user_regs *r);
+#define debugger_trap_entry(_v, _r) (0)
 
 static inline int debugger_trap_fatal(
-    unsigned int vector, struct xen_regs *regs)
+    unsigned int vector, struct cpu_user_regs *regs)
 {
-    int ret = 0;
+    (void)__trap_to_cdb(regs);
+    return (vector == TRAP_int3); /* int3 is harmless */
+}
 
+/* Int3 is a trivial way to gather cpu_user_regs context. */
+#define debugger_trap_immediate() __asm__ __volatile__ ( "int3" );
+
+#elif defined(DOMU_DEBUG)
+
+#include <xen/softirq.h>
+
+static inline int debugger_trap_entry(
+    unsigned int vector, struct cpu_user_regs *regs)
+{
+    struct exec_domain *ed = current;
+
+    if ( !KERNEL_MODE(ed, regs) || (ed->domain->domain_id == 0) )
+        return 0;
+    
     switch ( vector )
     {
-    case TRAP_page_fault:
-        if ( pdb_page_fault_possible )
-        {
-            pdb_page_fault = 1;
-            /* make eax & edx valid to complete the instruction */
-            regs->eax = (long)&pdb_page_fault_scratch;
-            regs->edx = (long)&pdb_page_fault_scratch;
-            ret = 1; /* exit - do not crash! */
-        }
-        break;
+    case TRAP_int3:
+    case TRAP_debug:
+        set_bit(_VCPUF_ctrl_pause, &ed->vcpu_flags);
+        raise_softirq(SCHEDULE_SOFTIRQ);
+        return 1;
     }
 
-    return ret;
+    return 0;
 }
+
+#define debugger_trap_fatal(_v, _r) (0)
+#define debugger_trap_immediate()
+
 
 #elif 0
 
-extern int kdb_trap(int, int, struct xen_regs *);
+extern int kdb_trap(int, int, struct cpu_user_regs *);
 
 static inline int debugger_trap_entry(
-    unsigned int vector, struct xen_regs *regs)
+    unsigned int vector, struct cpu_user_regs *regs)
 {
     return 0;
 }
 
 static inline int debugger_trap_fatal(
-    unsigned int vector, struct xen_regs *regs)
+    unsigned int vector, struct cpu_user_regs *regs)
 {
     return kdb_trap(vector, 0, regs);
 }
+
+/* Int3 is a trivial way to gather cpu_user_regs context. */
+#define debugger_trap_immediate() __asm__ __volatile__ ( "int3" );
 
 #else
 
 #define debugger_trap_entry(_v, _r) (0)
 #define debugger_trap_fatal(_v, _r) (0)
+#define debugger_trap_immediate()
 
 #endif
 

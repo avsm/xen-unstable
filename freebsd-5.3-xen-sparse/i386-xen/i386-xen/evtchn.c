@@ -31,8 +31,9 @@ static struct mtx irq_mapping_update_lock;
 static int evtchn_to_irq[NR_EVENT_CHANNELS];
 static int irq_to_evtchn[NR_IRQS];
 
-/* IRQ <-> VIRQ mapping. */
-static int virq_to_irq[NR_VIRQS];
+static int virq_to_irq[MAX_VIRT_CPUS][NR_VIRQS];
+static int ipi_to_evtchn[MAX_VIRT_CPUS][NR_VIRQS];
+
 
 /* Reference counts for bindings to IRQs. */
 static int irq_bindcount[NR_IRQS];
@@ -57,6 +58,7 @@ evtchn_do_upcall(struct intrframe *frame)
     int            irq, owned;
     unsigned long  flags;
     shared_info_t *s = HYPERVISOR_shared_info;
+    vcpu_info_t   *vcpu_info = &s->vcpu_data[smp_processor_id()];
 
     local_irq_save(flags);
 
@@ -64,7 +66,7 @@ evtchn_do_upcall(struct intrframe *frame)
     {
         s->vcpu_data[0].evtchn_upcall_pending = 0;
         /* NB. No need for a barrier here -- XCHG is a barrier on x86. */
-        l1 = xen_xchg(&s->evtchn_pending_sel, 0);
+        l1 = xen_xchg(&vcpu_info->evtchn_pending_sel, 0);
         while ( (l1i = ffs(l1)) != 0 )
         {
             l1i--;
@@ -77,17 +79,21 @@ evtchn_do_upcall(struct intrframe *frame)
                 l2 &= ~(1 << l2i);
             
                 port = (l1i << 5) + l2i;
-		if ((owned = mtx_owned(&sched_lock)) != 0)
-		    mtx_unlock_spin_flags(&sched_lock, MTX_QUIET);
-                if ( (irq = evtchn_to_irq[port]) != -1 ) {
+		irq = evtchn_to_irq[port];
+#ifdef SMP		
+		if (irq == PCPU_GET(cpuast)) 
+			continue;
+#endif
+                if ( (owned = mtx_owned(&sched_lock)) != 0 )
+                    mtx_unlock_spin_flags(&sched_lock, MTX_QUIET);
+                if ( irq != -1 ) {
 		    struct intsrc *isrc = intr_lookup_source(irq);
 		    intr_execute_handlers(isrc, frame);
-
 		} else {
                     evtchn_device_upcall(port);
 		}
-		if (owned)
-		    mtx_lock_spin_flags(&sched_lock, MTX_QUIET);
+                if ( owned )
+                    mtx_lock_spin_flags(&sched_lock, MTX_QUIET);                    
             }
         }
     }
@@ -120,7 +126,7 @@ bind_virq_to_irq(int virq)
 
     mtx_lock(&irq_mapping_update_lock);
 
-    if ( (irq = virq_to_irq[virq]) == -1 )
+    if ( (irq = PCPU_GET(virq_to_irq)[virq]) == -1 )
     {
         op.cmd              = EVTCHNOP_bind_virq;
         op.u.bind_virq.virq = virq;
@@ -132,7 +138,7 @@ bind_virq_to_irq(int virq)
         evtchn_to_irq[evtchn] = irq;
         irq_to_evtchn[irq]    = evtchn;
 
-        virq_to_irq[virq] = irq;
+        PCPU_GET(virq_to_irq)[virq] = irq;
     }
 
     irq_bindcount[irq]++;
@@ -146,7 +152,7 @@ void
 unbind_virq_from_irq(int virq)
 {
     evtchn_op_t op;
-    int irq    = virq_to_irq[virq];
+    int irq    = PCPU_GET(virq_to_irq)[virq];
     int evtchn = irq_to_evtchn[irq];
 
     mtx_lock(&irq_mapping_update_lock);
@@ -161,7 +167,64 @@ unbind_virq_from_irq(int virq)
 
         evtchn_to_irq[evtchn] = -1;
         irq_to_evtchn[irq]    = -1;
-        virq_to_irq[virq]     = -1;
+        PCPU_GET(virq_to_irq)[virq]     = -1;
+    }
+
+    mtx_unlock(&irq_mapping_update_lock);
+}
+
+
+int 
+bind_ipi_on_cpu_to_irq(int cpu, int ipi)
+{
+    evtchn_op_t op;
+    int evtchn, irq;
+
+    mtx_lock(&irq_mapping_update_lock);
+
+    if ( (evtchn = PCPU_GET(ipi_to_evtchn)[ipi]) == 0 )
+    {
+        op.cmd                 = EVTCHNOP_bind_ipi;
+        op.u.bind_ipi.ipi_edom = cpu;
+        if ( HYPERVISOR_event_channel_op(&op) != 0 )
+            panic("Failed to bind virtual IPI %d on cpu %d\n", ipi, cpu);
+        evtchn = op.u.bind_ipi.port;
+
+        irq = find_unbound_irq();
+        evtchn_to_irq[evtchn] = irq;
+        irq_to_evtchn[irq]    = evtchn;
+
+        PCPU_GET(ipi_to_evtchn)[ipi] = evtchn;
+    } else
+	irq = evtchn_to_irq[evtchn];
+
+    irq_bindcount[irq]++;
+
+    mtx_unlock(&irq_mapping_update_lock);
+
+    return irq;
+}
+
+void 
+unbind_ipi_on_cpu_from_irq(int cpu, int ipi)
+{
+    evtchn_op_t op;
+    int evtchn = PCPU_GET(ipi_to_evtchn)[ipi];
+    int irq    = irq_to_evtchn[evtchn];
+
+    mtx_lock(&irq_mapping_update_lock);
+
+    if ( --irq_bindcount[irq] == 0 )
+    {
+	op.cmd          = EVTCHNOP_close;
+	op.u.close.dom  = DOMID_SELF;
+	op.u.close.port = evtchn;
+	if ( HYPERVISOR_event_channel_op(&op) != 0 )
+	    panic("Failed to unbind virtual IPI %d on cpu %d\n", ipi, cpu);
+
+        evtchn_to_irq[evtchn] = -1;
+        irq_to_evtchn[irq]    = -1;
+	PCPU_GET(ipi_to_evtchn)[ipi] = 0;
     }
 
     mtx_unlock(&irq_mapping_update_lock);
@@ -451,12 +514,12 @@ static struct hw_interrupt_type pirq_type = {
 };
 #endif
 
-
+#if 0
 static void 
 misdirect_interrupt(void *sc)
 {
 }
-
+#endif
 void irq_suspend(void)
 {
     int virq, irq, evtchn;
@@ -464,7 +527,7 @@ void irq_suspend(void)
     /* Unbind VIRQs from event channels. */
     for ( virq = 0; virq < NR_VIRQS; virq++ )
     {
-        if ( (irq = virq_to_irq[virq]) == -1 )
+        if ( (irq = PCPU_GET(virq_to_irq)[virq]) == -1 )
             continue;
         evtchn = irq_to_evtchn[irq];
 
@@ -493,7 +556,7 @@ void irq_resume(void)
 
     for ( virq = 0; virq < NR_VIRQS; virq++ )
     {
-        if ( (irq = virq_to_irq[virq]) == -1 )
+        if ( (irq = PCPU_GET(virq_to_irq)[virq]) == -1 )
             continue;
 
         /* Get a new binding from Xen. */
@@ -512,6 +575,21 @@ void irq_resume(void)
     }
 }
 
+void
+ap_evtchn_init(int cpu)
+{
+    int i;
+
+    /* XXX -- expedience hack */
+    PCPU_SET(virq_to_irq, (int  *)&virq_to_irq[cpu]);
+    PCPU_SET(ipi_to_evtchn, (int *)&ipi_to_evtchn[cpu]);
+
+    /* No VIRQ -> IRQ mappings. */
+    for ( i = 0; i < NR_VIRQS; i++ )
+        PCPU_GET(virq_to_irq)[i] = -1;
+}
+
+
 static void 
 evtchn_init(void *dummy __unused)
 {
@@ -519,17 +597,14 @@ evtchn_init(void *dummy __unused)
     struct xenpic *xp;
     struct xenpic_intsrc *pin;
 
-    /*
-     * xenpic_lock: in order to allow an interrupt to occur in a critical
-     * 	        section, to set pcpu->ipending (etc...) properly, we
-     *	        must be able to get the icu lock, so it can't be
-     *	        under witness.
-     */
-    mtx_init(&irq_mapping_update_lock, "xp", NULL, MTX_DEF);
+
+    /* XXX -- expedience hack */
+    PCPU_SET(virq_to_irq, (int *)&virq_to_irq[0]);
+    PCPU_SET(ipi_to_evtchn, (int *)&ipi_to_evtchn[0]);
 
     /* No VIRQ -> IRQ mappings. */
     for ( i = 0; i < NR_VIRQS; i++ )
-        virq_to_irq[i] = -1;
+        PCPU_GET(virq_to_irq)[i] = -1;
 
     /* No event-channel -> IRQ mappings. */
     for ( i = 0; i < NR_EVENT_CHANNELS; i++ )
@@ -572,9 +647,20 @@ evtchn_init(void *dummy __unused)
     }
 
 #endif
+#if 0
     (void) intr_add_handler("xb_mis", bind_virq_to_irq(VIRQ_MISDIRECT),
 	    	            (driver_intr_t *)misdirect_interrupt, 
 			    NULL, INTR_TYPE_MISC, NULL);
+
+#endif
 }
 
 SYSINIT(evtchn_init, SI_SUB_INTR, SI_ORDER_ANY, evtchn_init, NULL);
+    /*
+     * xenpic_lock: in order to allow an interrupt to occur in a critical
+     * 	        section, to set pcpu->ipending (etc...) properly, we
+     *	        must be able to get the icu lock, so it can't be
+     *	        under witness.
+     */
+
+MTX_SYSINIT(irq_mapping_update_lock, &irq_mapping_update_lock, "xp", MTX_DEF|MTX_NOWITNESS);

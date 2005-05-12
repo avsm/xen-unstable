@@ -6,6 +6,8 @@ import os.path
 import sys
 from getopt import getopt
 import socket
+import warnings
+warnings.filterwarnings('ignore', category=FutureWarning)
 
 from xen.xend import PrettyPrint
 from xen.xend import sxp
@@ -13,6 +15,31 @@ from xen.xend.XendClient import XendError, server
 from xen.xend.XendClient import main as xend_client_main
 from xen.xm import create, destroy, migrate, shutdown, sysrq
 from xen.xm.opts import *
+
+def unit(c):
+    if not c.isalpha():
+        return 0
+    base = 1
+    if c == 'G' or c == 'g': base = 1024 * 1024 * 1024
+    elif c == 'M' or c == 'm': base = 1024 * 1024
+    elif c == 'K' or c == 'k': base = 1024
+    else:
+        print 'ignoring unknown unit'
+    return base
+
+def int_unit(str, dest):
+    base = unit(str[-1])
+    if not base:
+        return int(str)
+
+    value = int(str[:-1])
+    dst_base = unit(dest)
+    if dst_base == 0:
+        dst_base = 1
+    if dst_base > base:
+        return value / (dst_base / base)
+    else:
+        return value * (base / dst_base)
 
 class Group:
 
@@ -315,8 +342,8 @@ class ProgList(Prog):
     name = "list"
     info = """List information about domains."""
 
-    short_options = 'l'
-    long_options = ['long']
+    short_options = 'lv'
+    long_options = ['long','vcpus']
 
     def help(self, args):
         if help:
@@ -325,11 +352,13 @@ class ProgList(Prog):
             Either all domains or the domains given.
 
             -l, --long   Get more detailed information.
+            -v, --vcpus  Show VCPU to CPU mapping.
             """
             return
         
     def main(self, args):
         use_long = 0
+        show_vcpus = 0
         (options, params) = getopt(args[1:],
                                    self.short_options,
                                    self.long_options)
@@ -337,6 +366,8 @@ class ProgList(Prog):
         for (k, v) in options:
             if k in ['-l', '--long']:
                 use_long = 1
+            if k in ['-v', '--vcpus']:
+                show_vcpus = 1
                 
         if n == 0:
             doms = server.xend_domains()
@@ -346,11 +377,13 @@ class ProgList(Prog):
             
         if use_long:
             self.long_list(doms)
+        elif show_vcpus:
+            self.show_vcpus(doms)
         else:
             self.brief_list(doms)
 
     def brief_list(self, doms):
-        print 'Name              Id  Mem(MB)  CPU  State  Time(s)  Console'
+        print 'Name              Id  Mem(MB)  CPU VCPU(s)  State  Time(s)  Console'
         for dom in doms:
             info = server.xend_domain(dom)
             d = {}
@@ -358,6 +391,7 @@ class ProgList(Prog):
             d['name'] = sxp.child_value(info, 'name', '??')
             d['mem'] = int(sxp.child_value(info, 'memory', '0'))
             d['cpu'] = int(sxp.child_value(info, 'cpu', '0'))
+            d['vcpus'] = int(sxp.child_value(info, 'vcpus', '0'))
             d['state'] = sxp.child_value(info, 'state', '??')
             d['cpu_time'] = float(sxp.child_value(info, 'cpu_time', '0'))
             console = sxp.child(info, 'console')
@@ -365,8 +399,26 @@ class ProgList(Prog):
                 d['port'] = sxp.child_value(console, 'console_port')
             else:
                 d['port'] = ''
-            print ("%(name)-16s %(dom)3d  %(mem)7d  %(cpu)3d  %(state)5s  %(cpu_time)7.1f    %(port)4s"
+            print ("%(name)-16s %(dom)3d  %(mem)7d  %(cpu)3d  %(vcpus)5d   %(state)5s  %(cpu_time)7.1f     %(port)4s"
                    % d)
+
+    def show_vcpus(self, doms):
+        print 'Name              Id  VCPU  CPU  CPUMAP'
+        for dom in doms:
+            info = server.xend_domain(dom)
+            vcpu_to_cpu = sxp.child_value(info, 'vcpu_to_cpu', '?').replace('-','')
+            cpumap = sxp.child_value(info, 'cpumap', [])
+            mask = ((int(sxp.child_value(info, 'vcpus', '0')))**2) - 1
+            count = 0
+            for cpu in vcpu_to_cpu:
+                d = {}
+                d['name']   = sxp.child_value(info, 'name', '??')
+                d['dom']    = int(sxp.child_value(info, 'id', '-1'))
+                d['vcpu']   = int(count)
+                d['cpu']    = int(cpu)
+                d['cpumap'] = int(cpumap[count])&mask
+                count = count + 1
+                print ("%(name)-16s %(dom)3d  %(vcpu)4d  %(cpu)3d  0x%(cpumap)x" % d)
 
     def long_list(self, doms):
         for dom in doms:
@@ -449,17 +501,35 @@ xm.prog(ProgUnpause)
 class ProgPincpu(Prog):
     group = 'domain'
     name = "pincpu"
-    info = """Pin a domain to a cpu. """
+    info = """Set which cpus a VCPU can use. """
 
     def help(self, args):
-        print args[0],'DOM CPU'
-        print '\nPin domain DOM to cpu CPU.'
+        print args[0],'DOM VCPU CPUS'
+        print '\nSet which cpus VCPU in domain DOM can use.'
+
+    # convert list of cpus to bitmap integer value
+    def make_map(self, cpulist):
+        cpus = []
+        cpumap = 0
+        for c in cpulist.split(','):
+            if len(c) > 1:
+                (x,y) = c.split('-')
+                for i in range(int(x),int(y)+1):
+                    cpus.append(int(i))
+            else:
+                cpus.append(int(c))
+        cpus.sort()
+        for c in cpus:
+            cpumap = cpumap | 1<<c
+
+        return cpumap
 
     def main(self, args):
-        if len(args) != 3: self.err("%s: Invalid argument(s)" % args[0])
-        dom = args[1]
-        cpu = int(args[2])
-        server.xend_domain_pincpu(dom, cpu)
+        if len(args) != 4: self.err("%s: Invalid argument(s)" % args[0])
+        dom  = args[1]
+        vcpu = int(args[2])
+        cpumap  = self.make_map(args[3]);
+        server.xend_domain_pincpu(dom, vcpu, cpumap)
 
 xm.prog(ProgPincpu)
 
@@ -475,7 +545,7 @@ class ProgMaxmem(Prog):
     def main(self, args):
         if len(args) != 3: self.err("%s: Invalid argument(s)" % args[0])
         dom = args[1]
-        mem = int(args[2])
+        mem = int_unit(args[2], 'm')
         server.xend_domain_maxmem_set(dom, mem)
 
 xm.prog(ProgMaxmem)
@@ -493,7 +563,7 @@ MEMORY_TARGET megabytes"""
     def main(self, args):
         if len(args) != 3: self.err("%s: Invalid argument(s)" % args[0])
         dom = args[1]
-        mem_target = int(args[2])
+        mem_target = int_unit(args[2], 'm')
         server.xend_domain_mem_target_set(dom, mem_target)
 
 xm.prog(ProgBalloon)
@@ -566,39 +636,22 @@ class ProgBvtslice(Prog):
 
 xm.prog(ProgBvtslice)
 
-
-class ProgAtropos(Prog):
+class ProgSedf(Prog):
     group = 'scheduler'
-    name= "atropos"
-    info = """Set atropos parameters."""
+    name= "sedf"
+    info = """Set simple EDF parameters."""
 
     def help(self, args):
-        print args[0], "DOM PERIOD SLICE LATENCY XTRATIME"
-        print "\nSet atropos parameters."
+        print args[0], "DOM PERIOD SLICE LATENCY EXTRATIME WEIGHT"
+        print "\nSet simple EDF parameters."
 
     def main(self, args):
-        if len(args) != 6: self.err("%s: Invalid argument(s)" % args[0])
-        dom = args[1]
-        v = map(int, args[2:6])
-        server.xend_domain_cpu_atropos_set(dom, *v)
+	if len(args) != 7: self.err("%s: Invalid argument(s)" % args[0])
+	dom = args[1]
+	v = map(int, args[2:7])
+	server.xend_domain_cpu_sedf_set(dom, *v)
 
-xm.prog(ProgAtropos)
-
-class ProgRrobin(Prog):
-    group = 'scheduler'
-    name = "rrobin"
-    info = """Set round robin slice."""
-
-    def help(self, args):
-        print args[0], "SLICE"
-        print "\nSet round robin scheduler slice."
-
-    def main(self, args):
-        if len(args) != 2: self.err("%s: Invalid argument(s)" % args[0])
-        rrslice = int(args[1])
-        server.xend_node_rrobin_set(rrslice)
-
-xm.prog(ProgRrobin)
+xm.prog(ProgSedf)
 
 class ProgInfo(Prog):
     group = 'host'
@@ -717,6 +770,23 @@ class ProgLog(Prog):
 
 xm.prog(ProgLog)
 
+class ProgVifCreditLimit(Prog):
+    group = 'vif'
+    name= "vif-limit"
+    info = """Limit the transmission rate of a virtual network interface."""
+
+    def help(self, args):
+        print args[0], "DOMAIN VIF CREDIT_IN_BYTES PERIOD_IN_USECS"
+        print "\nSet the credit limit of a virtual network interface."
+
+    def main(self, args):
+        if len(args) != 5: self.err("%s: Invalid argument(s)" % args[0])
+        dom = args[1]
+        v = map(int, args[2:5])
+        server.xend_domain_vif_limit(dom, *v)
+
+xm.prog(ProgVifCreditLimit)
+
 class ProgVifList(Prog):
     group = 'vif'
     name  = 'vif-list'
@@ -782,6 +852,28 @@ Create a virtual block device for a domain.
         server.xend_domain_device_create(dom, vbd)
 
 xm.prog(ProgVbdCreate)
+
+class ProgVbdRefresh(Prog):
+    group = 'vbd'
+    name  = 'vbd-refresh'
+    info = """Refresh a virtual block device for a domain"""
+
+    def help(self, args):
+        print args[0], "DOM DEV"
+        print """
+Refresh a virtual block device for a domain.
+
+  DEV     - idx field in the device information
+"""
+
+    def main(self, args):
+        if len(args) != 3: self.err("%s: Invalid argument(s)" % args[0])
+        dom = args[1]
+        dev = args[2]
+        server.xend_domain_device_refresh(dom, 'vbd', dev)
+
+xm.prog(ProgVbdRefresh)
+
 
 class ProgVbdDestroy(Prog):
     group = 'vbd'

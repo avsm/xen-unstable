@@ -1,7 +1,13 @@
 #ifndef __TYPES_H__
 #define __TYPES_H__
 
+#include <xen/config.h>
 #include <asm/types.h>
+
+#define BITS_TO_LONGS(bits) \
+    (((bits)+BITS_PER_LONG-1)/BITS_PER_LONG)
+#define DECLARE_BITMAP(name,bits) \
+    unsigned long name[BITS_TO_LONGS(bits)]
 
 #ifndef NULL
 #define NULL ((void*)0)
@@ -44,5 +50,7 @@ typedef         __u32           uint32_t;
 typedef         __u64           uint64_t;
 
 
+struct domain;
+struct exec_domain;
 
 #endif /* __TYPES_H__ */

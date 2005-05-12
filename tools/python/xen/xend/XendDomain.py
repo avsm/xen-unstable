@@ -255,6 +255,8 @@ class XendDomain:
                     eserver.inject('xend.domain.exit', [name, id, reason])
                     self.domain_restart_schedule(id, reason)
             else:
+               if xroot.get_enable_dump() == 'true':
+                   xc.domain_dumpcore(dom = int(id), corefile = "/var/xen/dump/%s.%s.core"%(name,id))
                eserver.inject('xend.domain.exit', [name, id, 'crash']) 
             destroyed += 1
             self.final_domain_destroy(id)
@@ -610,15 +612,16 @@ class XendDomain:
         xmigrate = XendMigrate.instance()
         return xmigrate.save_begin(dominfo, dst)
     
-    def domain_pincpu(self, id, cpu):
-        """Pin a domain to a cpu.
+    def domain_pincpu(self, id, vcpu, cpumap):
+        """Set which cpus vcpu can use
 
-        @param id: domain
-        @param cpu: cpu number
+        @param id:   domain
+        @param vcpu: vcpu number
+        @param cpumap:  bitmap of usbale cpus
         """
         dominfo = self.domain_lookup(id)
         try:
-            return xc.domain_pincpu(int(dominfo.id), cpu)
+            return xc.domain_pincpu(int(dominfo.id), vcpu, cpumap)
         except Exception, ex:
             raise XendError(str(ex))
 
@@ -642,24 +645,24 @@ class XendDomain:
         except Exception, ex:
             raise XendError(str(ex))
     
-    def domain_cpu_atropos_set(self, id, period, slice, latency, xtratime):
-        """Set Atropos scheduler parameters for a domain.
+    
+    def domain_cpu_sedf_set(self, id, period, slice, latency, extratime, weight):
+        """Set Simple EDF scheduler parameters for a domain.
         """
-        dominfo = self.domain_lookup(id)
+	dominfo = self.domain_lookup(id)
         try:
-            return xc.atropos_domain_set(dominfo.dom, period, slice, latency, xtratime)
+            return xc.sedf_domain_set(dominfo.dom, period, slice, latency, extratime, weight)
         except Exception, ex:
             raise XendError(str(ex))
 
-    def domain_cpu_atropos_get(self, id):
+    def domain_cpu_sedf_get(self, id):
         """Get Atropos scheduler parameters for a domain.
         """
         dominfo = self.domain_lookup(id)
         try:
-            return xc.atropos_domain_get(dominfo.dom)
+            return xc.sedf_domain_get(dominfo.dom)
         except Exception, ex:
             raise XendError(str(ex))
-
     def domain_device_create(self, id, devconfig):
         """Create a new device for a domain.
 
@@ -687,6 +690,18 @@ class XendDomain:
         self.update_domain(dominfo.id)
         return val
     
+    def domain_device_refresh(self, id, type, idx):
+        """Refresh a device.
+
+        @param id:  domain id
+        @param idx:  device index
+        @param type: device type
+        """
+        dominfo = self.domain_lookup(id)
+        self.refresh_schedule()
+        val = dominfo.device_refresh(type, idx)
+        self.update_domain(dominfo.id)
+        return val
 
     def domain_device_destroy(self, id, type, idx):
         """Destroy a device.
@@ -723,6 +738,15 @@ class XendDomain:
         dominfo = self.domain_lookup(id)
         return dominfo.get_device_by_index(type, idx)
 
+    def domain_vif_credit_limit(self, id, vif, credit, period):
+        """Limit the vif's transmission rate
+        """
+        dominfo = self.domain_lookup(id)
+        try:
+            return dominfo.limit_vif(vif, credit, period)
+        except Exception, ex:
+            raise XendError(str(ex))
+        
     def domain_vif_ls(self, id):
         """Get list of virtual network interface (vif) indexes for a domain.
 
