@@ -1,8 +1,8 @@
 /* This only handles 32bit MTRR on 32bit hosts. This is strictly wrong
    because MTRRs can span upto 40 bits (36bits on most modern x86) */ 
 #include <xen/init.h>
-#include <xen/slab.h>
 #include <xen/mm.h>
+#include <xen/slab.h>
 #include <asm/io.h>
 #include <asm/mtrr.h>
 #include <asm/msr.h>
@@ -51,7 +51,8 @@ void __init get_mtrr_state(void)
 	unsigned lo, dummy;
 
 	if (!mtrr_state.var_ranges) {
-		mtrr_state.var_ranges = xmalloc(num_var_ranges * sizeof (struct mtrr_var_range));
+		mtrr_state.var_ranges = xmalloc_array(struct mtrr_var_range,
+						  num_var_ranges);
 		if (!mtrr_state.var_ranges)
 			return;
 	} 
@@ -260,7 +261,7 @@ static void prepare_set(void)
 	}
 
 	/* Flush all TLBs via a mov %cr3, %reg; mov %reg, %cr3 */
-	__flush_tlb();
+	local_flush_tlb();
 
 	/*  Save MTRR state */
 	rdmsr(MTRRdefType_MSR, deftype_lo, deftype_hi);
@@ -272,7 +273,7 @@ static void prepare_set(void)
 static void post_set(void)
 {
 	/*  Flush TLBs (no need to flush caches - they are disabled)  */
-	__flush_tlb();
+	local_flush_tlb();
 
 	/* Intel (P6) standard MTRRs */
 	wrmsr(MTRRdefType_MSR, deftype_lo, deftype_hi);

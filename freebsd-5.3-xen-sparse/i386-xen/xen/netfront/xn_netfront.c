@@ -264,7 +264,7 @@ static int
 netctrl_connected(void)
 {
     int ok;
-
+    XENPRINTF("err %d up %d\n", netctrl.err, netctrl.up);
     if (netctrl.err)
 	ok = netctrl.err;
     else if (netctrl.up == NETIF_DRIVER_STATUS_UP)
@@ -424,8 +424,7 @@ xn_alloc_rx_buffers(struct xn_softc *sc)
 		= INVALID_P2M_ENTRY;
 	    	
 	xn_rx_mcl[i].op = __HYPERVISOR_update_va_mapping;
-	xn_rx_mcl[i].args[0] = (unsigned long)mtod(m_new,vm_offset_t) 
-						>> PAGE_SHIFT;
+	xn_rx_mcl[i].args[0] = (unsigned long)mtod(m_new,vm_offset_t);
 	xn_rx_mcl[i].args[1] = 0;
 	xn_rx_mcl[i].args[2] = 0;
 
@@ -441,11 +440,11 @@ xn_alloc_rx_buffers(struct xn_softc *sc)
     PT_UPDATES_FLUSH();
 
     /* After all PTEs have been zapped we blow away stale TLB entries. */
-    xn_rx_mcl[i-1].args[2] = UVMF_FLUSH_TLB;
+    xn_rx_mcl[i-1].args[2] = UVMF_TLB_FLUSH|UVMF_LOCAL;
 
     /* Give away a batch of pages. */
     xn_rx_mcl[i].op = __HYPERVISOR_dom_mem_op;
-    xn_rx_mcl[i].args[0] = (unsigned long) MEMOP_decrease_reservation;
+    xn_rx_mcl[i].args[0] = MEMOP_decrease_reservation;
     xn_rx_mcl[i].args[1] = (unsigned long)xn_rx_pfns;
     xn_rx_mcl[i].args[2] = (unsigned long)i;
     xn_rx_mcl[i].args[3] = 0;
@@ -455,7 +454,7 @@ xn_alloc_rx_buffers(struct xn_softc *sc)
     (void)HYPERVISOR_multicall(xn_rx_mcl, i+1);
 
     /* Check return status of HYPERVISOR_dom_mem_op(). */
-    if ( xn_rx_mcl[i].args[5] != i )
+    if (unlikely(xn_rx_mcl[i].args[5] != i))
         panic("Unable to reduce memory reservation\n");
 
     /* Above is a suitable barrier to ensure backend will see requests. */
@@ -520,7 +519,7 @@ xn_rxeof(struct xn_softc *sc)
 	mmu->val = (unsigned long)m->m_ext.ext_args >> PAGE_SHIFT;
 	mmu++;
 	mcl->op = __HYPERVISOR_update_va_mapping;
-	mcl->args[0] = (unsigned long)m->m_data >> PAGE_SHIFT;
+	mcl->args[0] = (unsigned long)m->m_data;
 	mcl->args[1] = (rx->addr & ~PAGE_MASK) | PG_KERNEL;
 	mcl->args[2] = 0;
 	mcl++;
@@ -545,6 +544,7 @@ xn_rxeof(struct xn_softc *sc)
 	mcl->args[0] = (unsigned long)xn_rx_mmu;
 	mcl->args[1] = mmu - xn_rx_mmu;
 	mcl->args[2] = 0;
+	mcl->args[3] = DOMID_SELF;
 	mcl++;
 	(void)HYPERVISOR_multicall(xn_rx_mcl, mcl - xn_rx_mcl);
     }
@@ -1303,7 +1303,6 @@ netif_driver_status(netif_fe_driver_status_t *status)
 static void 
 netif_ctrlif_rx(ctrl_msg_t *msg, unsigned long id)
 {
-
     switch ( msg->subtype )
     {
     case CMSG_NETIF_FE_INTERFACE_STATUS:
@@ -1326,7 +1325,7 @@ netif_ctrlif_rx(ctrl_msg_t *msg, unsigned long id)
         break;
     }
 
-    ctrl_if_send_response(msg);
+    ctrl_if_send_response(msg);   
 }
 
 #if 1
@@ -1338,7 +1337,6 @@ static int probe_interfaces(void)
 {
     int err = 0, conn = 0;
     int wait_i, wait_n = 100;
-
     for ( wait_i = 0; wait_i < wait_n; wait_i++)
     { 
         XENPRINTF("> wait_i=%d\n", wait_i);
@@ -1421,7 +1419,7 @@ xn_init(void *unused)
 {
     
     int err = 0;
-
+    
     netctrl_init();
     (void)ctrl_if_register_receiver(CMSG_NETIF_FE, netif_ctrlif_rx,
 				    CALLBACK_IN_BLOCKING_CONTEXT);
