@@ -465,14 +465,7 @@ fastcall void do_general_protection(struct pt_regs * regs, long error_code)
 		unsigned long ldt;
 		__asm__ __volatile__ ("sldt %0" : "=r" (ldt));
 		if (ldt == 0) {
-			mmu_update_t u;
-			u.ptr = MMU_EXTENDED_COMMAND;
-			u.ptr |= (unsigned long)&default_ldt[0];
-			u.val = MMUEXT_SET_LDT | (5 << MMUEXT_CMD_SHIFT);
-			if (unlikely(HYPERVISOR_mmu_update(&u, 1, NULL) < 0)) {
-				show_trace(NULL, (unsigned long *)&u);
-				panic("Failed to install default LDT");
-			}
+			xen_set_ldt((unsigned long)&default_ldt[0], 5);
 			return;
 		}
 	}
@@ -616,6 +609,14 @@ fastcall void do_nmi(struct pt_regs * regs, long error_code)
 	nmi_enter();
 
 	cpu = smp_processor_id();
+
+#ifdef CONFIG_HOTPLUG_CPU
+	if (!cpu_online(cpu)) {
+		nmi_exit();
+		return;
+	}
+#endif
+
 	++nmi_count(cpu);
 
 	if (!nmi_callback(regs, cpu))
@@ -893,15 +894,7 @@ asmlinkage void math_state_restore(struct pt_regs regs)
 	struct thread_info *thread = current_thread_info();
 	struct task_struct *tsk = thread->task;
 
-	/*
-	 * A trap in kernel mode can be ignored. It'll be the fast XOR or
-	 * copying libraries, which will correctly save/restore state and
-	 * reset the TS bit in CR0.
-	 */
-	if ((regs.xcs & 2) == 0)
-		return;
-
-	clts();		/* Allow maths ops (or we recurse) */
+	/* NB. 'clts' is done for us by Xen during virtual trap. */
 	if (!tsk_used_math(tsk))
 		init_fpu(tsk);
 	restore_fpu(tsk);
@@ -971,10 +964,21 @@ void __init trap_init(void)
 	 * and a callgate to lcall27 for Solaris/x86 binaries
 	 */
 	make_lowmem_page_readonly(&default_ldt[0]);
-	xen_flush_page_update_queue();
 
 	/*
 	 * Should be a barrier for any external CPU state.
 	 */
 	cpu_init();
+}
+
+int smp_trap_init(trap_info_t *trap_ctxt)
+{
+	trap_info_t *t = trap_table;
+
+	for (t = trap_table; t->address; t++) {
+		trap_ctxt[t->vector].flags = t->flags;
+		trap_ctxt[t->vector].cs = t->cs;
+		trap_ctxt[t->vector].address = t->address;
+	}
+	return SYSCALL_VECTOR;
 }

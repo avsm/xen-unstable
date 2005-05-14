@@ -5,90 +5,28 @@
  * it permits debugging of seriously-toasted machines (e.g., in situations
  * where a device driver within a guest OS would be inaccessible).
  * 
- * Copyright (c) 2003-2004, K A Fraser
+ * Copyright (c) 2003-2005, K A Fraser
  */
 
 #include <xen/config.h>
 #include <xen/init.h>
 #include <xen/irq.h>
 #include <xen/keyhandler.h> 
-#include <asm/pdb.h>
 #include <xen/reboot.h>
 #include <xen/sched.h>
 #include <xen/serial.h>
 #include <asm/io.h>
 
-/* opt_com[12]: Config serial port with a string <baud>,DPS,<io-base>,<irq>. */
-static unsigned char opt_com1[30] = "", opt_com2[30] = "";
+#ifdef CONFIG_X86
+#include <asm/physdev.h>
+#endif
+
+/* Config serial port with a string <baud>,DPS,<io-base>,<irq>. */
+static char opt_com1[30] = OPT_COM1_STR, opt_com2[30] = OPT_COM2_STR;
 string_param("com1", opt_com1);
 string_param("com2", opt_com2);
 
-/* Register offsets */
-#define RBR             0x00    /* receive buffer       */
-#define THR             0x00    /* transmit holding     */
-#define IER             0x01    /* interrupt enable     */
-#define IIR             0x02    /* interrupt identity   */
-#define FCR             0x02    /* FIFO control         */
-#define LCR             0x03    /* line control         */
-#define MCR             0x04    /* Modem control        */
-#define LSR             0x05    /* line status          */
-#define MSR             0x06    /* Modem status         */
-#define DLL             0x00    /* divisor latch (ls) ( DLAB=1)	*/
-#define DLM             0x01    /* divisor latch (ms) ( DLAB=1)	*/
-
-/* Interrupt Enable Register */
-#define IER_ERDAI       0x01    /* rx data recv'd       */
-#define IER_ETHREI      0x02    /* tx reg. empty        */
-#define IER_ELSI        0x04    /* rx line status       */
-#define IER_EMSI        0x08    /* MODEM status	        */
-
-/* FIFO control register */
-#define FCR_ENABLE      0x01    /* enable FIFO          */
-#define FCR_CLRX        0x02    /* clear Rx FIFO        */
-#define FCR_CLTX        0x04    /* clear Tx FIFO        */
-#define FCR_DMA         0x10    /* enter DMA mode       */
-#define FCR_TRG1        0x00    /* Rx FIFO trig lev 1   */
-#define FCR_TRG4        0x40    /* Rx FIFO trig lev 4   */
-#define FCR_TRG8        0x80    /* Rx FIFO trig lev 8   */
-#define FCR_TRG14       0xc0    /* Rx FIFO trig lev 14  */
-
-/* Line control register */
-#define LCR_DLAB        0x80    /* Divisor Latch Access */
-
-/* Modem Control Register */
-#define MCR_DTR         0x01    /* Data Terminal Ready  */
-#define MCR_RTS         0x02    /* Request to Send      */
-#define MCR_OUT2        0x08    /* OUT2: interrupt mask */
-
-/* Line Status Register */
-#define LSR_DR          0x01    /* Data ready           */
-#define LSR_OE          0x02    /* Overrun              */
-#define LSR_PE          0x04    /* Parity error         */
-#define LSR_FE          0x08    /* Framing error        */
-#define LSR_BI          0x10    /* Break                */
-#define LSR_THRE        0x20    /* Xmit hold reg empty  */
-#define LSR_TEMT        0x40    /* Xmitter empty        */
-#define LSR_ERR         0x80    /* Error                */
-
-/* These parity settings can be ORed directly into the LCR. */
-#define PARITY_NONE     (0<<3)
-#define PARITY_ODD      (1<<3)
-#define PARITY_EVEN     (3<<3)
-#define PARITY_MARK     (5<<3)
-#define PARITY_SPACE    (7<<3)
-
-#define RXBUFSZ 32
-#define MASK_RXBUF_IDX(_i) ((_i)&(RXBUFSZ-1))
-typedef struct {
-    int              baud, data_bits, parity, stop_bits, io_base, irq;
-    serial_rx_fn     rx_lo, rx_hi, rx;
-    spinlock_t       lock;
-    unsigned char    rxbuf[RXBUFSZ];
-    unsigned int     rxbufp, rxbufc;
-    struct irqaction irqaction;
-} uart_t;
-
-static uart_t com[2] = {
+static struct uart com[2] = {
     { 0, 0, 0, 0, 0x3f8, 4,
       NULL, NULL, NULL,
       SPIN_LOCK_UNLOCKED },
@@ -100,22 +38,12 @@ static uart_t com[2] = {
 #define UART_ENABLED(_u) ((_u)->baud != 0)
 #define DISABLE_UART(_u) ((_u)->baud = 0)
 
-#ifdef CONFIG_X86
-static inline int arch_serial_putc(uart_t *uart, unsigned char c)
-{
-    int space;
-    if ( (space = (inb(uart->io_base + LSR) & LSR_THRE)) )
-        outb(c, uart->io_base + THR);
-    return space;
-}
-#endif
-
 
 /***********************
  * PRIVATE FUNCTIONS
  */
 
-static void uart_rx(uart_t *uart, struct xen_regs *regs)
+static void uart_rx(struct uart *uart, struct cpu_user_regs *regs)
 {
     unsigned char c;
 
@@ -141,12 +69,14 @@ static void uart_rx(uart_t *uart, struct xen_regs *regs)
     }
 }
 
-static void serial_interrupt(int irq, void *dev_id, struct xen_regs *regs)
+static void serial_interrupt(
+    int irq, void *dev_id, struct cpu_user_regs *regs)
 {
-    uart_rx((uart_t *)dev_id, regs);
+    uart_rx((struct uart *)dev_id, regs);
 }
 
-static inline void __serial_putc(uart_t *uart, int handle, unsigned char c)
+static inline void __serial_putc(
+    struct uart *uart, int handle, unsigned char c)
 {
     unsigned long flags;
     int space;
@@ -174,7 +104,7 @@ static inline void __serial_putc(uart_t *uart, int handle, unsigned char c)
         return;                              \
 } while ( 0 )
         
-static void parse_port_config(char *conf, uart_t *uart)
+static void parse_port_config(char *conf, struct uart *uart)
 {
     if ( *conf == '\0' )
         return;
@@ -240,7 +170,7 @@ static void parse_port_config(char *conf, uart_t *uart)
     }
 }
 
-static void uart_config_stage1(uart_t *uart)
+static void uart_config_stage1(struct uart *uart)
 {
     unsigned char lcr;
 
@@ -265,7 +195,7 @@ static void uart_config_stage1(uart_t *uart)
     outb(FCR_ENABLE | FCR_CLRX | FCR_CLTX | FCR_TRG14, uart->io_base + FCR);
 }
 
-static void uart_config_stage2(uart_t *uart)
+static void uart_config_stage2(struct uart *uart)
 {
     int rc;
 
@@ -331,11 +261,13 @@ int parse_serial_handle(char *conf)
         goto fail;
     }
 
+#ifndef NO_UART_CONFIG_OK
     if ( !UART_ENABLED(&com[handle]) )
     {
         printk("ERROR: cannot use unconfigured serial port COM%d\n", handle+1);
         return -1;
     }
+#endif
 
     if ( conf[4] == 'H' )
         handle |= SERHND_HI;
@@ -353,7 +285,7 @@ int parse_serial_handle(char *conf)
 
 void serial_set_rx_handler(int handle, serial_rx_fn fn)
 {
-    uart_t *uart = &com[handle & SERHND_IDX];
+    struct uart *uart = &com[handle & SERHND_IDX];
     unsigned long flags;
 
     if ( handle == -1 )
@@ -394,7 +326,7 @@ void serial_set_rx_handler(int handle, serial_rx_fn fn)
 
 void serial_putc(int handle, unsigned char c)
 {
-    uart_t *uart = &com[handle & SERHND_IDX];
+    struct uart *uart = &com[handle & SERHND_IDX];
 
     if ( handle == -1 )
         return;
@@ -402,9 +334,9 @@ void serial_putc(int handle, unsigned char c)
     __serial_putc(uart, handle, c);
 }
 
-void serial_puts(int handle, const unsigned char *s)
+void serial_puts(int handle, const char *s)
 {
-    uart_t *uart = &com[handle & SERHND_IDX];
+    struct uart *uart = &com[handle & SERHND_IDX];
 
     if ( handle == -1 )
         return;
@@ -431,8 +363,9 @@ static int byte_matches(int handle, unsigned char *pc)
 
 unsigned char irq_serial_getc(int handle)
 {
-    uart_t *uart = &com[handle & SERHND_IDX];
+    struct uart *uart = &com[handle & SERHND_IDX];
     unsigned char c;
+
 
     while ( uart->rxbufp != uart->rxbufc )
     {
@@ -455,7 +388,7 @@ unsigned char irq_serial_getc(int handle)
 
 unsigned char serial_getc(int handle)
 {
-    uart_t *uart = &com[handle & SERHND_IDX];
+    struct uart *uart = &com[handle & SERHND_IDX];
     unsigned char c;
     unsigned long flags;
 
@@ -480,7 +413,27 @@ unsigned char serial_getc(int handle)
 
 void serial_force_unlock(int handle)
 {
-    uart_t *uart = &com[handle & SERHND_IDX];
+    struct uart *uart = &com[handle & SERHND_IDX];
     if ( handle != -1 )
         uart->lock = SPIN_LOCK_UNLOCKED;
 }
+
+void serial_endboot(void)
+{
+#ifdef CONFIG_X86
+    int i;
+    for ( i = 0; i < ARRAY_SIZE(com); i++ )
+        if ( UART_ENABLED(&com[i]) )
+            physdev_modify_ioport_access_range(dom0, 0, com[i].io_base, 8);
+#endif
+}
+
+/*
+ * Local variables:
+ * mode: C
+ * c-set-style: "BSD"
+ * c-basic-offset: 4
+ * tab-width: 4
+ * indent-tabs-mode: nil
+ * End:
+ */
