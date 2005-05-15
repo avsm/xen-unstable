@@ -16,6 +16,7 @@
 #include <arpa/inet.h>
 #include "xc_private.h"
 #include "gzip_stream.h"
+#include "linux_boot_params.h"
 
 /* Needed for Python versions earlier than 2.3. */
 #ifndef PyMODINIT_FUNC
@@ -34,6 +35,33 @@ typedef struct {
 /*
  * Definitions for the 'xc' object type.
  */
+
+static PyObject *pyxc_domain_dumpcore(PyObject *self,
+				      PyObject *args,
+				      PyObject *kwds)
+{
+    XcObject *xc = (XcObject *)self;
+
+    u32 dom;
+    char *corefile;
+
+    static char *kwd_list[] = { "dom", "corefile", NULL };
+
+    if ( !PyArg_ParseTupleAndKeywords(args, kwds, "is", kwd_list, &dom, &corefile) )
+        goto exit;
+
+    if ( (corefile == NULL) || (corefile[0] == '\0') )
+        goto exit;
+
+    if ( xc_domain_dumpcore(xc->xc_handle, dom, corefile) != 0 )
+        return PyErr_SetFromErrno(xc_error);
+    
+    Py_INCREF(zero);
+    return zero;
+
+ exit:
+    return NULL;
+}
 
 static PyObject *pyxc_domain_create(PyObject *self,
                                     PyObject *args,
@@ -127,15 +155,16 @@ static PyObject *pyxc_domain_pincpu(PyObject *self,
     XcObject *xc = (XcObject *)self;
 
     u32 dom;
-    int cpu = -1;
+    int vcpu = 0;
+    cpumap_t cpumap = 0xFFFFFFFF;
 
-    static char *kwd_list[] = { "dom", "cpu", NULL };
+    static char *kwd_list[] = { "dom", "vcpu", "cpumap", NULL };
 
-    if ( !PyArg_ParseTupleAndKeywords(args, kwds, "i|i", kwd_list, 
-                                      &dom, &cpu) )
+    if ( !PyArg_ParseTupleAndKeywords(args, kwds, "i|ii", kwd_list, 
+                                      &dom, &vcpu, &cpumap) )
         return NULL;
 
-    if ( xc_domain_pincpu(xc->xc_handle, dom, cpu) != 0 )
+    if ( xc_domain_pincpu(xc->xc_handle, dom, vcpu, &cpumap) != 0 )
         return PyErr_SetFromErrno(xc_error);
     
     Py_INCREF(zero);
@@ -147,10 +176,10 @@ static PyObject *pyxc_domain_getinfo(PyObject *self,
                                      PyObject *kwds)
 {
     XcObject *xc = (XcObject *)self;
-    PyObject *list;
+    PyObject *list, *vcpu_list, *cpumap_list, *info_dict;
 
     u32 first_dom = 0;
-    int max_doms = 1024, nr_doms, i;
+    int max_doms = 1024, nr_doms, i, j;
     xc_dominfo_t *info;
 
     static char *kwd_list[] = { "first_dom", "max_doms", NULL };
@@ -167,23 +196,33 @@ static PyObject *pyxc_domain_getinfo(PyObject *self,
     list = PyList_New(nr_doms);
     for ( i = 0 ; i < nr_doms; i++ )
     {
-        PyList_SetItem(
-            list, i, 
-            Py_BuildValue("{s:i,s:i,s:i,s:i,s:i,s:i,s:i,s:i"
-                          ",s:l,s:L,s:l,s:i}",
-                          "dom",       info[i].domid,
-                          "cpu",       info[i].cpu,
-                          "dying",     info[i].dying,
-                          "crashed",   info[i].crashed,
-                          "shutdown",  info[i].shutdown,
-                          "paused",    info[i].paused,
-                          "blocked",   info[i].blocked,
-                          "running",   info[i].running,
-                          "mem_kb",    info[i].nr_pages*4,
-                          "cpu_time",  info[i].cpu_time,
-                          "maxmem_kb", info[i].max_memkb,
-                          "shutdown_reason", info[i].shutdown_reason
-                ));
+        vcpu_list = PyList_New(MAX_VIRT_CPUS);
+        cpumap_list = PyList_New(MAX_VIRT_CPUS);
+        for ( j = 0; j < MAX_VIRT_CPUS; j++ ) {
+            PyList_SetItem( vcpu_list, j, 
+                            Py_BuildValue("i", info[i].vcpu_to_cpu[j]));
+            PyList_SetItem( cpumap_list, j, 
+                            Py_BuildValue("i", info[i].cpumap[j]));
+        }
+                 
+        info_dict = Py_BuildValue("{s:i,s:i,s:i,s:i,s:i,s:i,s:i,s:i"
+                                  ",s:l,s:L,s:l,s:i}",
+                                  "dom",       info[i].domid,
+                                  "vcpus",     info[i].vcpus,
+                                  "dying",     info[i].dying,
+                                  "crashed",   info[i].crashed,
+                                  "shutdown",  info[i].shutdown,
+                                  "paused",    info[i].paused,
+                                  "blocked",   info[i].blocked,
+                                  "running",   info[i].running,
+                                  "mem_kb",    info[i].nr_pages*4,
+                                  "cpu_time",  info[i].cpu_time,
+                                  "maxmem_kb", info[i].max_memkb,
+                                  "shutdown_reason", info[i].shutdown_reason);
+        PyDict_SetItemString( info_dict, "vcpu_to_cpu", vcpu_list );
+        PyDict_SetItemString( info_dict, "cpumap", cpumap_list );
+        PyList_SetItem( list, i, info_dict);
+ 
     }
 
     free(info);
@@ -347,19 +386,19 @@ static PyObject *pyxc_linux_build(PyObject *self,
 
     u32   dom;
     char *image, *ramdisk = NULL, *cmdline = "";
-    int   control_evtchn, flags = 0;
+    int   control_evtchn, flags = 0, vcpus = 1;
 
     static char *kwd_list[] = { "dom", "control_evtchn", 
-                                "image", "ramdisk", "cmdline", "flags",
+                                "image", "ramdisk", "cmdline", "flags", "vcpus",
                                 NULL };
 
-    if ( !PyArg_ParseTupleAndKeywords(args, kwds, "iis|ssi", kwd_list, 
+    if ( !PyArg_ParseTupleAndKeywords(args, kwds, "iis|ssii", kwd_list, 
                                       &dom, &control_evtchn, 
-                                      &image, &ramdisk, &cmdline, &flags) )
+                                      &image, &ramdisk, &cmdline, &flags, &vcpus) )
         return NULL;
 
     if ( xc_linux_build(xc->xc_handle, dom, image,
-                        ramdisk, cmdline, control_evtchn, flags) != 0 )
+                        ramdisk, cmdline, control_evtchn, flags, vcpus) != 0 )
         return PyErr_SetFromErrno(xc_error);
     
     Py_INCREF(zero);
@@ -389,6 +428,90 @@ static PyObject *pyxc_plan9_build(PyObject *self,
                         cmdline, control_evtchn, flags) != 0 )
         return PyErr_SetFromErrno(xc_error);
 
+    Py_INCREF(zero);
+    return zero;
+}
+
+static PyObject *pyxc_vmx_build(PyObject *self,
+                                  PyObject *args,
+                                  PyObject *kwds)
+{
+    XcObject *xc = (XcObject *)self;
+
+    u32   dom;
+    char *image, *ramdisk = NULL, *cmdline = "";
+    PyObject *memmap;
+    int   control_evtchn, flags = 0;
+    int numItems, i;
+    int memsize;
+    struct mem_map mem_map;
+
+    static char *kwd_list[] = { "dom", "control_evtchn",
+                                "memsize",
+                                "image", "memmap",
+				"ramdisk", "cmdline", "flags",
+                                NULL };
+
+    if ( !PyArg_ParseTupleAndKeywords(args, kwds, "iiisO!|ssi", kwd_list, 
+                                      &dom, &control_evtchn, 
+                                      &memsize,
+                                      &image, &PyList_Type, &memmap,
+				      &ramdisk, &cmdline, &flags) )
+        return NULL;
+
+    memset(&mem_map, 0, sizeof(mem_map));
+    /* Parse memmap */
+
+    /* get the number of lines passed to us */
+    numItems = PyList_Size(memmap) - 1;	/* removing the line 
+					   containing "memmap" */
+    printf ("numItems: %d\n", numItems);
+    mem_map.nr_map = numItems;
+   
+    /* should raise an error here. */
+    if (numItems < 0) return NULL; /* Not a list */
+
+    /* iterate over items of the list, grabbing ranges and parsing them */
+    for (i = 1; i <= numItems; i++) {	// skip over "memmap"
+	    PyObject *item, *f1, *f2, *f3, *f4;
+	    int numFields;
+	    unsigned long lf1, lf2, lf3, lf4;
+	    char *sf1, *sf2;
+	    
+	    /* grab the string object from the next element of the list */
+	    item = PyList_GetItem(memmap, i); /* Can't fail */
+
+	    /* get the number of lines passed to us */
+	    numFields = PyList_Size(item);
+
+	    if (numFields != 4)
+		    return NULL;
+
+	    f1 = PyList_GetItem(item, 0);
+	    f2 = PyList_GetItem(item, 1);
+	    f3 = PyList_GetItem(item, 2);
+	    f4 = PyList_GetItem(item, 3);
+
+	    /* Convert objects to strings/longs */
+	    sf1 = PyString_AsString(f1);
+	    sf2 = PyString_AsString(f2);
+	    lf3 = PyLong_AsLong(f3);
+	    lf4 = PyLong_AsLong(f4);
+	    if ( sscanf(sf1, "%lx", &lf1) != 1 )
+                return NULL;
+	    if ( sscanf(sf2, "%lx", &lf2) != 1 )
+                return NULL;
+
+            mem_map.map[i-1].addr = lf1;
+            mem_map.map[i-1].size = lf2 - lf1;
+            mem_map.map[i-1].type = lf3;
+            mem_map.map[i-1].caching_attr = lf4;
+    }
+
+    if ( xc_vmx_build(xc->xc_handle, dom, memsize, image, &mem_map,
+                        ramdisk, cmdline, control_evtchn, flags) != 0 )
+        return PyErr_SetFromErrno(xc_error);
+    
     Py_INCREF(zero);
     return zero;
 }
@@ -715,74 +838,50 @@ static PyObject *pyxc_physinfo(PyObject *self,
                          "cpu_khz",     info.cpu_khz);
 }
 
-static PyObject *pyxc_atropos_domain_set(PyObject *self,
+static PyObject *pyxc_sedf_domain_set(PyObject *self,
                                          PyObject *args,
                                          PyObject *kwds)
 {
     XcObject *xc = (XcObject *)self;
     u32 domid;
     u64 period, slice, latency;
-    int xtratime;
-
-    static char *kwd_list[] = { "dom", "period", "slice", "latency",
-                                "xtratime", NULL };
+    u16 extratime, weight;
+    static char *kwd_list[] = { "dom", "period", "slice", "latency", "extratime", "weight",NULL };
     
-    if( !PyArg_ParseTupleAndKeywords(args, kwds, "iLLLi", kwd_list, &domid,
-                                     &period, &slice, &latency, &xtratime) )
+    if( !PyArg_ParseTupleAndKeywords(args, kwds, "iLLLhh", kwd_list, &domid,
+                                     &period, &slice, &latency, &extratime, &weight) )
         return NULL;
-   
-    if ( xc_atropos_domain_set(xc->xc_handle, domid, period, slice,
-                               latency, xtratime) != 0 )
+   if ( xc_sedf_domain_set(xc->xc_handle, domid, period, slice, latency, extratime,weight) != 0 )
         return PyErr_SetFromErrno(xc_error);
 
     Py_INCREF(zero);
     return zero;
 }
 
-static PyObject *pyxc_atropos_domain_get(PyObject *self,
+static PyObject *pyxc_sedf_domain_get(PyObject *self,
                                          PyObject *args,
                                          PyObject *kwds)
 {
     XcObject *xc = (XcObject *)self;
     u32 domid;
-    u64 period, slice, latency;
-    int xtratime;
+    u64 period, slice,latency;
+    u16 weight, extratime;
     
     static char *kwd_list[] = { "dom", NULL };
 
     if( !PyArg_ParseTupleAndKeywords(args, kwds, "i", kwd_list, &domid) )
         return NULL;
     
-    if ( xc_atropos_domain_get( xc->xc_handle, domid, &period,
-                                &slice, &latency, &xtratime ) )
+    if ( xc_sedf_domain_get( xc->xc_handle, domid, &period,
+                                &slice,&latency,&extratime,&weight) )
         return PyErr_SetFromErrno(xc_error);
 
     return Py_BuildValue("{s:i,s:L,s:L,s:L,s:i}",
-                         "domain",  domid,
-                         "period",  period,
-                         "slice",   slice,
-                         "latency", latency,
-                         "xtratime", xtratime);
-}
-
-
-static PyObject *pyxc_rrobin_global_set(PyObject *self,
-                                        PyObject *args,
-                                        PyObject *kwds)
-{
-    XcObject *xc = (XcObject *)self;
-    u64 slice;
-    
-    static char *kwd_list[] = { "slice", NULL };
-
-    if( !PyArg_ParseTupleAndKeywords(args, kwds, "L", kwd_list, &slice) )
-        return NULL;
-    
-    if ( xc_rrobin_global_set(xc->xc_handle, slice) != 0 )
-        return PyErr_SetFromErrno(xc_error);
-    
-    Py_INCREF(zero);
-    return zero;
+                         "domain",    domid,
+                         "period",    period,
+                         "slice",     slice,
+			 "latency",   latency,
+			 "extratime", extratime);
 }
 
 static PyObject *pyxc_shadow_control(PyObject *self,
@@ -805,22 +904,6 @@ static PyObject *pyxc_shadow_control(PyObject *self,
     
     Py_INCREF(zero);
     return zero;
-}
-
-static PyObject *pyxc_rrobin_global_get(PyObject *self,
-                                        PyObject *args,
-                                        PyObject *kwds)
-{
-    XcObject *xc = (XcObject *)self;
-    u64 slice;
-
-    if ( !PyArg_ParseTuple(args, "") )
-        return NULL;
-
-    if ( xc_rrobin_global_get(xc->xc_handle, &slice) != 0 )
-        return PyErr_SetFromErrno(xc_error);
-    
-    return Py_BuildValue("{s:L}", "slice", slice);
 }
 
 static PyObject *pyxc_domain_setmaxmem(PyObject *self,
@@ -855,6 +938,14 @@ static PyMethodDef pyxc_methods[] = {
       " mem_kb [int, 0]:        Memory allocation, in kilobytes.\n"
       "Returns: [int] new domain identifier; -1 on error.\n" },
 
+    { "domain_dumpcore", 
+      (PyCFunction)pyxc_domain_dumpcore, 
+      METH_VARARGS | METH_KEYWORDS, "\n"
+      "dump core of a domain.\n"
+      " dom [int]: Identifier of domain to be paused.\n\n"
+      " corefile [string]: Name of corefile to be created.\n\n"
+      "Returns: [int] 0 on success; -1 on error.\n" },
+
     { "domain_pause", 
       (PyCFunction)pyxc_domain_pause, 
       METH_VARARGS | METH_KEYWORDS, "\n"
@@ -879,9 +970,10 @@ static PyMethodDef pyxc_methods[] = {
     { "domain_pincpu", 
       (PyCFunction)pyxc_domain_pincpu, 
       METH_VARARGS | METH_KEYWORDS, "\n"
-      "Pin a domain to a specified CPU.\n"
-      " dom [int]:     Identifier of domain to be pinned.\n"
-      " cpu [int, -1]: CPU to pin to, or -1 to unpin\n\n"
+      "Pin a VCPU to a specified set CPUs.\n"
+      " dom [int]:     Identifier of domain to which VCPU belongs.\n"
+      " vcpu [int, 0]: VCPU being pinned.\n"
+      " cpumap [int, -1]: Bitmap of usable CPUs.\n\n"
       "Returns: [int] 0 on success; -1 on error.\n" },
 
     { "domain_getinfo", 
@@ -896,6 +988,7 @@ static PyMethodDef pyxc_methods[] = {
       "         domain-id space was reached.\n"
       " dom      [int]: Identifier of domain to which this info pertains\n"
       " cpu      [int]:  CPU to which this domain is bound\n"
+      " vcpus    [int]:  Number of Virtual CPUS in this domain\n"
       " dying    [int]:  Bool - is the domain dying?\n"
       " crashed  [int]:  Bool - has the domain crashed?\n"
       " shutdown [int]:  Bool - has the domain shut itself down?\n"
@@ -906,7 +999,8 @@ static PyMethodDef pyxc_methods[] = {
       " maxmem_kb [int]: Maximum memory limit, in kilobytes\n"
       " cpu_time [long]: CPU time consumed, in nanoseconds\n"
       " shutdown_reason [int]: Numeric code from guest OS, explaining "
-      "reason why it shut itself down.\n" },
+      "reason why it shut itself down.\n" 
+      " vcpu_to_cpu [[int]]: List that maps VCPUS to CPUS\n" },
 
     { "linux_save", 
       (PyCFunction)pyxc_linux_save, 
@@ -939,6 +1033,18 @@ static PyMethodDef pyxc_methods[] = {
       "Build a new Linux guest OS.\n"
       " dom     [int]:      Identifier of domain to build into.\n"
       " image   [str]:      Name of kernel image file. May be gzipped.\n"
+      " ramdisk [str, n/a]: Name of ramdisk file, if any.\n"
+      " cmdline [str, n/a]: Kernel parameters, if any.\n\n"
+      " vcpus   [int, 1]:   Number of Virtual CPUS in domain.\n\n"
+      "Returns: [int] 0 on success; -1 on error.\n" },
+
+    { "vmx_build", 
+      (PyCFunction)pyxc_vmx_build, 
+      METH_VARARGS | METH_KEYWORDS, "\n"
+      "Build a new Linux guest OS.\n"
+      " dom     [int]:      Identifier of domain to build into.\n"
+      " image   [str]:      Name of kernel image file. May be gzipped.\n"
+      " memmap  [str]: 	    Memory map.\n\n"
       " ramdisk [str, n/a]: Name of ramdisk file, if any.\n"
       " cmdline [str, n/a]: Kernel parameters, if any.\n\n"
       "Returns: [int] 0 on success; -1 on error.\n" },
@@ -981,44 +1087,30 @@ static PyMethodDef pyxc_methods[] = {
       " warpu  [long]: Unwarp requirement.\n"
       " warpl  [long]: Warp limit,\n"
     },
-
-    { "atropos_domain_set",
-      (PyCFunction)pyxc_atropos_domain_set,
+    
+    { "sedf_domain_set",
+      (PyCFunction)pyxc_sedf_domain_set,
       METH_KEYWORDS, "\n"
       "Set the scheduling parameters for a domain when running with Atropos.\n"
-      " dom      [int]:  domain to set\n"
-      " period   [long]: domain's scheduling period\n"
-      " slice    [long]: domain's slice per period\n"
-      " latency  [long]: wakeup latency hint\n"
-      " xtratime [int]: boolean\n"
+      " dom       [int]:  domain to set\n"
+      " period    [long]: domain's scheduling period\n"
+      " slice     [long]: domain's slice per period\n"
+      " latency   [long]: domain's wakeup latency hint\n"
+      " extratime [int]:  domain aware of extratime?\n"
       "Returns: [int] 0 on success; -1 on error.\n" },
 
-    { "atropos_domain_get",
-      (PyCFunction)pyxc_atropos_domain_get,
+    { "sedf_domain_get",
+      (PyCFunction)pyxc_sedf_domain_get,
       METH_KEYWORDS, "\n"
       "Get the current scheduling parameters for a domain when running with\n"
       "the Atropos scheduler."
-      " dom      [int]: domain to query\n"
-      "Returns:  [dict]\n"
-      " domain   [int]: domain ID\n"
-      " period   [long]: scheduler period\n"
-      " slice    [long]: CPU reservation per period\n"
-      " latency  [long]: unblocking latency hint\n"
-      " xtratime [int] : 0 if not using slack time, nonzero otherwise\n" },
-
-    { "rrobin_global_set",
-      (PyCFunction)pyxc_rrobin_global_set,
-      METH_KEYWORDS, "\n"
-      "Set Round Robin scheduler slice.\n"
-      " slice [long]: Round Robin scheduler slice\n"
-      "Returns: [int] 0 on success, throws an exception on failure\n" },
-
-    { "rrobin_global_get",
-      (PyCFunction)pyxc_rrobin_global_get,
-      METH_KEYWORDS, "\n"
-      "Get Round Robin scheduler settings\n"
-      "Returns [dict]:\n"
-      " slice  [long]: Scheduler time slice.\n" },    
+      " dom       [int]: domain to query\n"
+      "Returns:   [dict]\n"
+      " domain    [int]: domain ID\n"
+      " period    [long]: scheduler period\n"
+      " slice     [long]: CPU reservation per period\n"
+      " latency   [long]: domain's wakeup latency hint\n"
+      " extratime [int]:  domain aware of extratime?\n"},
 
     { "evtchn_alloc_unbound", 
       (PyCFunction)pyxc_evtchn_alloc_unbound,

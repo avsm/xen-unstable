@@ -22,6 +22,7 @@ extern start_info_t *xen_start_info;
  * be MACHINE addresses.
  */
 
+static inline void HYPERVISOR_crash(void) __dead2;
 
 void MULTICALL_flush_page_update_queue(void);
 
@@ -38,7 +39,8 @@ typedef struct { unsigned long pte_low, pte_high; } pte_t;
  * Assembler stubs for hyper-calls.
  */
 
-static inline int HYPERVISOR_set_trap_table(trap_info_t *table)
+static inline int 
+HYPERVISOR_set_trap_table(trap_info_t *table)
 {
     int ret;
     __asm__ __volatile__ (
@@ -49,32 +51,57 @@ static inline int HYPERVISOR_set_trap_table(trap_info_t *table)
     return ret;
 }
 
-static inline int HYPERVISOR_mmu_update(mmu_update_t *req, 
-					int count,
-					int *success_count)
+static inline int 
+HYPERVISOR_mmu_update(mmu_update_t *req, int count, 
+		      int *success_count, domid_t domid)
 {
     int ret;
+    unsigned long ign1, ign2, ign3, ign4;
     __asm__ __volatile__ (
         TRAP_INSTR
-        : "=a" (ret) : "0" (__HYPERVISOR_mmu_update), 
-        "b" (req), "c" (count), "d" (success_count) : "memory" );
+        : "=a" (ret), "=b" (ign1), "=c" (ign2), "=d" (ign3), "=S" (ign4)
+        : "0" (__HYPERVISOR_mmu_update), "1" (req), "2" (count),
+        "3" (success_count), "4" (domid)
+        : "memory" );
 
     return ret;
 }
 
-static inline int HYPERVISOR_set_gdt(unsigned long *frame_list, int entries)
+static inline int
+HYPERVISOR_mmuext_op(
+		     struct mmuext_op *op, int count, int *success_count, domid_t domid)
 {
     int ret;
+    unsigned long ign1, ign2, ign3, ign4;
     __asm__ __volatile__ (
         TRAP_INSTR
-        : "=a" (ret) : "0" (__HYPERVISOR_set_gdt), 
-        "b" (frame_list), "c" (entries) : "memory" );
-
+        : "=a" (ret), "=b" (ign1), "=c" (ign2), "=d" (ign3), "=S" (ign4)
+        : "0" (__HYPERVISOR_mmuext_op), "1" (op), "2" (count),
+        "3" (success_count), "4" (domid)
+        : "memory" );
 
     return ret;
 }
 
-static inline int HYPERVISOR_stack_switch(unsigned long ss, unsigned long esp)
+
+
+static inline int 
+HYPERVISOR_set_gdt(unsigned long *frame_list, int entries)
+{
+    int ret;
+    unsigned long ign1, ign2;
+
+    __asm__ __volatile__ (
+        TRAP_INSTR
+        : "=a" (ret), "=b" (ign1), "=c" (ign2)
+        : "0" (__HYPERVISOR_set_gdt), "1" (frame_list), "2" (entries)
+        : "memory" );
+
+    return ret;
+}
+
+static inline int 
+HYPERVISOR_stack_switch(unsigned long ss, unsigned long esp)
 {
     int ret;
     __asm__ __volatile__ (
@@ -85,7 +112,8 @@ static inline int HYPERVISOR_stack_switch(unsigned long ss, unsigned long esp)
     return ret;
 }
 
-static inline int HYPERVISOR_set_callbacks(
+static inline int 
+HYPERVISOR_set_callbacks(
     unsigned long event_selector, unsigned long event_address,
     unsigned long failsafe_selector, unsigned long failsafe_address)
 {
@@ -99,7 +127,8 @@ static inline int HYPERVISOR_set_callbacks(
     return ret;
 }
 
-static inline int HYPERVISOR_fpu_taskswitch(void)
+static inline int 
+HYPERVISOR_fpu_taskswitch(void)
 {
     int ret;
     __asm__ __volatile__ (
@@ -109,7 +138,8 @@ static inline int HYPERVISOR_fpu_taskswitch(void)
     return ret;
 }
 
-static inline int HYPERVISOR_yield(void)
+static inline int 
+HYPERVISOR_yield(void)
 {
     int ret;
     __asm__ __volatile__ (
@@ -120,7 +150,8 @@ static inline int HYPERVISOR_yield(void)
     return ret;
 }
 
-static inline int HYPERVISOR_block(void)
+static inline int 
+HYPERVISOR_block(void)
 {
     int ret;
     __asm__ __volatile__ (
@@ -131,7 +162,8 @@ static inline int HYPERVISOR_block(void)
     return ret;
 }
 
-static inline int HYPERVISOR_shutdown(void)
+static inline int 
+HYPERVISOR_shutdown(void)
 {
     int ret;
     __asm__ __volatile__ (
@@ -143,7 +175,8 @@ static inline int HYPERVISOR_shutdown(void)
     return ret;
 }
 
-static inline int HYPERVISOR_reboot(void)
+static inline int 
+HYPERVISOR_reboot(void)
 {
     int ret;
     __asm__ __volatile__ (
@@ -155,7 +188,8 @@ static inline int HYPERVISOR_reboot(void)
     return ret;
 }
 
-static inline int HYPERVISOR_suspend(unsigned long srec)
+static inline int 
+HYPERVISOR_suspend(unsigned long srec)
 {
     int ret;
     /* NB. On suspend, control software expects a suspend record in %esi. */
@@ -168,7 +202,25 @@ static inline int HYPERVISOR_suspend(unsigned long srec)
     return ret;
 }
 
-static inline long HYPERVISOR_set_timer_op(uint64_t timeout)
+
+static inline void
+HYPERVISOR_crash(void) 
+{
+    int ret;
+    unsigned long ign1;
+    __asm__ __volatile__ (
+        TRAP_INSTR
+        : "=a" (ret), "=b" (ign1)
+        : "0" (__HYPERVISOR_sched_op),
+	"1" (SCHEDOP_shutdown | (SHUTDOWN_crash << SCHEDOP_reasonshift))
+        : "memory" );
+
+	for (;;) ; /* eliminate noreturn error */ 
+
+}
+
+static inline long 
+HYPERVISOR_set_timer_op(uint64_t timeout)
 {
     int ret;
     unsigned long timeout_hi = (unsigned long)(timeout>>32);
@@ -176,12 +228,13 @@ static inline long HYPERVISOR_set_timer_op(uint64_t timeout)
     __asm__ __volatile__ (
         TRAP_INSTR
         : "=a" (ret) : "0" (__HYPERVISOR_set_timer_op),
-        "b" (timeout_hi), "c" (timeout_lo) : "memory" );
+        "b" (timeout_lo), "c" (timeout_hi) : "memory" );
 
     return ret;
 }
 
-static inline int HYPERVISOR_dom0_op(dom0_op_t *dom0_op)
+static inline int 
+HYPERVISOR_dom0_op(dom0_op_t *dom0_op)
 {
     int ret;
     dom0_op->interface_version = DOM0_INTERFACE_VERSION;
@@ -193,7 +246,8 @@ static inline int HYPERVISOR_dom0_op(dom0_op_t *dom0_op)
     return ret;
 }
 
-static inline int HYPERVISOR_set_debugreg(int reg, unsigned long value)
+static inline int 
+HYPERVISOR_set_debugreg(int reg, unsigned long value)
 {
     int ret;
     __asm__ __volatile__ (
@@ -204,7 +258,8 @@ static inline int HYPERVISOR_set_debugreg(int reg, unsigned long value)
     return ret;
 }
 
-static inline unsigned long HYPERVISOR_get_debugreg(int reg)
+static inline unsigned long 
+HYPERVISOR_get_debugreg(int reg)
 {
     unsigned long ret;
     __asm__ __volatile__ (
@@ -215,7 +270,8 @@ static inline unsigned long HYPERVISOR_get_debugreg(int reg)
     return ret;
 }
 
-static inline int HYPERVISOR_update_descriptor(
+static inline int 
+HYPERVISOR_update_descriptor(
     unsigned long pa, unsigned long word1, unsigned long word2)
 {
     int ret;
@@ -227,7 +283,8 @@ static inline int HYPERVISOR_update_descriptor(
     return ret;
 }
 
-static inline int HYPERVISOR_set_fast_trap(int idx)
+static inline int 
+HYPERVISOR_set_fast_trap(int idx)
 {
     int ret;
     __asm__ __volatile__ (
@@ -238,9 +295,10 @@ static inline int HYPERVISOR_set_fast_trap(int idx)
     return ret;
 }
 
-static inline int HYPERVISOR_dom_mem_op(unsigned int   op,
-					unsigned long *pages,
-					unsigned long  nr_pages)
+static inline int 
+HYPERVISOR_dom_mem_op(unsigned int   op,
+		      unsigned long *pages,
+		      unsigned long  nr_pages)
 {
     int ret;
     __asm__ __volatile__ (
@@ -250,7 +308,8 @@ static inline int HYPERVISOR_dom_mem_op(unsigned int   op,
     return ret;
 }
 
-static inline int HYPERVISOR_multicall(void *call_list, int nr_calls)
+static inline int 
+HYPERVISOR_multicall(void *call_list, int nr_calls)
 {
     int ret;
     __asm__ __volatile__ (
@@ -261,14 +320,15 @@ static inline int HYPERVISOR_multicall(void *call_list, int nr_calls)
     return ret;
 }
 
-static inline int HYPERVISOR_update_va_mapping(
-    unsigned long page_nr, pte_t new_val, unsigned long flags)
+static inline int 
+HYPERVISOR_update_va_mapping(
+    unsigned long page_nr, unsigned long new_val, unsigned long flags)
 {
     int ret;
     __asm__ __volatile__ (
         TRAP_INSTR
         : "=a" (ret) : "0" (__HYPERVISOR_update_va_mapping), 
-	"b" (page_nr), "c" ((new_val).pte_low), "d" (flags):
+	"b" (page_nr), "c" (new_val), "d" (flags):
 	"memory" );
     /* XXX */
 #if 0
@@ -279,7 +339,8 @@ static inline int HYPERVISOR_update_va_mapping(
     return ret;
 }
 
-static inline int HYPERVISOR_event_channel_op(void *op)
+static inline int 
+HYPERVISOR_event_channel_op(void *op)
 {
     int ret;
     __asm__ __volatile__ (
@@ -290,7 +351,8 @@ static inline int HYPERVISOR_event_channel_op(void *op)
     return ret;
 }
 
-static inline int HYPERVISOR_xen_version(int cmd)
+static inline int 
+HYPERVISOR_xen_version(int cmd)
 {
     int ret;
     __asm__ __volatile__ (
@@ -301,7 +363,8 @@ static inline int HYPERVISOR_xen_version(int cmd)
     return ret;
 }
 
-static inline int HYPERVISOR_console_io(int cmd, int count, char *str)
+static inline int 
+HYPERVISOR_console_io(int cmd, int count, char *str)
 {
     int ret;
     __asm__ __volatile__ (
@@ -312,42 +375,84 @@ static inline int HYPERVISOR_console_io(int cmd, int count, char *str)
     return ret;
 }
 
-static __inline int HYPERVISOR_console_write(char *str, int count)
+static inline int 
+HYPERVISOR_console_write(char *str, int count)
 {
     return HYPERVISOR_console_io(CONSOLEIO_write, count, str); 
 }
 
-static inline int HYPERVISOR_physdev_op(void *physdev_op)
+static inline int 
+HYPERVISOR_physdev_op(void *physdev_op)
 {
     int ret;
+    unsigned long ign;
+
     __asm__ __volatile__ (
         TRAP_INSTR
-        : "=a" (ret) : "0" (__HYPERVISOR_physdev_op),
-        "b" (physdev_op) : "memory" );
+        : "=a" (ret), "=b" (ign) 
+        : "0" (__HYPERVISOR_physdev_op), "1" (physdev_op) 
+	: "memory" );
 
     return ret;
 }
 
-static inline int HYPERVISOR_update_va_mapping_otherdomain(
-    unsigned long page_nr, pte_t new_val, unsigned long flags, domid_t domid)
+static inline int
+HYPERVISOR_grant_table_op(
+    unsigned int cmd, void *uop, unsigned int count)
 {
     int ret;
+    unsigned long ign1, ign2, ign3;
+
     __asm__ __volatile__ (
         TRAP_INSTR
-        : "=a" (ret) : "0" (__HYPERVISOR_update_va_mapping_otherdomain), 
-        "b" (page_nr), "c" ((new_val).pte_low), "d" (flags), "S" (domid) :
+        : "=a" (ret), "=b" (ign1), "=c" (ign2), "=d" (ign3)
+        : "0" (__HYPERVISOR_grant_table_op), "1" (cmd), "2" (uop), "3" (count)
+        : "memory" );
+
+    return ret;
+}
+
+static inline int 
+HYPERVISOR_update_va_mapping_otherdomain(
+    unsigned long va, pte_t new_val, unsigned long flags, domid_t domid)
+{
+    int ret;
+    unsigned long ign1, ign2, ign3, ign4;
+	
+    __asm__ __volatile__ (
+        TRAP_INSTR
+        : "=a" (ret), "=b" (ign1), "=c" (ign2), "=d" (ign3), "=S" (ign4)
+        : "0" (__HYPERVISOR_update_va_mapping_otherdomain),
+          "1" (va), "2" ((new_val).pte_low), "3" (flags), "4" (domid) :
         "memory" );
-    
+
     return ret;
 } 
 
-static inline int HYPERVISOR_vm_assist(unsigned int cmd, unsigned int type)
+static inline int 
+HYPERVISOR_vm_assist(unsigned int cmd, unsigned int type)
 {
     int ret;
     __asm__ __volatile__ (
         TRAP_INSTR
         : "=a" (ret) : "0" (__HYPERVISOR_vm_assist),
         "b" (cmd), "c" (type) : "memory" );
+
+    return ret;
+}
+
+static inline int
+HYPERVISOR_boot_vcpu(
+    unsigned long vcpu, vcpu_guest_context_t *ctxt)
+{
+    int ret;
+    unsigned long ign1, ign2;
+
+    __asm__ __volatile__ (
+        TRAP_INSTR
+        : "=a" (ret), "=b" (ign1), "=c" (ign2)
+	: "0" (__HYPERVISOR_boot_vcpu), "1" (vcpu), "2" (ctxt)
+	: "memory");
 
     return ret;
 }

@@ -1,0 +1,23 @@
+# Xen/ia64 heavily leverages/reuses many files from Linux/ia64
+# you need the following files from kernel.org
+#  linux-2.6.11.tar.gz
+# place these in the parent directory of the xenXXX.bk tree
+# e.g. xen-unstable.bk should be in the same directory as linux-2.6.11.tar.gz
+
+# unpack linux-2.6.11 in the xenXXX.bk/.. directory
+tar xzf linux-2.6.11.tar.gz
+cd linux-2.6.11
+
+# go back to the xen subdirectory of xenXXX.bk
+cd xenXXX.bk/xen
+
+# create and patch the linux/ia64 files
+bash arch/ia64/tools/mkbuildtree
+# this should print out many patch messages but no errors
+bash arch/ia64/tools/mkbuildtree
+
+# build xen/ia64
+# if using cross-compiler
+make TARGET_ARCH=ia64
+# else if native
+make

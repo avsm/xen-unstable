@@ -564,7 +564,6 @@ void __init cpu_gdt_init(struct Xgt_desc_struct *gdt_descr)
 		frames[f] = virt_to_machine(va) >> PAGE_SHIFT;
 		make_page_readonly((void *)va);
 	}
-	flush_page_update_queue();
 	if (HYPERVISOR_set_gdt(frames, gdt_descr->size / 8))
 		BUG();
 	lgdt_finish();
