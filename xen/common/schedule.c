@@ -1,5 +1,4 @@
-/* -*-  Mode:C; c-basic-offset:4; tab-width:4 -*-
- ****************************************************************************
+/****************************************************************************
  * (C) 2002-2003 - Rolf Neugebauer - Intel Research Cambridge
  * (C) 2002-2003 University of Cambridge
  * (C) 2004      - Mark Williamson - Intel Research Cambridge
@@ -14,6 +13,15 @@
  *
  */
 
+/*#define WAKE_HISTO*/
+/*#define BLOCKTIME_HISTO*/
+
+#if defined(WAKE_HISTO)
+#define BUCKETS 31
+#elif defined(BLOCKTIME_HISTO)
+#define BUCKETS 200
+#endif
+
 #include <xen/config.h>
 #include <xen/init.h>
 #include <xen/lib.h>
@@ -26,6 +34,7 @@
 #include <xen/sched-if.h>
 #include <xen/softirq.h>
 #include <xen/trace.h>
+#include <xen/mm.h>
 #include <public/sched_ctl.h>
 
 /* opt_sched: scheduler - default to Borrowed Virtual Time */
@@ -34,6 +43,8 @@ string_param("sched", opt_sched);
 
 /*#define WAKE_HISTO*/
 /*#define BLOCKTIME_HISTO*/
+/*#define ADV_SCHED_HISTO*/
+//#include <xen/adv_sched_hist.h>
 
 #if defined(WAKE_HISTO)
 #define BUCKETS 31
@@ -43,39 +54,19 @@ string_param("sched", opt_sched);
 
 #define TIME_SLOP      (s32)MICROSECS(50)     /* allow time to slip a bit */
 
-/*
- * TODO MAW pull trace-related #defines out of here and into an auto-generated
- * header file later on!
- */
-#define TRC_SCHED_DOM_ADD             0x00010000
-#define TRC_SCHED_DOM_REM             0x00010001
-#define TRC_SCHED_WAKE                0x00010002
-#define TRC_SCHED_BLOCK               0x00010003
-#define TRC_SCHED_YIELD               0x00010004
-#define TRC_SCHED_SET_TIMER           0x00010005
-#define TRC_SCHED_CTL                 0x00010006
-#define TRC_SCHED_ADJDOM              0x00010007
-#define TRC_SCHED_RESCHED             0x00010008
-#define TRC_SCHED_SWITCH              0x00010009
-#define TRC_SCHED_S_TIMER_FN          0x0001000A
-#define TRC_SCHED_T_TIMER_FN          0x0001000B
-#define TRC_SCHED_DOM_TIMER_FN        0x0001000C
-
 /* Various timer handlers. */
 static void s_timer_fn(unsigned long unused);
 static void t_timer_fn(unsigned long unused);
 static void dom_timer_fn(unsigned long data);
 
 /* This is global for now so that private implementations can reach it */
-schedule_data_t schedule_data[NR_CPUS];
+struct schedule_data schedule_data[NR_CPUS];
 
 extern struct scheduler sched_bvt_def;
-extern struct scheduler sched_rrobin_def;
-extern struct scheduler sched_atropos_def;
+extern struct scheduler sched_sedf_def;
 static struct scheduler *schedulers[] = { 
     &sched_bvt_def,
-    &sched_rrobin_def,
-    &sched_atropos_def,
+    &sched_sedf_def,
     NULL
 };
 
@@ -92,59 +83,116 @@ static struct ac_timer t_timer[NR_CPUS];
 
 void free_domain_struct(struct domain *d)
 {
+    int i;
+
     SCHED_OP(free_task, d);
-    arch_free_domain_struct(d);
+    for (i = 0; i < MAX_VIRT_CPUS; i++)
+        if ( d->exec_domain[i] )
+            arch_free_exec_domain_struct(d->exec_domain[i]);
+
+    xfree(d);
+}
+
+struct exec_domain *alloc_exec_domain_struct(struct domain *d,
+                                             unsigned long vcpu)
+{
+    struct exec_domain *ed, *edc;
+
+    ASSERT( d->exec_domain[vcpu] == NULL );
+
+    if ( (ed = arch_alloc_exec_domain_struct()) == NULL )
+        return NULL;
+
+    memset(ed, 0, sizeof(*ed));
+
+    d->exec_domain[vcpu] = ed;
+    ed->domain = d;
+    ed->vcpu_id = vcpu;
+
+    if ( SCHED_OP(alloc_task, ed) < 0 )
+        goto out;
+
+    if ( vcpu != 0 )
+    {
+        ed->vcpu_info = &d->shared_info->vcpu_data[ed->vcpu_id];
+
+        for_each_exec_domain( d, edc )
+        {
+            if ( (edc->next_in_list == NULL) ||
+                 (edc->next_in_list->vcpu_id > vcpu) )
+                break;
+        }
+        ed->next_in_list  = edc->next_in_list;
+        edc->next_in_list = ed;
+
+        if (test_bit(_VCPUF_cpu_pinned, &edc->vcpu_flags)) {
+            ed->processor = (edc->processor + 1) % smp_num_cpus;
+            set_bit(_VCPUF_cpu_pinned, &ed->vcpu_flags);
+        } else {
+            ed->processor = (edc->processor + 1) % smp_num_cpus;  /* XXX */
+        }
+    }
+
+    return ed;
+
+ out:
+    d->exec_domain[vcpu] = NULL;
+    arch_free_exec_domain_struct(ed);
+
+    return NULL;
 }
 
 struct domain *alloc_domain_struct(void)
 {
     struct domain *d;
 
-    if ( (d = arch_alloc_domain_struct()) == NULL )
+    if ( (d = xmalloc(struct domain)) == NULL )
         return NULL;
     
     memset(d, 0, sizeof(*d));
 
-    if ( SCHED_OP(alloc_task, d) < 0 )
-    {
-        arch_free_domain_struct(d);
-        return NULL;
-    }
+    if ( alloc_exec_domain_struct(d, 0) == NULL )
+        goto out;
 
     return d;
+
+ out:
+    xfree(d);
+    return NULL;
 }
 
 /*
  * Add and remove a domain
  */
-void sched_add_domain(struct domain *d) 
+void sched_add_domain(struct exec_domain *ed) 
 {
-    /* Must be unpaused by control software to start execution. */
-    set_bit(DF_CTRLPAUSE, &d->flags);
+    struct domain *d = ed->domain;
 
-    if ( d->id != IDLE_DOMAIN_ID )
+    /* Must be unpaused by control software to start execution. */
+    set_bit(_VCPUF_ctrl_pause, &ed->vcpu_flags);
+
+    if ( d->domain_id != IDLE_DOMAIN_ID )
     {
         /* Initialise the per-domain timer. */
-        init_ac_timer(&d->timer);
-        d->timer.cpu      = d->processor;
-        d->timer.data     = (unsigned long)d;
-        d->timer.function = &dom_timer_fn;
+        init_ac_timer(&ed->timer);
+        ed->timer.cpu      = ed->processor;
+        ed->timer.data     = (unsigned long)ed;
+        ed->timer.function = &dom_timer_fn;
     }
     else
     {
-        schedule_data[d->processor].idle = d;
+        schedule_data[ed->processor].idle = ed;
     }
 
-    SCHED_OP(add_task, d);
-
-    TRACE_2D(TRC_SCHED_DOM_ADD, d->id, d);
+    SCHED_OP(add_task, ed);
+    TRACE_2D(TRC_SCHED_DOM_ADD, d->domain_id, ed->vcpu_id);
 }
 
-void sched_rem_domain(struct domain *d) 
+void sched_rem_domain(struct exec_domain *ed) 
 {
-    rem_ac_timer(&d->timer);
-    SCHED_OP(rem_task, d);
-    TRACE_2D(TRC_SCHED_DOM_REM, d->id, d);
+    rem_ac_timer(&ed->timer);
+    SCHED_OP(rem_task, ed);
+    TRACE_2D(TRC_SCHED_DOM_REM, ed->domain->domain_id, ed->vcpu_id);
 }
 
 void init_idle_task(void)
@@ -153,57 +201,74 @@ void init_idle_task(void)
         BUG();
 }
 
-void domain_sleep(struct domain *d)
+void domain_sleep(struct exec_domain *ed)
 {
     unsigned long flags;
 
-    spin_lock_irqsave(&schedule_data[d->processor].schedule_lock, flags);
+    spin_lock_irqsave(&schedule_data[ed->processor].schedule_lock, flags);
+    if ( likely(!domain_runnable(ed)) )
+        SCHED_OP(sleep, ed);
+    spin_unlock_irqrestore(&schedule_data[ed->processor].schedule_lock, flags);
 
-    if ( likely(!domain_runnable(d)) )
-        SCHED_OP(sleep, d);
-
-    spin_unlock_irqrestore(&schedule_data[d->processor].schedule_lock, flags);
+    TRACE_2D(TRC_SCHED_SLEEP, ed->domain->domain_id, ed->vcpu_id);
  
     /* Synchronous. */
-    while ( test_bit(DF_RUNNING, &d->flags) && !domain_runnable(d) )
+    while ( test_bit(_VCPUF_running, &ed->vcpu_flags) && !domain_runnable(ed) )
         cpu_relax();
 }
 
-void domain_wake(struct domain *d)
+void domain_wake(struct exec_domain *ed)
 {
     unsigned long flags;
 
-    spin_lock_irqsave(&schedule_data[d->processor].schedule_lock, flags);
-
-    if ( likely(domain_runnable(d)) )
+    spin_lock_irqsave(&schedule_data[ed->processor].schedule_lock, flags);
+    if ( likely(domain_runnable(ed)) )
     {
-        TRACE_2D(TRC_SCHED_WAKE, d->id, d);
-        SCHED_OP(wake, d);
+        SCHED_OP(wake, ed);
 #ifdef WAKE_HISTO
-        d->wokenup = NOW();
+        ed->wokenup = NOW();
 #endif
     }
-    
-    clear_bit(DF_MIGRATED, &d->flags);
-    
-    spin_unlock_irqrestore(&schedule_data[d->processor].schedule_lock, flags);
+    clear_bit(_VCPUF_cpu_migrated, &ed->vcpu_flags);
+    spin_unlock_irqrestore(&schedule_data[ed->processor].schedule_lock, flags);
+
+    TRACE_2D(TRC_SCHED_WAKE, ed->domain->domain_id, ed->vcpu_id);
 }
 
 /* Block the currently-executing domain until a pertinent event occurs. */
 long do_block(void)
 {
-    ASSERT(current->id != IDLE_DOMAIN_ID);
-    current->shared_info->vcpu_data[0].evtchn_upcall_mask = 0;
-    set_bit(DF_BLOCKED, &current->flags);
-    TRACE_2D(TRC_SCHED_BLOCK, current->id, current);
-    __enter_scheduler();
+    struct exec_domain *ed = current;
+
+#ifdef ADV_SCHED_HISTO
+    adv_sched_hist_start(current->processor);
+#endif
+
+    ed->vcpu_info->evtchn_upcall_mask = 0;
+    set_bit(_VCPUF_blocked, &ed->vcpu_flags);
+
+    /* Check for events /after/ blocking: avoids wakeup waiting race. */
+    if ( event_pending(ed) )
+    {
+        clear_bit(_VCPUF_blocked, &ed->vcpu_flags);
+    }
+    else
+    {
+        TRACE_2D(TRC_SCHED_BLOCK, ed->domain->domain_id, ed->vcpu_id);
+        __enter_scheduler();
+    }
+
     return 0;
 }
 
 /* Voluntarily yield the processor for this allocation. */
 static long do_yield(void)
 {
-    TRACE_2D(TRC_SCHED_YIELD, current->id, current);
+#ifdef ADV_SCHED_HISTO
+    adv_sched_hist_start(current->processor);
+#endif
+    
+    TRACE_2D(TRC_SCHED_YIELD, current->domain->domain_id, current->vcpu_id);
     __enter_scheduler();
     return 0;
 }
@@ -217,7 +282,6 @@ long do_sched_op(unsigned long op)
 
     switch ( op & SCHEDOP_cmdmask ) 
     {
-
     case SCHEDOP_yield:
     {
         ret = do_yield();
@@ -232,6 +296,9 @@ long do_sched_op(unsigned long op)
 
     case SCHEDOP_shutdown:
     {
+        TRACE_3D(TRC_SCHED_SHUTDOWN,
+                 current->domain->domain_id, current->vcpu_id,
+                 (op >> SCHEDOP_reasonshift));
         domain_shutdown((u8)(op >> SCHEDOP_reasonshift));
         break;
     }
@@ -244,19 +311,14 @@ long do_sched_op(unsigned long op)
 }
 
 /* Per-domain one-shot-timer hypercall. */
-long do_set_timer_op(unsigned long timeout_hi, unsigned long timeout_lo)
+long do_set_timer_op(s_time_t timeout)
 {
-    struct domain *p = current;
+    struct exec_domain *ed = current;
 
-    rem_ac_timer(&p->timer);
+    rem_ac_timer(&ed->timer);
     
-    if ( (timeout_hi != 0) || (timeout_lo != 0) )
-    {
-        p->timer.expires = ((s_time_t)timeout_hi<<32) | ((s_time_t)timeout_lo);
-        add_ac_timer(&p->timer);
-    }
-
-    TRACE_4D(TRC_SCHED_SET_TIMER, p->id, p, timeout_hi, timeout_lo);
+    if ( (ed->timer.expires = timeout) != 0 )
+        add_ac_timer(&ed->timer);
 
     return 0;
 }
@@ -269,12 +331,12 @@ int sched_id()
 
 long sched_ctl(struct sched_ctl_cmd *cmd)
 {
-    TRACE_0D(TRC_SCHED_CTL);
-
     if ( cmd->sched_id != ops.sched_id )
         return -EINVAL;
 
-    return SCHED_OP(control, cmd);
+    SCHED_OP(control, cmd);
+    TRACE_0D(TRC_SCHED_CTL);
+    return 0;
 }
 
 
@@ -282,10 +344,22 @@ long sched_ctl(struct sched_ctl_cmd *cmd)
 long sched_adjdom(struct sched_adjdom_cmd *cmd)
 {
     struct domain *d;
+    struct exec_domain *ed;
+    int cpu;
+#if NR_CPUS <=32
+    unsigned long have_lock;
+ #else
+    unsigned long long have_lock;
+#endif
+    int succ;
 
+    #define __set_cpu_bit(cpu, data) data |= ((typeof(data))1)<<cpu
+    #define __get_cpu_bit(cpu, data) (data & ((typeof(data))1)<<cpu)
+    #define __clear_cpu_bits(data) data = ((typeof(data))0)
+    
     if ( cmd->sched_id != ops.sched_id )
         return -EINVAL;
-
+    
     if ( cmd->direction != SCHED_INFO_PUT && cmd->direction != SCHED_INFO_GET )
         return -EINVAL;
 
@@ -293,12 +367,40 @@ long sched_adjdom(struct sched_adjdom_cmd *cmd)
     if ( d == NULL )
         return -ESRCH;
 
-    TRACE_1D(TRC_SCHED_ADJDOM, d->id);
-
-    spin_lock_irq(&schedule_data[d->processor].schedule_lock);
+    /* acquire locks on all CPUs on which exec_domains of this domain run */
+    do {
+        succ = 0;
+        __clear_cpu_bits(have_lock);
+        for_each_exec_domain(d, ed) {
+            cpu = ed->processor;
+            if (!__get_cpu_bit(cpu, have_lock)) {
+                /* if we don't have a lock on this CPU: acquire it*/
+                if (spin_trylock(&schedule_data[cpu].schedule_lock)) {
+                    /*we have this lock!*/
+                    __set_cpu_bit(cpu, have_lock);
+                    succ = 1;
+                } else {
+                    /*we didn,t get this lock -> free all other locks too!*/
+                    for (cpu = 0; cpu < NR_CPUS; cpu++)
+                        if (__get_cpu_bit(cpu, have_lock))
+                            spin_unlock(&schedule_data[cpu].schedule_lock);
+                    /* and start from the beginning! */
+                    succ = 0;
+                    /* leave the "for_each_domain_loop" */
+                    break;
+                }
+            }
+        }
+    } while (!succ);
+    //spin_lock_irq(&schedule_data[d->exec_domain[0]->processor].schedule_lock);
     SCHED_OP(adjdom, d, cmd);
-    spin_unlock_irq(&schedule_data[d->processor].schedule_lock);
+    //spin_unlock_irq(&schedule_data[d->exec_domain[0]->processor].schedule_lock);
+    for (cpu = 0; cpu < NR_CPUS; cpu++)
+        if (__get_cpu_bit(cpu, have_lock))
+            spin_unlock(&schedule_data[cpu].schedule_lock);
+    __clear_cpu_bits(have_lock);
 
+    TRACE_1D(TRC_SCHED_ADJDOM, d->domain_id);
     put_domain(d);
     return 0;
 }
@@ -310,30 +412,27 @@ long sched_adjdom(struct sched_adjdom_cmd *cmd)
  */
 static void __enter_scheduler(void)
 {
-    struct domain *prev = current, *next = NULL;
+    struct exec_domain *prev = current, *next = NULL;
     int                 cpu = prev->processor;
     s_time_t            now;
-    task_slice_t        next_slice;
+    struct task_slice   next_slice;
     s32                 r_time;     /* time for new dom to run */
 
     perfc_incrc(sched_run);
     
     spin_lock_irq(&schedule_data[cpu].schedule_lock);
- 
+
+#ifdef ADV_SCHED_HISTO
+    adv_sched_hist_from_stop(cpu);
+#endif
     now = NOW();
+#ifdef ADV_SCHED_HISTO
+    adv_sched_hist_start(cpu);
+#endif
 
     rem_ac_timer(&schedule_data[cpu].s_timer);
     
     ASSERT(!in_irq());
-
-    if ( test_bit(DF_BLOCKED, &prev->flags) )
-    {
-        /* This check is needed to avoid a race condition. */
-        if ( event_pending(prev) )
-            clear_bit(DF_BLOCKED, &prev->flags);
-        else
-            SCHED_OP(do_block, prev);
-    }
 
     prev->cpu_time += now - prev->lastschd;
 
@@ -352,16 +451,17 @@ static void __enter_scheduler(void)
     add_ac_timer(&schedule_data[cpu].s_timer);
 
     /* Must be protected by the schedule_lock! */
-    set_bit(DF_RUNNING, &next->flags);
+    set_bit(_VCPUF_running, &next->vcpu_flags);
 
     spin_unlock_irq(&schedule_data[cpu].schedule_lock);
 
-    if ( unlikely(prev == next) )
-        return;
-    
+    if ( unlikely(prev == next) ) {
+#ifdef ADV_SCHED_HISTO
+        adv_sched_hist_to_stop(cpu);
+#endif
+        return continue_running(prev);
+    }
     perfc_incrc(sched_ctx);
-
-    cleanup_writable_pagetable(prev);
 
 #if defined(WAKE_HISTO)
     if ( !is_idle_task(next->domain) && next->wokenup ) {
@@ -381,31 +481,31 @@ static void __enter_scheduler(void)
     }
 #endif
 
-    TRACE_2D(TRC_SCHED_SWITCH, next->id, next);
-
-    switch_to(prev, next);
-
-    /*
-     * We do this late on because it doesn't need to be protected by the
-     * schedule_lock, and because we want this to be the very last use of
-     * 'prev' (after this point, a dying domain's info structure may be freed
-     * without warning). 
-     */
-    clear_bit(DF_RUNNING, &prev->flags);
+    prev->sleep_tick = schedule_data[cpu].tick;
 
     /* Ensure that the domain has an up-to-date time base. */
-    if ( !is_idle_task(next) && update_dom_time(next) )
-        send_guest_virq(next, VIRQ_TIMER);
+    if ( !is_idle_task(next->domain) )
+    {
+        update_dom_time(next);
+        if ( next->sleep_tick != schedule_data[cpu].tick )
+            send_guest_virq(next, VIRQ_TIMER);
+    }
 
-    schedule_tail(next);
+    TRACE_4D(TRC_SCHED_SWITCH,
+             prev->domain->domain_id, prev->vcpu_id,
+             next->domain->domain_id, next->vcpu_id);
 
-    BUG();
+#ifdef ADV_SCHED_HISTO
+    adv_sched_hist_to_stop(cpu);
+#endif
+
+    context_switch(prev, next);
 }
 
 /* No locking needed -- pointer comparison is safe :-) */
 int idle_cpu(int cpu)
 {
-    struct domain *p = schedule_data[cpu].curr;
+    struct exec_domain *p = schedule_data[cpu].curr;
     return p == idle_task[cpu];
 }
 
@@ -417,37 +517,44 @@ int idle_cpu(int cpu)
  * - dom_timer: per domain timer to specifiy timeout values
  ****************************************************************************/
 
-/* The scheduler timer: force a run through the scheduler*/
+/* The scheduler timer: force a run through the scheduler */
 static void s_timer_fn(unsigned long unused)
 {
-    TRACE_0D(TRC_SCHED_S_TIMER_FN);
+#ifdef ADV_SCHED_HISTO
+    adv_sched_hist_start(current->processor);
+#endif
+
     raise_softirq(SCHEDULE_SOFTIRQ);
     perfc_incrc(sched_irq);
 }
 
-/* Periodic tick timer: send timer event to current domain*/
+/* Periodic tick timer: send timer event to current domain */
 static void t_timer_fn(unsigned long unused)
 {
-    struct domain *d = current;
+    struct exec_domain *ed  = current;
+    unsigned int        cpu = ed->processor;
 
-    TRACE_0D(TRC_SCHED_T_TIMER_FN);
+    schedule_data[cpu].tick++;
 
-    if ( !is_idle_task(d) && update_dom_time(d) )
-        send_guest_virq(d, VIRQ_TIMER);
+    if ( !is_idle_task(ed->domain) )
+    {
+        update_dom_time(ed);
+        send_guest_virq(ed, VIRQ_TIMER);
+    }
 
     page_scrub_schedule_work();
 
-    t_timer[d->processor].expires = NOW() + MILLISECS(10);
-    add_ac_timer(&t_timer[d->processor]);
+    t_timer[cpu].expires = NOW() + MILLISECS(10);
+    add_ac_timer(&t_timer[cpu]);
 }
 
 /* Domain timer function, sends a virtual timer interrupt to domain */
 static void dom_timer_fn(unsigned long data)
 {
-    struct domain *d = (struct domain *)data;
-    TRACE_0D(TRC_SCHED_DOM_TIMER_FN);
-    (void)update_dom_time(d);
-    send_guest_virq(d, VIRQ_TIMER);
+    struct exec_domain *ed = (struct exec_domain *)data;
+
+    update_dom_time(ed);
+    send_guest_virq(ed, VIRQ_TIMER);
 }
 
 /* Initialise the data structures. */
@@ -460,7 +567,7 @@ void __init scheduler_init(void)
     for ( i = 0; i < NR_CPUS; i++ )
     {
         spin_lock_init(&schedule_data[i].schedule_lock);
-        schedule_data[i].curr = &idle0_task;
+        schedule_data[i].curr = &idle0_exec_domain;
         
         init_ac_timer(&schedule_data[i].s_timer);
         schedule_data[i].s_timer.cpu      = i;
@@ -473,7 +580,7 @@ void __init scheduler_init(void)
         t_timer[i].function = &t_timer_fn;
     }
 
-    schedule_data[0].idle = &idle0_task;
+    schedule_data[0].idle = &idle0_exec_domain;
 
     for ( i = 0; schedulers[i] != NULL; i++ )
     {
@@ -560,6 +667,73 @@ void reset_sched_histo(unsigned char key)
             schedule_data[j].hist[i] = 0;
 }
 #else
+#if defined(ADV_SCHED_HISTO)
+void print_sched_histo(unsigned char key)
+{
+    int i, j, k,t;
+    printf("Hello!\n");
+    for ( k = 0; k < smp_num_cpus; k++ )
+    {
+        j = 0;
+	t = 0;
+        printf ("CPU[%02d]: scheduler latency histogram FROM (ms:[count])\n", k);
+        for ( i = 0; i < BUCKETS; i++ )
+        {
+            //if ( schedule_data[k].hist[i] != 0 )
+            {
+	        t += schedule_data[k].from_hist[i];
+                if ( i < BUCKETS-1 )
+                    printk("%3d:[%7u]    ", i, schedule_data[k].from_hist[i]);
+                else
+                    printk(" >:[%7u]    ", schedule_data[k].from_hist[i]);
+                //if ( !(++j % 5) )
+                    printk("\n");
+            }
+        }
+        printk("\nTotal: %i\n",t);
+    }
+    for ( k = 0; k < smp_num_cpus; k++ )
+    {
+        j = 0; t = 0;
+        printf ("CPU[%02d]: scheduler latency histogram TO (ms:[count])\n", k);
+        for ( i = 0; i < BUCKETS; i++ )
+        {
+            //if ( schedule_data[k].hist[i] != 0 )
+            {
+	    	t += schedule_data[k].from_hist[i];
+                if ( i < BUCKETS-1 )
+                    printk("%3d:[%7u]    ", i, schedule_data[k].to_hist[i]);
+                else
+                    printk(" >:[%7u]    ", schedule_data[k].to_hist[i]);
+                //if ( !(++j % 5) )
+                    printk("\n");
+            }
+        }
+	printk("\nTotal: %i\n",t);
+    }
+      
+}
+void reset_sched_histo(unsigned char key)
+{
+    int i, j;
+    for ( j = 0; j < smp_num_cpus; j++ ) {
+        for ( i=0; i < BUCKETS; i++ ) 
+            schedule_data[j].to_hist[i] = schedule_data[j].from_hist[i] = 0;
+        schedule_data[j].save_tsc = 0;
+    }
+}
+#else
 void print_sched_histo(unsigned char key) { }
 void reset_sched_histo(unsigned char key) { }
 #endif
+#endif
+
+/*
+ * Local variables:
+ * mode: C
+ * c-set-style: "BSD"
+ * c-basic-offset: 4
+ * tab-width: 4
+ * indent-tabs-mode: nil
+ * End:
+ */
