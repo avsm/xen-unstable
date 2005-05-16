@@ -1,60 +1,66 @@
+
 #ifndef _X86_64_CURRENT_H
 #define _X86_64_CURRENT_H
 
-#if !defined(__ASSEMBLY__)
 struct domain;
 
-#include <asm/pda.h>
-
 #define STACK_RESERVED \
-    (sizeof(execution_context_t))
+    (sizeof(struct cpu_user_regs) + sizeof(struct domain *))
 
-static inline struct domain * get_current(void)
+static inline struct exec_domain *get_current(void)
 {
-    struct domain *current;
-    current = read_pda(pcurrent);
-    return current;
+    struct exec_domain *ed;
+    __asm__ ( "orq %%rsp,%0; andq $~7,%0; movq (%0),%0" 
+              : "=r" (ed) : "0" (STACK_SIZE-8) );
+    return ed;
 }
  
 #define current get_current()
 
-static inline void set_current(struct domain *p)
+static inline void set_current(struct exec_domain *ed)
 {
-    write_pda(pcurrent,p);
+    __asm__ ( "orq %%rsp,%0; andq $~7,%0; movq %1,(%0)" 
+              : : "r" (STACK_SIZE-8), "r" (ed) );    
 }
 
-static inline execution_context_t *get_execution_context(void)
+static inline struct cpu_user_regs *guest_cpu_user_regs(void)
 {
-    execution_context_t *execution_context;
+    struct cpu_user_regs *cpu_user_regs;
     __asm__( "andq %%rsp,%0; addq %2,%0"
-	    : "=r" (execution_context)
+	    : "=r" (cpu_user_regs)
 	    : "0" (~(STACK_SIZE-1)), "i" (STACK_SIZE-STACK_RESERVED) ); 
-    return execution_context;
+    return cpu_user_regs;
 }
 
-static inline unsigned long get_stack_top(void)
+/*
+ * Get the bottom-of-stack, as stored in the per-CPU TSS. This is actually
+ * 40 bytes before the real bottom of the stack to allow space for:
+ *  domain pointer, DS, ES, FS, GS
+ */
+static inline unsigned long get_stack_bottom(void)
 {
     unsigned long p;
-    __asm__ ( "orq %%rsp,%0; andq $~7,%0" 
-              : "=r" (p) : "0" (STACK_SIZE-8) );
+    __asm__( "andq %%rsp,%0; addq %2,%0"
+	    : "=r" (p)
+	    : "0" (~(STACK_SIZE-1)), "i" (STACK_SIZE-40) );
     return p;
 }
 
 #define reset_stack_and_jump(__fn)                                \
     __asm__ __volatile__ (                                        \
         "movq %0,%%rsp; jmp "STR(__fn)                            \
-        : : "r" (get_execution_context()) )
+        : : "r" (guest_cpu_user_regs()) )
 
-#define schedule_tail(_d) ((_d)->thread.schedule_tail)(_d)
-
-#else
-
-#ifndef ASM_OFFSET_H
-#include <asm/offset.h> 
-#endif
-
-#define GET_CURRENT(reg) movq %gs:(pda_pcurrent),reg
-
-#endif
+#define schedule_tail(_ed) ((_ed)->arch.schedule_tail)(_ed)
 
 #endif /* !(_X86_64_CURRENT_H) */
+
+/*
+ * Local variables:
+ * mode: C
+ * c-set-style: "BSD"
+ * c-basic-offset: 4
+ * tab-width: 4
+ * indent-tabs-mode: nil
+ * End:
+ */
