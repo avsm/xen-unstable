@@ -33,10 +33,13 @@
  * in their ABI. These hard-coded values are always near the start of the GDT,
  * so Xen places itself out of the way.
  * 
+ * NR_RESERVED_GDT_ENTRIES is (8 + 2 * NR_CPUS) Please update this value if 
+ * you increase NR_CPUS or add another GDT entry to gdt_table in x86_32.S
+ *
  * NB. The reserved range is inclusive (that is, both FIRST_RESERVED_GDT_ENTRY
  * and LAST_RESERVED_GDT_ENTRY are reserved).
  */
-#define NR_RESERVED_GDT_ENTRIES    40
+#define NR_RESERVED_GDT_ENTRIES    72
 #define FIRST_RESERVED_GDT_ENTRY   256
 #define LAST_RESERVED_GDT_ENTRY    \
   (FIRST_RESERVED_GDT_ENTRY + NR_RESERVED_GDT_ENTRIES - 1)
@@ -49,13 +52,17 @@
  */
 #define FLAT_RING1_CS 0x0819    /* GDT index 259 */
 #define FLAT_RING1_DS 0x0821    /* GDT index 260 */
+#define FLAT_RING1_SS 0x0821    /* GDT index 260 */
 #define FLAT_RING3_CS 0x082b    /* GDT index 261 */
 #define FLAT_RING3_DS 0x0833    /* GDT index 262 */
+#define FLAT_RING3_SS 0x0833    /* GDT index 262 */
 
-#define FLAT_GUESTOS_CS FLAT_RING1_CS
-#define FLAT_GUESTOS_DS FLAT_RING1_DS
+#define FLAT_KERNEL_CS FLAT_RING1_CS
+#define FLAT_KERNEL_DS FLAT_RING1_DS
+#define FLAT_KERNEL_SS FLAT_RING1_SS
 #define FLAT_USER_CS    FLAT_RING3_CS
 #define FLAT_USER_DS    FLAT_RING3_DS
+#define FLAT_USER_SS    FLAT_RING3_SS
 
 /* And the trap vector is... */
 #define TRAP_INSTR "int $0x82"
@@ -67,7 +74,7 @@
  */
 #define HYPERVISOR_VIRT_START (0xFC000000UL)
 #ifndef machine_to_phys_mapping
-#define machine_to_phys_mapping ((unsigned long *)HYPERVISOR_VIRT_START)
+#define machine_to_phys_mapping ((u32 *)HYPERVISOR_VIRT_START)
 #endif
 
 #ifndef __ASSEMBLY__
@@ -90,58 +97,61 @@ typedef struct {
     memory_t address; /* 4: code address                                  */
 } PACKED trap_info_t; /* 8 bytes */
 
-typedef struct
-{
-    unsigned long ebx;
-    unsigned long ecx;
-    unsigned long edx;
-    unsigned long esi;
-    unsigned long edi;
-    unsigned long ebp;
-    unsigned long eax;
-    unsigned long _unused;
-    unsigned long eip;
-    unsigned long cs;
-    unsigned long eflags;
-    unsigned long esp;
-    unsigned long ss;
-    unsigned long es;
-    unsigned long ds;
-    unsigned long fs;
-    unsigned long gs;
-} PACKED execution_context_t;
+typedef struct cpu_user_regs {
+    u32 ebx;
+    u32 ecx;
+    u32 edx;
+    u32 esi;
+    u32 edi;
+    u32 ebp;
+    u32 eax;
+    u16 error_code;    /* private */
+    u16 entry_vector;  /* private */
+    u32 eip;
+    u32 cs;
+    u32 eflags;
+    u32 esp;
+    u32 ss;
+    u32 es;
+    u32 ds;
+    u32 fs;
+    u32 gs;
+} cpu_user_regs_t;
 
 typedef u64 tsc_timestamp_t; /* RDTSC timestamp */
 
 /*
- * The following is all CPU context. Note that the i387_ctxt block is filled 
+ * The following is all CPU context. Note that the fpu_ctxt block is filled 
  * in by FXSAVE if the CPU has feature FXSR; otherwise FSAVE is used.
  */
-typedef struct {
-#define ECF_I387_VALID (1<<0)
-    unsigned long flags;
-    execution_context_t cpu_ctxt;           /* User-level CPU registers     */
-    char          fpu_ctxt[256];            /* User-level FPU registers     */
+typedef struct vcpu_guest_context {
+#define VGCF_I387_VALID (1<<0)
+#define VGCF_VMX_GUEST  (1<<1)
+#define VGCF_IN_KERNEL  (1<<2)
+    unsigned long flags;                    /* VGCF_* flags                 */
+    cpu_user_regs_t user_regs;              /* User-level CPU registers     */
+    struct { char x[512]; } fpu_ctxt        /* User-level FPU registers     */
+    __attribute__((__aligned__(16)));       /* (needs 16-byte alignment)    */
     trap_info_t   trap_ctxt[256];           /* Virtual IDT                  */
-    unsigned int  fast_trap_idx;            /* "Fast trap" vector offset    */
     unsigned long ldt_base, ldt_ents;       /* LDT (linear address, # ents) */
     unsigned long gdt_frames[16], gdt_ents; /* GDT (machine frames, # ents) */
-    unsigned long guestos_ss, guestos_esp;  /* Virtual TSS (only SS1/ESP1)  */
+    unsigned long kernel_ss, kernel_sp;     /* Virtual TSS (only SS1/SP1)   */
     unsigned long pt_base;                  /* CR3 (pagetable base)         */
     unsigned long debugreg[8];              /* DB0-DB7 (debug registers)    */
     unsigned long event_callback_cs;        /* CS:EIP of event callback     */
     unsigned long event_callback_eip;
     unsigned long failsafe_callback_cs;     /* CS:EIP of failsafe callback  */
     unsigned long failsafe_callback_eip;
-} PACKED full_execution_context_t;
+    unsigned long vm_assist;                /* VMASST_TYPE_* bitmap */
+} vcpu_guest_context_t;
 
 typedef struct {
-    u64 mfn_to_pfn_start;      /* MFN of start of m2p table */
-    u64 pfn_to_mfn_frame_list; /* MFN of a table of MFNs that 
-				  make up p2m table */
-} PACKED arch_shared_info_t;
+    /* MFN of a table of MFNs that make up p2m table */
+    u64 pfn_to_mfn_frame_list;
+} arch_shared_info_t;
 
-#define ARCH_HAS_FAST_TRAP
+typedef struct {
+} arch_vcpu_info_t;
 
 #endif
 

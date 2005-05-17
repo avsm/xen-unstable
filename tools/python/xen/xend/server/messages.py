@@ -4,7 +4,12 @@ import types
 
 from xen.lowlevel import xu
 
-DEBUG = 0
+DEBUG = False
+
+#PORT_WILDCARD = 0xefffffff
+
+"""Wildcard for the control message types."""
+TYPE_WILDCARD = 0xffff
 
 """ All message formats.
 Added to incrementally for the various message types.
@@ -41,8 +46,6 @@ CMSG_BLKIF_BE_CONNECT               =  2
 CMSG_BLKIF_BE_DISCONNECT            =  3
 CMSG_BLKIF_BE_VBD_CREATE            =  4
 CMSG_BLKIF_BE_VBD_DESTROY           =  5
-CMSG_BLKIF_BE_VBD_GROW              =  6
-CMSG_BLKIF_BE_VBD_SHRINK            =  7
 CMSG_BLKIF_BE_DRIVER_STATUS         = 32
 
 BLKIF_DRIVER_STATUS_DOWN            =  0
@@ -61,7 +64,7 @@ BLKIF_BE_STATUS_INTERFACE_CONNECTED =  4
 BLKIF_BE_STATUS_VBD_EXISTS          =  5
 BLKIF_BE_STATUS_VBD_NOT_FOUND       =  6
 BLKIF_BE_STATUS_OUT_OF_MEMORY       =  7
-BLKIF_BE_STATUS_EXTENT_NOT_FOUND    =  8
+BLKIF_BE_STATUS_PHYSDEV_NOT_FOUND   =  8
 BLKIF_BE_STATUS_MAPPING_ERROR       =  9
 
 blkif_formats = {
@@ -86,11 +89,6 @@ blkif_formats = {
     (CMSG_BLKIF_BE, CMSG_BLKIF_BE_VBD_CREATE),
     # Create a vbd device.
 
-    'blkif_be_vbd_grow_t':
-    (CMSG_BLKIF_BE, CMSG_BLKIF_BE_VBD_GROW),
-    # Change the size of a vbd device. Remove?
-    # Do in one go in blkif_be_vbd_create_t.
-
     'blkif_be_vbd_destroy_t':
     (CMSG_BLKIF_BE, CMSG_BLKIF_BE_VBD_DESTROY),
     # Destroy a vbd.
@@ -101,7 +99,6 @@ blkif_formats = {
     (CMSG_BLKIF_FE, CMSG_BLKIF_FE_INTERFACE_STATUS),
     # Notify device status to fe.
     # Also used to notify 'any' device change with status BLKIF_INTERFACE_STATUS_CHANGED.
-    # Rename to blkif_fe_interface_status.
 
     'blkif_fe_driver_status_t':
     (CMSG_BLKIF_FE, CMSG_BLKIF_FE_DRIVER_STATUS),
@@ -109,7 +106,6 @@ blkif_formats = {
     # Xend sets be(s) to BLKIF_INTERFACE_STATUS_DISCONNECTED,
     # sends blkif_fe_interface_status_t to fe (from each be).
     #
-    # Rename to blkif_fe_driver_status.
     # Reply with i/f count.
     # The i/f sends probes (using -ve trick), we reply with the info.
 
@@ -150,6 +146,7 @@ CMSG_NETIF_BE_CREATE                =  0
 CMSG_NETIF_BE_DESTROY               =  1
 CMSG_NETIF_BE_CONNECT               =  2
 CMSG_NETIF_BE_DISCONNECT            =  3
+CMSG_NETIF_BE_CREDITLIMIT           =  4
 CMSG_NETIF_BE_DRIVER_STATUS         = 32
 
 NETIF_INTERFACE_STATUS_CLOSED       =  0 #/* Interface doesn't exist.    */
@@ -173,6 +170,9 @@ netif_formats = {
     'netif_be_destroy_t':
     (CMSG_NETIF_BE, CMSG_NETIF_BE_DESTROY),
 
+    'netif_be_creditlimit_t':
+    (CMSG_NETIF_BE, CMSG_NETIF_BE_CREDITLIMIT),
+
     'netif_be_driver_status_t':
     (CMSG_NETIF_BE, CMSG_NETIF_BE_DRIVER_STATUS),
 
@@ -187,6 +187,80 @@ netif_formats = {
     }
 
 msg_formats.update(netif_formats)
+
+#============================================================================
+# USB interface message types.
+#============================================================================
+
+CMSG_USBIF_BE = 8
+CMSG_USBIF_FE = 9
+
+CMSG_USBIF_FE_INTERFACE_STATUS_CHANGED = 0
+
+CMSG_USBIF_FE_DRIVER_STATUS_CHANGED = 32
+CMSG_USBIF_FE_INTERFACE_CONNECT     = 33
+CMSG_USBIF_FE_INTERFACE_DISCONNECT  = 34
+
+USBIF_DRIVER_STATUS_DOWN = 0
+USBIF_DRIVER_STATUS_UP   = 1
+
+USBIF_INTERFACE_STATUS_DESTROYED    = 0 #/* Interface doesn't exist.    */
+USBIF_INTERFACE_STATUS_DISCONNECTED = 1 #/* Exists but is disconnected. */
+USBIF_INTERFACE_STATUS_CONNECTED    = 2 #/* Exists and is connected.    */
+
+CMSG_USBIF_BE_CREATE = 0
+CMSG_USBIF_BE_DESTROY = 1
+CMSG_USBIF_BE_CONNECT = 2
+
+CMSG_USBIF_BE_DISCONNECT = 3
+CMSG_USBIF_BE_CLAIM_PORT = 4
+CMSG_USBIF_BE_RELEASE_PORT = 5
+
+CMSG_USBIF_BE_DRIVER_STATUS_CHANGED = 32
+
+USBIF_BE_STATUS_OKAY = 0
+USBIF_BE_STATUS_ERROR = 1
+
+USBIF_BE_STATUS_INTERFACE_EXISTS = 2
+USBIF_BE_STATUS_INTERFACE_NOT_FOUND = 3
+USBIF_BE_STATUS_INTERFACE_CONNECTED = 4
+USBIF_BE_STATUS_OUT_OF_MEMORY = 7
+USBIF_BE_STATUS_MAPPING_ERROR = 9
+
+usbif_formats = {
+    'usbif_be_create_t':
+    (CMSG_USBIF_BE, CMSG_USBIF_BE_CREATE),
+
+    'usbif_be_destroy_t':
+    (CMSG_USBIF_BE, CMSG_USBIF_BE_DESTROY),
+
+    'usbif_be_connect_t':
+    (CMSG_USBIF_BE, CMSG_USBIF_BE_CONNECT),
+
+    'usbif_be_disconnect_t':
+    (CMSG_USBIF_BE, CMSG_USBIF_BE_DISCONNECT),
+
+    'usbif_be_claim_port_t':
+    (CMSG_USBIF_BE, CMSG_USBIF_BE_CLAIM_PORT),
+
+    'usbif_be_release_port_t':
+    (CMSG_USBIF_BE, CMSG_USBIF_BE_RELEASE_PORT),
+
+    'usbif_fe_interface_status_changed_t':
+    (CMSG_USBIF_FE, CMSG_USBIF_FE_INTERFACE_STATUS_CHANGED),
+
+    'usbif_fe_driver_status_changed_t':
+    (CMSG_USBIF_FE, CMSG_USBIF_FE_DRIVER_STATUS_CHANGED),
+
+    'usbif_fe_interface_connect_t':
+    (CMSG_USBIF_FE, CMSG_USBIF_FE_INTERFACE_CONNECT),
+
+    'usbif_fe_interface_disconnect_t':
+    (CMSG_USBIF_FE, CMSG_USBIF_FE_INTERFACE_DISCONNECT),
+   
+    }
+    
+msg_formats.update(usbif_formats)
 
 #============================================================================
 # Domain shutdown message types.
@@ -266,9 +340,9 @@ def packMsg(ty, params):
     (major, minor) = msg_formats[ty]
     args = {}
     for (k, v) in params.items():
-        if k == 'mac':
+        if k in ['mac', 'be_mac']:
             for i in range(0, 6):
-                args['mac[%d]' % i] = v[i]
+                args['%s[%d]' % (k, i)] = v[i]
         else:
             args[k] = v
     msg = xu.message(major, minor, msgid, args)
@@ -303,8 +377,8 @@ def unpackMsg(ty, msg):
                 pass
         if macs:
             args['mac'] = mac
-            print 'macs=', macs
-            print 'args=', args
+            #print 'macs=', macs
+            #print 'args=', args
             for k in macs:
                 del args[k]
     if DEBUG:
@@ -327,7 +401,7 @@ def msgTypeName(ty, subty):
             return name
     return None
 
-def printMsg(msg, out=sys.stdout, all=0):
+def printMsg(msg, out=sys.stdout, all=False):
     """Print a message.
 
     @param msg: message
@@ -346,3 +420,18 @@ def printMsg(msg, out=sys.stdout, all=0):
     if all:
         print >>out, 'payload=', msg.get_payload()
 
+
+def getMessageType(msg):
+    """Get a 2-tuple of the message type and subtype.
+
+    @param msg: message
+    @type  msg: xu message
+    @return: type info
+    @rtype:  (int, int)
+    """
+    hdr = msg.get_header()
+    return (hdr['type'], hdr.get('subtype'))
+
+def getMessageId(msg):
+    hdr = msg.get_header()
+    return hdr['id']

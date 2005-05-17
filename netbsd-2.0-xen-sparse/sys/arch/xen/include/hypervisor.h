@@ -180,12 +180,16 @@ HYPERVISOR_set_callbacks(
 }
 
 static inline int
-HYPERVISOR_fpu_taskswitch(void)
+HYPERVISOR_fpu_taskswitch(int set)
 {
     int ret;
+    unsigned long ign;
+
     __asm__ __volatile__ (
         TRAP_INSTR
-        : "=a" (ret) : "0" (__HYPERVISOR_fpu_taskswitch) : "memory" );
+        : "=a" (ret), "=b" (ign)
+        : "0" (__HYPERVISOR_fpu_taskswitch), "1" (set)
+        : "memory" );
 
     return ret;
 }
@@ -280,7 +284,7 @@ HYPERVISOR_set_timer_op(uint64_t timeout)
     __asm__ __volatile__ (
         TRAP_INSTR
         : "=a" (ret), "=b" (ign1), "=c" (ign2)
-	: "0" (__HYPERVISOR_set_timer_op), "b" (timeout_hi), "c" (timeout_lo)
+	: "0" (__HYPERVISOR_set_timer_op), "b" (timeout_lo), "c" (timeout_hi)
 	: "memory");
 
     return ret;
@@ -350,21 +354,6 @@ HYPERVISOR_update_descriptor(unsigned long pa, unsigned long word1,
 }
 
 static inline int
-HYPERVISOR_set_fast_trap(int idx)
-{
-    int ret;
-    unsigned long ign1;
-
-    __asm__ __volatile__ (
-        TRAP_INSTR
-        : "=a" (ret), "=b" (ign1)
-	: "0" (__HYPERVISOR_set_fast_trap), "1" (idx)
-	: "memory" );
-
-    return ret;
-}
-
-static inline int
 HYPERVISOR_dom_mem_op(unsigned int op, unsigned long *extent_list,
     unsigned long nr_extents, unsigned int extent_order)
 {
@@ -398,7 +387,7 @@ HYPERVISOR_multicall(void *call_list, int nr_calls)
 }
 
 static inline int
-HYPERVISOR_update_va_mapping(unsigned long page_nr, unsigned long new_val,
+HYPERVISOR_update_va_mapping(unsigned long va, unsigned long new_val,
     unsigned long flags)
 {
     int ret;
@@ -408,12 +397,12 @@ HYPERVISOR_update_va_mapping(unsigned long page_nr, unsigned long new_val,
         TRAP_INSTR
         : "=a" (ret), "=b" (ign1), "=c" (ign2), "=d" (ign3)
 	: "0" (__HYPERVISOR_update_va_mapping), 
-          "1" (page_nr), "2" (new_val), "3" (flags)
+          "1" (va), "2" (new_val), "3" (flags)
 	: "memory" );
 
     if (__predict_false(ret < 0))
         panic("Failed update VA mapping: %08lx, %08lx, %08lx",
-              page_nr, new_val, flags);
+              va, new_val, flags);
 
     return ret;
 }
@@ -494,7 +483,7 @@ HYPERVISOR_grant_table_op(unsigned int cmd, void *uop, unsigned int count)
 }
 
 static inline int
-HYPERVISOR_update_va_mapping_otherdomain(unsigned long page_nr,
+HYPERVISOR_update_va_mapping_otherdomain(unsigned long va,
     unsigned long new_val, unsigned long flags, domid_t domid)
 {
     int ret;
@@ -504,7 +493,7 @@ HYPERVISOR_update_va_mapping_otherdomain(unsigned long page_nr,
         TRAP_INSTR
         : "=a" (ret), "=b" (ign1), "=c" (ign2), "=d" (ign3), "=S" (ign4)
 	: "0" (__HYPERVISOR_update_va_mapping_otherdomain),
-          "1" (page_nr), "2" (new_val), "3" (flags), "4" (domid) :
+          "1" (va), "2" (new_val), "3" (flags), "4" (domid) :
         "memory" );
     
     return ret;
