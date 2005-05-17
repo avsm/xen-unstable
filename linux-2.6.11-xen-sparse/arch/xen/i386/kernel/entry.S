@@ -80,13 +80,31 @@ VM_MASK		= 0x00020000
 #define evtchn_upcall_pending		/* 0 */
 #define evtchn_upcall_mask		1
 
-#define XEN_GET_VCPU_INFO(reg)	movl HYPERVISOR_shared_info,reg
-#define XEN_BLOCK_EVENTS(reg)	movb $1,evtchn_upcall_mask(reg)
-#define XEN_UNBLOCK_EVENTS(reg)	movb $0,evtchn_upcall_mask(reg)
-#define XEN_SAVE_UPCALL_MASK(reg,tmp,off) \
-	movb evtchn_upcall_mask(reg), tmp; \
-	movb tmp, off(%esp)
+#define sizeof_vcpu_shift		3
 
+#ifdef CONFIG_SMP
+#define preempt_disable(reg)	incl TI_preempt_count(reg)
+#define preempt_enable(reg)	decl TI_preempt_count(reg)
+#define XEN_GET_VCPU_INFO(reg)	preempt_disable(%ebp)			; \
+				movl TI_cpu(%ebp),reg			; \
+				shl  $sizeof_vcpu_shift,reg		; \
+				addl HYPERVISOR_shared_info,reg
+#define XEN_PUT_VCPU_INFO(reg) preempt_enable(%ebp)
+#define XEN_PUT_VCPU_INFO_fixup .byte 0xff,0xff,0xff
+#else
+#define XEN_GET_VCPU_INFO(reg) movl HYPERVISOR_shared_info,reg
+#define XEN_PUT_VCPU_INFO(reg)
+#define XEN_PUT_VCPU_INFO_fixup
+#endif
+
+#define XEN_LOCKED_BLOCK_EVENTS(reg)	movb $1,evtchn_upcall_mask(reg)
+#define XEN_LOCKED_UNBLOCK_EVENTS(reg)	movb $0,evtchn_upcall_mask(reg)
+#define XEN_BLOCK_EVENTS(reg)	XEN_GET_VCPU_INFO(reg)			; \
+				XEN_LOCKED_BLOCK_EVENTS(reg)		; \
+    				XEN_PUT_VCPU_INFO(reg)
+#define XEN_UNBLOCK_EVENTS(reg)	XEN_GET_VCPU_INFO(reg)			; \
+				XEN_LOCKED_UNBLOCK_EVENTS(reg)		; \
+    				XEN_PUT_VCPU_INFO(reg)
 #define XEN_TEST_PENDING(reg)	testb $0xFF,evtchn_upcall_pending(reg)
 
 #ifdef CONFIG_PREEMPT
@@ -96,7 +114,7 @@ VM_MASK		= 0x00020000
 #define resume_kernel		restore_all
 #endif
 
-#define SAVE_ALL_NO_EVENTMASK \
+#define SAVE_ALL \
 	cld; \
 	pushl %es; \
 	pushl %ds; \
@@ -109,12 +127,7 @@ VM_MASK		= 0x00020000
 	pushl %ebx; \
 	movl $(__USER_DS), %edx; \
 	movl %edx, %ds; \
-	movl %edx, %es;
-
-#define SAVE_ALL \
-	SAVE_ALL_NO_EVENTMASK; \
-	XEN_GET_VCPU_INFO(%esi); \
-	XEN_SAVE_UPCALL_MASK(%esi,%dl,EVENT_MASK)
+	movl %edx, %es
 
 #define RESTORE_INT_REGS \
 	popl %ebx;	\
@@ -164,7 +177,6 @@ ENTRY(ret_from_fork)
 	call schedule_tail
 	GET_THREAD_INFO(%ebp)
 	popl %eax
-	XEN_GET_VCPU_INFO(%esi)
 	jmp syscall_exit
 
 /*
@@ -185,7 +197,6 @@ ret_from_intr:
 	testl $(VM_MASK | 2), %eax
 	jz resume_kernel		# returning to kernel or vm86-space
 ENTRY(resume_userspace)
-	XEN_GET_VCPU_INFO(%esi)
 	XEN_BLOCK_EVENTS(%esi)		# make sure we don't miss an interrupt
 					# setting need_resched or sigpending
 					# between sampling and the iret
@@ -197,7 +208,6 @@ ENTRY(resume_userspace)
 
 #ifdef CONFIG_PREEMPT
 ENTRY(resume_kernel)
-	XEN_GET_VCPU_INFO(%esi)
 	XEN_BLOCK_EVENTS(%esi)
 	cmpl $0,TI_preempt_count(%ebp)	# non-zero preempt_count ?
 	jnz restore_all
@@ -284,9 +294,11 @@ restore_all:
 	jnz resume_vm86
 	movb EVENT_MASK(%esp), %al
 	notb %al			# %al == ~saved_mask
+	XEN_GET_VCPU_INFO(%esi)
 	andb evtchn_upcall_mask(%esi),%al
 	andb $1,%al			# %al == mask & ~saved_mask
 	jnz restore_all_enable_events	#     != 0 => reenable event delivery
+	XEN_PUT_VCPU_INFO(%esi)
 	RESTORE_ALL
 
 resume_vm86:
@@ -436,8 +448,6 @@ error_code:
 	movl %ecx, %ds
 	movl %ecx, %es
 	movl %esp,%eax			# pt_regs pointer
-	XEN_GET_VCPU_INFO(%esi)
-	XEN_SAVE_UPCALL_MASK(%esi,%bl,EVENT_MASK)
 	call *%edi
 	jmp ret_from_exception
 
@@ -454,27 +464,27 @@ error_code:
 # activation and restart the handler using the previous one.
 ENTRY(hypervisor_callback)
 	pushl %eax
-	SAVE_ALL_NO_EVENTMASK
+	SAVE_ALL
 	movl EIP(%esp),%eax
 	cmpl $scrit,%eax
 	jb   11f
 	cmpl $ecrit,%eax
 	jb   critical_region_fixup
-11:	XEN_GET_VCPU_INFO(%esi)
-	movb $0, EVENT_MASK(%esp)
-	push %esp
+11:	push %esp
 	call evtchn_do_upcall
 	add  $4,%esp
 	jmp  ret_from_intr
 
         ALIGN
 restore_all_enable_events:  
-	XEN_UNBLOCK_EVENTS(%esi)
+	XEN_LOCKED_UNBLOCK_EVENTS(%esi)
 scrit:	/**** START OF CRITICAL REGION ****/
 	XEN_TEST_PENDING(%esi)
 	jnz  14f			# process more events if necessary...
+	XEN_PUT_VCPU_INFO(%esi)
 	RESTORE_ALL
-14:	XEN_BLOCK_EVENTS(%esi)
+14:	XEN_LOCKED_BLOCK_EVENTS(%esi)
+	XEN_PUT_VCPU_INFO(%esi)
 	jmp  11b
 ecrit:  /**** END OF CRITICAL REGION ****/
 # [How we do the fixup]. We want to merge the current stack frame with the
@@ -487,24 +497,30 @@ ecrit:  /**** END OF CRITICAL REGION ****/
 critical_region_fixup:
 	addl $critical_fixup_table-scrit,%eax
 	movzbl (%eax),%eax		# %eax contains num bytes popped
-	mov  %esp,%esi
+	cmpb $0xff,%al                  # 0xff => vcpu_info critical region
+	jne  15f
+	GET_THREAD_INFO(%ebp)
+	XEN_PUT_VCPU_INFO(%esi)         # abort vcpu_info critical region
+        xorl %eax,%eax
+15:	mov  %esp,%esi
 	add  %eax,%esi			# %esi points at end of src region
 	mov  %esp,%edi
 	add  $0x34,%edi			# %edi points at end of dst region
 	mov  %eax,%ecx
 	shr  $2,%ecx			# convert words to bytes
-	je   16f			# skip loop if nothing to copy
-15:	subl $4,%esi			# pre-decrementing copy loop
+	je   17f			# skip loop if nothing to copy
+16:	subl $4,%esi			# pre-decrementing copy loop
 	subl $4,%edi
 	movl (%esi),%eax
 	movl %eax,(%edi)
-	loop 15b
-16:	movl %edi,%esp			# final %edi is top of merged stack
+	loop 16b
+17:	movl %edi,%esp			# final %edi is top of merged stack
 	jmp  11b
 
 critical_fixup_table:
-	.byte 0x00,0x00,0x00		# testb $0xff,(%esi) = XEN_TEST_PENDING
-	.byte 0x00,0x00			# jnz  14f
+	.byte 0xff,0xff,0xff		# testb $0xff,(%esi) = XEN_TEST_PENDING
+	.byte 0xff,0xff			# jnz  14f
+	XEN_PUT_VCPU_INFO_fixup
 	.byte 0x00			# pop  %ebx
 	.byte 0x04			# pop  %ecx
 	.byte 0x08			# pop  %edx
@@ -516,7 +532,8 @@ critical_fixup_table:
 	.byte 0x20			# pop  %es
 	.byte 0x24,0x24,0x24		# add  $4,%esp
 	.byte 0x28			# iret
-	.byte 0x00,0x00,0x00,0x00	# movb $1,1(%esi)
+	.byte 0xff,0xff,0xff,0xff	# movb $1,1(%esi)
+	XEN_PUT_VCPU_INFO_fixup
 	.byte 0x00,0x00			# jmp  11b
 
 # Hypervisor uses this for application faults while it executes.
@@ -720,8 +737,6 @@ ENTRY(page_fault)
 	movl %eax, %ds
 	movl %eax, %es
 	movl %esp,%eax			/* pt_regs pointer */
-	XEN_GET_VCPU_INFO(%esi)
-	XEN_SAVE_UPCALL_MASK(%esi,%bl,EVENT_MASK)
 	call do_page_fault
 	jmp ret_from_exception
 
