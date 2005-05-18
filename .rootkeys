@@ -1426,7 +1426,6 @@
 41bf1717bML6GxpclTWJabiaO5W5vg xen/include/asm-x86/x86_64/asm_defns.h
 404f1b9ceJeGVaPNIENm2FkK0AgEOQ xen/include/asm-x86/x86_64/current.h
 41febc4b1aCGLsm0Y0b_82h7lFtrEA xen/include/asm-x86/x86_64/domain_page.h
-404f1badfXZJZ2sU8sh9PS2EZvd19Q xen/include/asm-x86/x86_64/ldt.h
 4208e2a3Fktw4ZttKdDxbhvTQ6brfQ xen/include/asm-x86/x86_64/page.h
 404f1bb86rAXB3aLS1vYdcqpJiEcyg xen/include/asm-x86/x86_64/regs.h
 40e1966azOJZfNI6Ilthe6Q-T3Hewg xen/include/asm-x86/x86_64/string.h
@@ -1479,7 +1478,6 @@
 3ddb79c1gs2VbLbQlw0dcDUXYIepDA xen/include/xen/mm.h
 3ddb79c1ieLZfGSFwfvvSQ2NK1BMSg xen/include/xen/multiboot.h
 41a61536ii6j2lJ2rXwMOLaG1CHPvw xen/include/xen/multicall.h
-3ddb79c0MOVXq8qZDQRGb6z64_xAwg xen/include/xen/pci_ids.h
 3e54c38dlSCVdyVM4PKcrSfzLLxWUQ xen/include/xen/perfc.h
 3e54c38de9SUSYSAwxDf_DwkpAnQFA xen/include/xen/perfc_defn.h
 3ddb79c04nQVR3EYM5L4zxDV_MCo1g xen/include/xen/prefetch.h
