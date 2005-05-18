@@ -412,7 +412,7 @@ i386_proc0_tss_ldt_init()
 	ltr(lwp0.l_md.md_tss_sel);
 	lldt(pcb->pcb_ldt_sel);
 #else
-	HYPERVISOR_fpu_taskswitch();
+	HYPERVISOR_fpu_taskswitch(1);
 	XENPRINTF(("lwp tss sp %p ss %04x/%04x\n",
 		      (void *)pcb->pcb_tss.tss_esp0,
 		      pcb->pcb_tss.tss_ss0, IDXSEL(pcb->pcb_tss.tss_ss0)));
@@ -455,7 +455,7 @@ i386_switch_context(struct pcb *new)
 
 	ci = curcpu();
 	if (ci->ci_fpused) {
-		HYPERVISOR_fpu_taskswitch();
+		HYPERVISOR_fpu_taskswitch(1);
 		ci->ci_fpused = 0;
 	}
 
@@ -1430,8 +1430,8 @@ initgdt()
 	pmap_kenter_pa((vaddr_t)gdt, (uint32_t)gdt - KERNBASE,
 	    VM_PROT_READ);
 	XENPRINTK(("loading gdt %lx, %d entries\n", frames[0] << PAGE_SHIFT,
-	    LAST_RESERVED_GDT_ENTRY + 1));
-	if (HYPERVISOR_set_gdt(frames, LAST_RESERVED_GDT_ENTRY + 1))
+	    NGDT));
+	if (HYPERVISOR_set_gdt(frames, NGDT))
 		panic("HYPERVISOR_set_gdt failed!\n");
 	lgdt_finish();
 #endif

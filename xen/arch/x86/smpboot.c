@@ -48,11 +48,14 @@
 #include <xen/sched.h>
 #include <xen/delay.h>
 #include <xen/lib.h>
+#include <mach_apic.h>
+#include <mach_wakecpu.h>
 
-#ifdef CONFIG_SMP
+/* opt_nosmp: If true, secondary processors are ignored. */
+static int opt_nosmp = 0;
+boolean_param("nosmp", opt_nosmp);
 
-/* Cconfigured maximum number of CPUs to activate. We name the parameter 
-"maxcpus" rather than max_cpus to be compatible with Linux */
+/* maxcpus: maximum number of CPUs to activate. */
 static int max_cpus = -1;
 integer_param("maxcpus", max_cpus); 
 
@@ -63,10 +66,10 @@ int smp_num_cpus = 1;
 int ht_per_core = 1;
 
 /* Bitmask of currently online CPUs */
-unsigned long cpu_online_map;
+cpumask_t cpu_online_map;
 
-static volatile unsigned long cpu_callin_map;
-static volatile unsigned long cpu_callout_map;
+cpumask_t cpu_callin_map;
+cpumask_t cpu_callout_map;
 
 /* Per CPU bogomips and other parameters */
 struct cpuinfo_x86 cpu_data[NR_CPUS];
@@ -115,7 +118,8 @@ void __init smp_alloc_memory(void)
 void __init smp_store_cpu_info(int id)
 {
     cpu_data[id] = boot_cpu_data;
-    identify_cpu(&cpu_data[id]);
+    if (id != 0)
+        identify_cpu(&cpu_data[id]);
 }
 
 /*
@@ -360,9 +364,6 @@ void __init smp_callin(void)
      */
     smp_store_cpu_info(cpuid);
 
-    if (nmi_watchdog == NMI_LOCAL_APIC)
-        setup_apic_nmi_watchdog();
-
     /*
      * Allow the master to continue.
      */
@@ -376,44 +377,50 @@ void __init smp_callin(void)
 
 static int cpucount;
 
+#ifdef __i386__
+static void construct_percpu_idt(unsigned int cpu)
+{
+    unsigned char idt_load[10];
+
+    idt_tables[cpu] = xmalloc_array(idt_entry_t, IDT_ENTRIES);
+    memcpy(idt_tables[cpu], idt_table, IDT_ENTRIES*sizeof(idt_entry_t));
+
+    *(unsigned short *)(&idt_load[0]) = (IDT_ENTRIES*sizeof(idt_entry_t))-1;
+    *(unsigned long  *)(&idt_load[2]) = (unsigned long)idt_tables[cpu];
+    __asm__ __volatile__ ( "lidt %0" : "=m" (idt_load) );
+}
+#endif
+
 /*
  * Activate a secondary processor.
  */
 void __init start_secondary(void)
 {
     unsigned int cpu = cpucount;
-    /* 6 bytes suitable for passing to LIDT instruction. */
-    unsigned char idt_load[6];
 
+    extern void percpu_traps_init(void);
     extern void cpu_init(void);
 
     set_current(idle_task[cpu]);
+    set_processor_id(cpu);
 
-    /*
-     * Dont put anything before smp_callin(), SMP
-     * booting is too fragile that we want to limit the
-     * things done here to the most necessary things.
-     */
+    percpu_traps_init();
+
     cpu_init();
+
     smp_callin();
 
     while (!atomic_read(&smp_commenced))
         cpu_relax();
 
+#ifdef __i386__
     /*
      * At this point, boot CPU has fully initialised the IDT. It is
      * now safe to make ourselves a private copy.
      */
-    idt_tables[cpu] = xmalloc(IDT_ENTRIES*8);
-    memcpy(idt_tables[cpu], idt_table, IDT_ENTRIES*8);
-    *(unsigned short *)(&idt_load[0]) = (IDT_ENTRIES*8)-1;
-    *(unsigned long  *)(&idt_load[2]) = (unsigned long)idt_tables[cpu];
-    __asm__ __volatile__ ( "lidt %0" : "=m" (idt_load) );
+    construct_percpu_idt(cpu);
+#endif
 
-    /*
-     * low-memory mappings have been cleared, flush them from the local TLBs 
-     * too.
-     */
     local_flush_tlb();
 
     startup_cpu_idle_loop();
@@ -642,22 +649,26 @@ static void __init do_boot_cpu (int apicid)
  */
 {
     struct domain *idle;
+    struct exec_domain *ed;
     unsigned long boot_error = 0;
     int timeout, cpu;
-    unsigned long start_eip, stack;
+    unsigned long start_eip;
+    void *stack;
 
     cpu = ++cpucount;
 
     if ( (idle = do_createdomain(IDLE_DOMAIN_ID, cpu)) == NULL )
         panic("failed 'createdomain' for CPU %d", cpu);
 
-    set_bit(DF_IDLETASK, &idle->flags);
+    ed = idle->exec_domain[0];
 
-    idle->mm.pagetable = mk_pagetable(__pa(idle_pg_table));
+    set_bit(_DOMF_idle_domain, &idle->domain_flags);
+
+    ed->arch.monitor_table = mk_pagetable(__pa(idle_pg_table));
 
     map_cpu_to_boot_apicid(cpu, apicid);
 
-    idle_task[cpu] = idle;
+    idle_task[cpu] = ed;
 
     /* start_eip had better be page-aligned! */
     start_eip = setup_trampoline();
@@ -665,11 +676,16 @@ static void __init do_boot_cpu (int apicid)
     /* So we see what's up. */
     printk("Booting processor %d/%d eip %lx\n", cpu, apicid, start_eip);
 
-    stack = __pa(alloc_xenheap_pages(1));
-    stack_start.esp = stack + STACK_SIZE - STACK_RESERVED;
+    stack = (void *)alloc_xenheap_pages(STACK_ORDER);
+#if defined(__i386__)
+    stack_start.esp = __pa(stack);
+#elif defined(__x86_64__)
+    stack_start.esp = (unsigned long)stack;
+#endif
+    stack_start.esp += STACK_SIZE - sizeof(struct cpu_info);
 
     /* Debug build: detect stack overflow by setting up a guard page. */
-    memguard_guard_range(__va(stack), PAGE_SIZE);
+    memguard_guard_stack(stack);
 
     /*
      * This grunge runs the startup process for
@@ -731,7 +747,7 @@ static void __init do_boot_cpu (int apicid)
             printk("CPU%d has booted.\n", cpu);
         } else {
             boot_error= 1;
-            if (*((volatile unsigned long *)phys_to_virt(start_eip))
+            if (*((volatile unsigned int *)phys_to_virt(start_eip))
                 == 0xA5A5A5A5)
 				/* trampoline started but...? */
                 printk("Stuck ??\n");
@@ -786,10 +802,10 @@ void __init smp_boot_cpus(void)
      * If we couldnt find an SMP configuration at boot time,
      * get out of here now!
      */
-    if (!smp_found_config) {
-        printk("SMP motherboard not detected.\n");
+    if (!smp_found_config || opt_nosmp) {
         io_apic_irqs = 0;
-        cpu_online_map = phys_cpu_present_map = 1;
+        phys_cpu_present_map = physid_mask_of_physid(0);
+        cpu_online_map = 1;
         smp_num_cpus = 1;
         if (APIC_init_uniprocessor())
             printk("Local APIC not detected."
@@ -804,7 +820,7 @@ void __init smp_boot_cpus(void)
     if (!test_bit(boot_cpu_physical_apicid, &phys_cpu_present_map)) {
         printk("weird, boot CPU (#%d) not listed by the BIOS.\n",
                boot_cpu_physical_apicid);
-        phys_cpu_present_map |= (1 << hard_smp_processor_id());
+        physid_set(hard_smp_processor_id(), phys_cpu_present_map);
     }
 
     /*
@@ -816,7 +832,8 @@ void __init smp_boot_cpus(void)
                boot_cpu_physical_apicid);
         printk("... forcing use of dummy APIC emulation. (tell your hw vendor)\n");
         io_apic_irqs = 0;
-        cpu_online_map = phys_cpu_present_map = 1;
+        phys_cpu_present_map = physid_mask_of_physid(0);
+        cpu_online_map = 1;
         smp_num_cpus = 1;
         goto smp_done;
     }
@@ -830,7 +847,8 @@ void __init smp_boot_cpus(void)
         smp_found_config = 0;
         printk("SMP mode deactivated, forcing use of dummy APIC emulation.\n");
         io_apic_irqs = 0;
-        cpu_online_map = phys_cpu_present_map = 1;
+        phys_cpu_present_map = physid_mask_of_physid(0);
+        cpu_online_map = 1;
         smp_num_cpus = 1;
         goto smp_done;
     }
@@ -864,7 +882,7 @@ void __init smp_boot_cpus(void)
         if (opt_noht && (apicid & (ht_per_core - 1)))
             continue;
 
-        if (!(phys_cpu_present_map & (1 << bit)))
+        if (!check_apicid_present(bit))
             continue;
         if ((max_cpus >= 0) && (max_cpus <= cpucount+1))
             continue;
@@ -875,7 +893,7 @@ void __init smp_boot_cpus(void)
          * Make sure we unmap all failed CPUs
          */
         if ((boot_apicid_to_cpu(apicid) == -1) &&
-            (phys_cpu_present_map & (1 << bit)))
+            (!check_apicid_present(bit)))
             printk("CPU #%d not responding - cannot use it.\n",
                    apicid);
     }
@@ -912,7 +930,10 @@ void __init smp_boot_cpus(void)
     if ( nr_ioapics ) setup_IO_APIC();
 
     /* Set up all local APIC timers in the system. */
-    setup_APIC_clocks();
+    {
+        extern void setup_APIC_clocks(void);
+        setup_APIC_clocks();
+    }
 
     /* Synchronize the TSC with the AP(s). */
     if ( cpucount ) synchronize_tsc_bp();
@@ -921,4 +942,12 @@ void __init smp_boot_cpus(void)
     ;
 }
 
-#endif /* CONFIG_SMP */
+/*
+ * Local variables:
+ * mode: C
+ * c-set-style: "BSD"
+ * c-basic-offset: 4
+ * tab-width: 4
+ * indent-tabs-mode: nil
+ * End:
+ */

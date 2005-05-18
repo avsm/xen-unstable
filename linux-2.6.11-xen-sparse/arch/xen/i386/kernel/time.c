@@ -47,6 +47,7 @@
 #include <linux/efi.h>
 #include <linux/mca.h>
 #include <linux/sysctl.h>
+#include <linux/percpu.h>
 
 #include <asm/io.h>
 #include <asm/smp.h>
@@ -76,7 +77,20 @@ u64 jiffies_64 = INITIAL_JIFFIES;
 
 EXPORT_SYMBOL(jiffies_64);
 
+#if defined(__x86_64__)
+unsigned long vxtime_hz = PIT_TICK_RATE;
+struct vxtime_data __vxtime __section_vxtime;   /* for vsyscalls */
+volatile unsigned long __jiffies __section_jiffies = INITIAL_JIFFIES;
+unsigned long __wall_jiffies __section_wall_jiffies = INITIAL_JIFFIES;
+struct timespec __xtime __section_xtime;
+struct timezone __sys_tz __section_sys_tz;
+#endif
+
+#if defined(__x86_64__)
+unsigned int cpu_khz;	/* Detected as we calibrate the TSC */
+#else
 unsigned long cpu_khz;	/* Detected as we calibrate the TSC */
+#endif
 
 extern unsigned long wall_jiffies;
 
@@ -94,7 +108,6 @@ u32 shadow_tsc_stamp;
 u64 shadow_system_time;
 static u32 shadow_time_version;
 static struct timeval shadow_tv;
-extern u64 processed_system_time;
 
 /*
  * We use this to ensure that gettimeofday() is monotonically increasing. We
@@ -111,7 +124,8 @@ static long last_rtc_update, last_update_to_xen;
 static long last_update_from_xen;   /* UTC seconds when last read Xen clock. */
 
 /* Keep track of last time we did processing/updating of jiffies and xtime. */
-u64 processed_system_time;   /* System time (ns) at last processing. */
+static u64 processed_system_time;   /* System time (ns) at last processing. */
+static DEFINE_PER_CPU(u64, processed_system_time);
 
 #define NS_PER_TICK (1000000000ULL/HZ)
 
@@ -378,38 +392,51 @@ static inline void do_timer_interrupt(int irq, void *dev_id,
 					struct pt_regs *regs)
 {
 	time_t wtm_sec, sec;
-	s64 delta, nsec;
+	s64 delta, delta_cpu, nsec;
 	long sec_diff, wtm_nsec;
+	int cpu = smp_processor_id();
 
 	do {
 		__get_time_values_from_xen();
 
-		delta = (s64)(shadow_system_time +
-			      ((s64)cur_timer->get_offset() * 
-			       (s64)NSEC_PER_USEC) -
-			      processed_system_time);
+		delta = delta_cpu = (s64)shadow_system_time +
+			((s64)cur_timer->get_offset() * (s64)NSEC_PER_USEC);
+		delta     -= processed_system_time;
+		delta_cpu -= per_cpu(processed_system_time, cpu);
 	}
 	while (!TIME_VALUES_UP_TO_DATE);
 
-	if (unlikely(delta < 0)) {
-		printk("Timer ISR: Time went backwards: %lld %lld %lld %lld\n",
-		       delta, shadow_system_time,
+	if (unlikely(delta < 0) || unlikely(delta_cpu < 0)) {
+		printk("Timer ISR/%d: Time went backwards: "
+		       "delta=%lld cpu_delta=%lld shadow=%lld "
+		       "off=%lld processed=%lld cpu_processed=%lld\n",
+		       cpu, delta, delta_cpu, shadow_system_time,
 		       ((s64)cur_timer->get_offset() * (s64)NSEC_PER_USEC), 
-		       processed_system_time);
+		       processed_system_time,
+		       per_cpu(processed_system_time, cpu));
+		for (cpu = 0; cpu < num_online_cpus(); cpu++)
+			printk(" %d: %lld\n", cpu,
+			       per_cpu(processed_system_time, cpu));
 		return;
 	}
 
-	/* Process elapsed jiffies since last call. */
+	/* System-wide jiffy work. */
 	while (delta >= NS_PER_TICK) {
 		delta -= NS_PER_TICK;
 		processed_system_time += NS_PER_TICK;
 		do_timer(regs);
-#ifndef CONFIG_SMP
-		update_process_times(user_mode(regs));
-#endif
-		if (regs)
-		    profile_tick(CPU_PROFILING, regs);
 	}
+
+	/* Local CPU jiffy work. */
+	while (delta_cpu >= NS_PER_TICK) {
+		delta_cpu -= NS_PER_TICK;
+		per_cpu(processed_system_time, cpu) += NS_PER_TICK;
+		update_process_times(user_mode(regs));
+		profile_tick(CPU_PROFILING, regs);
+	}
+
+	if (cpu != 0)
+		return;
 
 	/*
 	 * Take synchronised time from Xen once a minute if we're not
@@ -618,10 +645,10 @@ void __init hpet_time_init(void)
 #endif
 
 /* Dynamically-mapped IRQ. */
-static int TIMER_IRQ;
+static DEFINE_PER_CPU(int, timer_irq);
 
 static struct irqaction irq_timer = {
-	timer_interrupt, SA_INTERRUPT, CPU_MASK_NONE, "timer",
+	timer_interrupt, SA_INTERRUPT, CPU_MASK_NONE, "timer0",
 	NULL, NULL
 };
 
@@ -643,14 +670,23 @@ void __init time_init(void)
 	set_normalized_timespec(&wall_to_monotonic,
 		-xtime.tv_sec, -xtime.tv_nsec);
 	processed_system_time = shadow_system_time;
+	per_cpu(processed_system_time, 0) = processed_system_time;
 
 	if (timer_tsc_init.init(NULL) != 0)
 		BUG();
 	printk(KERN_INFO "Using %s for high-res timesource\n",cur_timer->name);
 
-	TIMER_IRQ = bind_virq_to_irq(VIRQ_TIMER);
+#if defined(__x86_64__)
+	vxtime.mode = VXTIME_TSC;
+	vxtime.quot = (1000000L << 32) / vxtime_hz;
+	vxtime.tsc_quot = (1000L << 32) / cpu_khz;
+	vxtime.hz = vxtime_hz;
+	sync_core();
+	rdtscll(vxtime.last_tsc);
+#endif
 
-	(void)setup_irq(TIMER_IRQ, &irq_timer);
+	per_cpu(timer_irq, 0) = bind_virq_to_irq(VIRQ_TIMER);
+	(void)setup_irq(per_cpu(timer_irq, 0), &irq_timer);
 }
 
 /* Convert jiffies to system time. Call with xtime_lock held for reading. */
@@ -674,18 +710,28 @@ int set_timeout_timer(void)
 	u64 alarm = 0;
 	int ret = 0;
 	unsigned long j;
+#ifdef CONFIG_SMP
+	unsigned long seq;
+#endif
 
 	/*
 	 * This is safe against long blocking (since calculations are
 	 * not based on TSC deltas). It is also safe against warped
 	 * system time since suspend-resume is cooperative and we
-	 * would first get locked out. It is safe against normal
-	 * updates of jiffies since interrupts are off.
+	 * would first get locked out.
 	 */
+#ifdef CONFIG_SMP
+	do {
+		seq = read_seqbegin(&xtime_lock);
+		j = jiffies + 1;
+		alarm = __jiffies_to_st(j);
+	} while (read_seqretry(&xtime_lock, seq));
+#else
 	j = next_timer_interrupt();
 	if (j < (jiffies + 1))
 		j = jiffies + 1;
 	alarm = __jiffies_to_st(j);
+#endif
 
 	/* Failure is pretty bad, but we'd best soldier on. */
 	if ( HYPERVISOR_set_timer_op(alarm) != 0 )
@@ -710,6 +756,7 @@ void time_resume(void)
 
 	/* Reset our own concept of passage of system time. */
 	processed_system_time = shadow_system_time;
+	per_cpu(processed_system_time, 0) = processed_system_time;
 
 	/* Accept a warp in UTC (wall-clock) time. */
 	last_seen_tv.tv_sec = 0;
@@ -717,6 +764,24 @@ void time_resume(void)
 	/* Make sure we resync UTC time with Xen on next timer interrupt. */
 	last_update_from_xen = 0;
 }
+
+#ifdef CONFIG_SMP
+static char timer_name[NR_CPUS][15];
+void local_setup_timer(void)
+{
+	int seq, cpu = smp_processor_id();
+
+	do {
+		seq = read_seqbegin(&xtime_lock);
+		per_cpu(processed_system_time, cpu) = shadow_system_time;
+	} while (read_seqretry(&xtime_lock, seq));
+
+	per_cpu(timer_irq, cpu) = bind_virq_to_irq(VIRQ_TIMER);
+	sprintf(timer_name[cpu], "timer%d", cpu);
+	BUG_ON(request_irq(per_cpu(timer_irq, cpu), timer_interrupt,
+	                   SA_INTERRUPT, timer_name[cpu], NULL));
+}
+#endif
 
 /*
  * /proc/sys/xen: This really belongs in another file. It can stay here for
