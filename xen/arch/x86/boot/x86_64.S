@@ -1,5 +1,6 @@
 #include <xen/config.h>
 #include <public/xen.h>
+#include <asm/desc.h>
 #include <asm/page.h>
 #include <asm/msr.h>
 
@@ -7,18 +8,18 @@
                 
         .text
         .code32
-        
+
 ENTRY(start)
         jmp __start
-        
+
         .org    0x004
 /*** MULTIBOOT HEADER ****/
         /* Magic number indicating a Multiboot header. */
         .long   0x1BADB002
         /* Flags to bootloader (see Multiboot spec). */
-        .long   0x00000002
+        .long   0x00000003
         /* Checksum: must be the negated sum of the first two fields. */
-        .long   -0x1BADB004
+        .long   -0x1BADB005
 
         .org    0x010
         .asciz "ERR: Not a 64-bit CPU!"
@@ -45,26 +46,26 @@ print_err:
         mov     $7,%al
         stosb                  # Write an attribute to the VGA framebuffer
         jmp     1b
-        
+
 __start:
         cld
         cli
 
         /* Set up a few descriptors: on entry only CS is guaranteed good. */
-        lgdt    %cs:0x1001f0
-        mov     $(__HYPERVISOR_DS),%ecx
+        lgdt    %cs:0x100306        # nopaging_gdt_descr
+        mov     $(__HYPERVISOR_DS32),%ecx
         mov     %ecx,%ds
         mov     %ecx,%es
 
-        /* Check for Multiboot bootloader */
         cmp     $(SECONDARY_CPU_FLAG),%ebx
-        je      skip_multiboot_check
+        je      skip_boot_checks
+
+        /* Check for Multiboot bootloader */
         cmp     $0x2BADB002,%eax
         jne     not_multiboot
-skip_multiboot_check:
         
         /* Save the Multiboot info structure for later use. */
-        mov     %ebx,0x1001e0
+        mov     %ebx,0x100300       # multiboot_ptr
 
         /* We begin by interrogating the CPU for the presence of long mode. */
         mov     $0x80000000,%eax
@@ -75,7 +76,9 @@ skip_multiboot_check:
         cpuid
         bt      $29,%edx            # Long mode feature?
         jnc     bad_cpu
-        
+        mov     %edx,%edi
+skip_boot_checks:
+
         /* Set up FPU. */
         fninit
         
@@ -84,15 +87,18 @@ skip_multiboot_check:
         mov     %ecx,%cr4
 
         /* Load pagetable base register. */
-        mov     $0x101000,%eax   /* idle_pg_table */
+        mov     $0x102000,%eax   /* idle_pg_table */
         mov     %eax,%cr3
 
         /* Set up EFER (Extended Feature Enable Register). */
         movl    $MSR_EFER, %ecx
         rdmsr
-        /* Long Mode, SYSCALL/SYSRET, No-Execute */
-        movl    $(EFER_LME|EFER_SCE|EFER_NX),%eax
-        wrmsr
+        btsl    $_EFER_LME,%eax /* Long Mode      */
+        btsl    $_EFER_SCE,%eax /* SYSCALL/SYSRET */
+        btl     $20,%edi        /* CPUID 0x80000001, EDX[20] */
+        jnc     1f
+        btsl    $_EFER_NX,%eax  /* No-Execute     */
+1:      wrmsr
 
         mov     $0x80050033,%eax /* hi-to-lo: PG,AM,WP,NE,ET,MP,PE */
         mov     %eax,%cr0
@@ -106,10 +112,6 @@ skip_multiboot_check:
 
         /* Install relocated selectors (FS/GS unused). */
         lgdt    gdt_descr(%rip)
-        mov     $(__HYPERVISOR_DS),%ecx
-        mov     %ecx,%ds
-        mov     %ecx,%es
-        mov     %ecx,%ss
 
         /* Enable full CR4 features. */
         mov     mmu_cr4_features(%rip),%rcx
@@ -127,6 +129,13 @@ skip_multiboot_check:
         ret
 __high_start:
         
+        mov     $(__HYPERVISOR_DS64),%ecx
+        mov     %ecx,%ds
+        mov     %ecx,%es
+        mov     %ecx,%fs
+        mov     %ecx,%gs
+        mov     %ecx,%ss
+
         lidt    idt_descr(%rip)
                 
         cmp     $(SECONDARY_CPU_FLAG),%ebx
@@ -140,95 +149,102 @@ __high_start:
         rep     stosb
 
         /* Initialise IDT with simple error defaults. */
-        lea     ignore_int(%rip),%rdx
-        mov     $(__HYPERVISOR_CS64 << 16),%eax
-        mov     %dx,%ax            /* selector = 0x0010 = cs */
-        mov     $0x8E00,%dx        /* interrupt gate - dpl=0, present */
-        lea     idt_table(%rip),%rdi
-        mov     $256,%rcx
-1:      mov     %eax,(%rdi)
-        mov     %edx,4(%rdi)
-        add     $8,%rdi
+        leaq    ignore_int(%rip),%rcx
+        movl    %ecx,%eax
+        andl    $0xFFFF0000,%eax
+        orl     $0x00008E00,%eax
+        shlq    $32,%rax
+        movl    %ecx,%edx
+        andl    $0x0000FFFF,%edx
+        orl     $(__HYPERVISOR_CS64<<16),%edx
+        orq     %rdx,%rax
+        shrq    $32,%rcx
+        movl    %ecx,%edx
+        leaq    idt_table(%rip),%rdi
+        movl    $256,%ecx
+1:      movq    %rax,(%rdi)
+        movq    %rdx,8(%rdi)
+        addq    $16,%rdi
         loop    1b
 
         /* Pass off the Multiboot info structure to C land. */
-        mov     0x1001e0,%edi
-        lea     start(%rip),%rax
-        sub     $0x100000,%rax
+        mov     multiboot_ptr(%rip),%edi
+        lea     start-0x100000(%rip),%rax
         add     %rax,%rdi
-        call    cmain
+        call    __start_xen
+        ud2     /* Force a panic (invalid opcode). */
 
 /* This is the default interrupt handler. */
 int_msg:
         .asciz "Unknown interrupt\n"
 ignore_int:
         cld
-        mov     $(__HYPERVISOR_DS),%eax
-        mov     %eax,%ds
-        mov     %eax,%es
-        lea     int_msg(%rip),%rdi
-        call    SYMBOL_NAME(printf)
+        leaq    int_msg(%rip),%rdi
+        call    printf
 1:      jmp     1b
 
-        .code32
 
-        .org    0x1e0
-                        
 /*** DESCRIPTOR TABLES ***/
 
-.globl SYMBOL_NAME(idt)
-.globl SYMBOL_NAME(gdt)        
+.globl idt
+.globl gdt        
 
-        .org    0x1f0
-        .word   (LAST_RESERVED_GDT_ENTRY*8)+7
-        .long   0x100200 # gdt_table
-        
-        .org    0x200
-ENTRY(gdt_table)
-        .fill FIRST_RESERVED_GDT_ENTRY,8,0
-        .quad 0x0000000000000000     /* unused */
-        .quad 0x00cf9a000000ffff     /* 0x0808 ring 0 code, compatability */
-        .quad 0x00af9a000000ffff     /* 0x0810 ring 0 code, 64-bit mode   */
-        .quad 0x00cf92000000ffff     /* 0x0818 ring 0 data                */
-        .quad 0x00cffa000000ffff     /* 0x0823 ring 3 code, compatibility */
-        .quad 0x00affa000000ffff     /* 0x082b ring 3 code, 64-bit mode   */
-        .quad 0x00cff2000000ffff     /* 0x0833 ring 3 data                */
-        .quad 0x0000000000000000     /* unused                            */
-        .fill 2*NR_CPUS,8,0          /* space for TSS and LDT per CPU     */
+        .org    0x300
+        .code32
+
+multiboot_ptr:        /* 0x300 */
+        .long   0
 
         .word   0
-gdt_descr:
-        .word   (LAST_RESERVED_GDT_ENTRY*8)+7
-SYMBOL_NAME(gdt):       
-        .quad   SYMBOL_NAME(gdt_table)
+nopaging_gdt_descr:   /* 0x306 */
+        .word   LAST_RESERVED_GDT_BYTE
+        .quad   gdt_table - FIRST_RESERVED_GDT_BYTE - __PAGE_OFFSET
 
-        .word   0    
+        .word   0,0,0
+gdt_descr:
+        .word   LAST_RESERVED_GDT_BYTE
+gdt:
+        .quad   gdt_table - FIRST_RESERVED_GDT_BYTE
+
+        .word   0,0,0
 idt_descr:
-        .word   256*8-1
-SYMBOL_NAME(idt):
-        .quad   SYMBOL_NAME(idt_table)
+        .word   256*16-1
+idt:
+        .quad   idt_table
 
 ENTRY(stack_start)
-        .quad   SYMBOL_NAME(cpu0_stack) + 8100
+        .quad   cpu0_stack + STACK_SIZE - 200
 
 high_start:
         .quad   __high_start
-                
+
+        .org    0x1000
+ENTRY(gdt_table)
+        .quad 0x0000000000000000     /* unused */
+        .quad 0x00cf9a000000ffff     /* 0xe008 ring 0 code, compatibility */
+        .quad 0x00af9a000000ffff     /* 0xe010 ring 0 code, 64-bit mode   */
+        .quad 0x00cf92000000ffff     /* 0xe018 ring 0 data                */
+        .quad 0x00cffa000000ffff     /* 0xe023 ring 3 code, compatibility */
+        .quad 0x00cff2000000ffff     /* 0xe02b ring 3 data                */
+        .quad 0x00affa000000ffff     /* 0xe033 ring 3 code, 64-bit mode   */
+        .quad 0x0000000000000000     /* unused                            */
+        .fill 4*NR_CPUS,8,0          /* space for TSS and LDT per CPU     */
+
 /* Initial PML4 -- level-4 page table */
-        .org 0x1000
+        .org 0x2000
 ENTRY(idle_pg_table)
 ENTRY(idle_pg_table_4)
-        .quad 0x0000000000102007 # PML4[0]
+        .quad idle_pg_table_l3 - __PAGE_OFFSET + 7 # PML4[0]
         .fill 261,8,0
-        .quad 0x0000000000102007 # PML4[262]
+        .quad idle_pg_table_l3 - __PAGE_OFFSET + 7 # PML4[262]
 
 /* Initial PDP -- level-3 page table */
-        .org 0x2000
+        .org 0x3000
 ENTRY(idle_pg_table_l3)
-        .quad 0x0000000000103007
+        .quad idle_pg_table_l2 - __PAGE_OFFSET + 7
 
 /* Initial PDE -- level-2 page table. */
-        .org 0x3000
+        .org 0x4000
 ENTRY(idle_pg_table_l2)
         .macro identmap from=0, count=512
         .if \count-1
@@ -240,39 +256,10 @@ ENTRY(idle_pg_table_l2)
         .endm
         identmap /* Too orangey for crows :-) */
 
-        .org 0x4000
-ENTRY(cpu0_stack)    # Initial stack is 8kB
+        .org 0x5000
+ENTRY(cpu0_stack)
 
-        .org 0x6000
+        .org 0x5000 + STACK_SIZE
+        .code64
 ENTRY(stext)
 ENTRY(_stext)
-
-.globl map_domain_mem, unmap_domain_mem, ret_from_intr
-map_domain_mem:
-unmap_domain_mem:
-ret_from_intr:
-#undef machine_to_phys_mapping
-.globl copy_to_user, set_intr_gate, die, machine_to_phys_mapping
-copy_to_user:
-set_intr_gate:
-die:
-machine_to_phys_mapping:
-.globl copy_from_user, show_registers, do_iopl
-copy_from_user: 
-show_registers: 
-do_iopl: 
-.globl idt_table, copy_user_generic, memcmp, idt_tables, new_thread
-idt_table:
-copy_user_generic:
-memcmp:
-idt_tables:
-new_thread:
-.globl switch_to, __get_user_1, __get_user_4, __get_user_8, trap_init
-switch_to:
-__get_user_1:
-__get_user_4:
-__get_user_8:
-trap_init: 
-.globl set_debugreg
-set_debugreg:
-        

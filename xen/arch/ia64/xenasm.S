@@ -11,6 +11,9 @@
 #include <asm/pgtable.h>
 #include <asm/vhpt.h>
 
+#if 0
+// FIXME: there's gotta be a better way...
+// ski and spaski are different... moved to xenmisc.c
 #define RunningOnHpSki(rx,ry,pn) 			\
 	addl rx = 2, r0; 				\
 	addl ry = 3, r0; 				\
@@ -22,7 +25,7 @@
 	;; 						\
 	(pn) movl rx = 0x7000004 ; 			\
 	;; 						\
-	(pn) cmp.eq pn,p0 = ry, rx; 			\
+	(pn) cmp.ge pn,p0 = ry, rx; 			\
 	;;
 
 //int platform_is_hp_ski(void)
@@ -32,9 +35,12 @@ GLOBAL_ENTRY(platform_is_hp_ski)
 (p8)	mov r8 = 1
 	br.ret.sptk.many b0
 END(platform_is_hp_ski)
+#endif
 
 // Change rr7 to the passed value while ensuring
-// Xen is mapped into the new region
+// Xen is mapped into the new region.
+//   in0: new rr7 value
+//   in1: Xen virtual address of shared info (to be pinned)
 #define PSR_BITS_TO_CLEAR						\
 	(IA64_PSR_I | IA64_PSR_IT | IA64_PSR_DT | IA64_PSR_RT |		\
 	 IA64_PSR_DD | IA64_PSR_SS | IA64_PSR_RI | IA64_PSR_ED |	\
@@ -45,7 +51,7 @@ END(platform_is_hp_ski)
 GLOBAL_ENTRY(ia64_new_rr7)
 	// not sure this unwind statement is correct...
 	.prologue ASM_UNW_PRLG_RP|ASM_UNW_PRLG_PFS, ASM_UNW_PRLG_GRSAVE(1)
-	alloc loc1 = ar.pfs, 1, 7, 0, 0
+	alloc loc1 = ar.pfs, 2, 7, 0, 0
 1:	{
 	  mov r28  = in0		// copy procedure index
 	  mov r8   = ip			// save ip to compute branch
@@ -62,7 +68,7 @@ GLOBAL_ENTRY(ia64_new_rr7)
 	tpa loc6=loc6			// grab this BEFORE changing rr7
 	;;
 #endif
-	movl loc5=SHAREDINFO_ADDR
+	mov loc5=in1
 	;;
 	tpa loc5=loc5			// grab this BEFORE changing rr7
 	;;
@@ -126,9 +132,9 @@ GLOBAL_ENTRY(ia64_new_rr7)
 (p7)	br.cond.sptk	.stack_overlaps
 	;;
 	movl r25=PAGE_KERNEL
-	dep r20=0,r13,50,14		// physical address of "current"
+	dep r21=0,r13,60,4		// physical address of "current"
 	;;
-	or r23=r25,r20			// construct PA | page properties
+	or r23=r25,r21			// construct PA | page properties
 	mov r25=IA64_GRANULE_SHIFT<<2
 	;;
 	ptr.d	r13,r25
@@ -146,9 +152,9 @@ GLOBAL_ENTRY(ia64_new_rr7)
 	;;
 	movl r25=PAGE_KERNEL
 	;;
-	mov r20=loc2			// saved percpu physical address
+	mov r21=loc2			// saved percpu physical address
 	;;
-	or r23=r25,r20			// construct PA | page properties
+	or r23=r25,r21			// construct PA | page properties
 	mov r24=PERCPU_PAGE_SHIFT<<2
 	;;
 	ptr.d	r22,r24
@@ -166,9 +172,9 @@ GLOBAL_ENTRY(ia64_new_rr7)
 	;;
 	movl r25=PAGE_KERNEL
 	;;
-	mov r20=loc6			// saved vhpt physical address
+	mov r21=loc6			// saved vhpt physical address
 	;;
-	or r23=r25,r20			// construct PA | page properties
+	or r23=r25,r21			// construct PA | page properties
 	mov r24=VHPT_PAGE_SHIFT<<2
 	;;
 	ptr.d	r22,r24
@@ -184,11 +190,11 @@ GLOBAL_ENTRY(ia64_new_rr7)
 
 	movl r22=SHAREDINFO_ADDR
 	;;
-	movl r25=PAGE_KERNEL
+	movl r25=__pgprot(__DIRTY_BITS | _PAGE_PL_2 | _PAGE_AR_RW)
 	;;
-	mov r20=loc5			// saved sharedinfo physical address
+	mov r21=loc5			// saved sharedinfo physical address
 	;;
-	or r23=r25,r20			// construct PA | page properties
+	or r23=r25,r21			// construct PA | page properties
 	mov r24=PAGE_SHIFT<<2
 	;;
 	ptr.d	r22,r24
@@ -255,26 +261,26 @@ GLOBAL_ENTRY(ia64_prepare_handle_reflection)
 	br.cond.sptk.many rp			// goes to ia64_leave_kernel
 END(ia64_prepare_handle_reflection)
 
-// NOTE: instruction spacing must be explicit for recovery on miss
 GLOBAL_ENTRY(__get_domain_bundle)
-	ld8 r8=[r32],8
-	nop 0
-	nop 0
+	EX(.failure_in_get_bundle,ld8 r8=[r32],8)
 	;;
-	ld8 r9=[r32]
-	nop 0
-	nop 0
+	EX(.failure_in_get_bundle,ld8 r9=[r32])
 	;;
 	br.ret.sptk.many rp
-	nop 0
-	nop 0
+	;;
+.failure_in_get_bundle:
+	mov r8=0
+	;;
+	mov r9=0
+	;;
+	br.ret.sptk.many rp
 	;;
 END(__get_domain_bundle)
 
 GLOBAL_ENTRY(dorfirfi)
-#define SI_CR_IIP_OFFSET 0x150
-#define SI_CR_IPSR_OFFSET 0x148
-#define SI_CR_IFS_OFFSET 0x158
+#define SI_CR_IIP_OFFSET 0x10
+#define SI_CR_IPSR_OFFSET 0x08
+#define SI_CR_IFS_OFFSET 0x18
         movl r16 = SHAREDINFO_ADDR+SI_CR_IIP_OFFSET
         movl r17 = SHAREDINFO_ADDR+SI_CR_IPSR_OFFSET
         movl r18 = SHAREDINFO_ADDR+SI_CR_IFS_OFFSET
@@ -459,3 +465,16 @@ static:	cmp.eq p7,p8=6,r32		/* PAL_PTCE_INFO */
 stacked:
 	br.ret.sptk.few rp
 END(pal_emulator_static)
+
+GLOBAL_ENTRY(vhpt_insert)
+//	alloc loc0 = ar.pfs, 3, 1, 0, 0
+	mov r16=r32
+	mov r26=r33
+	mov r27=r34
+	;;
+	VHPT_INSERT()
+//	VHPT_INSERT1()	... add collision chains later
+//	mov ar.pfs = loc0
+	br.ret.sptk.few rp
+	;;
+END(vhpt_insert)

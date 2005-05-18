@@ -43,9 +43,9 @@
 #define copy_user_page(to, from, vaddr)	copy_page(to, from)
 
 /**** MACHINE <-> PHYSICAL CONVERSION MACROS ****/
-extern unsigned long *phys_to_machine_mapping;
-#define pfn_to_mfn(_pfn) (phys_to_machine_mapping[(_pfn)])
-#define mfn_to_pfn(_mfn) (machine_to_phys_mapping[(_mfn)])
+extern unsigned int *phys_to_machine_mapping;
+#define pfn_to_mfn(_pfn) ((unsigned long)(phys_to_machine_mapping[(_pfn)]))
+#define mfn_to_pfn(_mfn) ((unsigned long)(machine_to_phys_mapping[(_mfn)]))
 static inline unsigned long phys_to_machine(unsigned long phys)
 {
     unsigned long machine = pfn_to_mfn(phys >> PAGE_SHIFT);
@@ -85,22 +85,18 @@ typedef struct { unsigned long pgprot; } pgprot_t;
 static inline unsigned long pmd_val(pmd_t x)
 {
     unsigned long ret = x.pmd;
-    if ( (ret & 1) ) ret = machine_to_phys(ret);
+    if ( ret ) ret = machine_to_phys(ret) | 1;
     return ret;
 }
+#define pmd_val_ma(x)   ((x).pmd)
 #define pgd_val(x)	({ BUG(); (unsigned long)0; })
 #define pgprot_val(x)	((x).pgprot)
 
-static inline pte_t __pte(unsigned long x)
-{
-    if ( (x & 1) ) x = phys_to_machine(x);
-    return ((pte_t) { (x) });
-}
-static inline pmd_t __pmd(unsigned long x)
-{
-    if ( (x & 1) ) x = phys_to_machine(x);
-    return ((pmd_t) { (x) });
-}
+#define __pte(x) ({ unsigned long _x = (x); \
+    (((_x)&1) ? ((pte_t) {phys_to_machine(_x)}) : ((pte_t) {(_x)})); })
+#define __pte_ma(x)     ((pte_t) { (x) } )
+#define __pmd(x) ({ unsigned long _x = (x); \
+    (((_x)&1) ? ((pmd_t) {phys_to_machine(_x)}) : ((pmd_t) {(_x)})); })
 #define __pgd(x) ({ BUG(); (pgprot_t) { 0 }; })
 #define __pgprot(x)	((pgprot_t) { (x) } )
 

@@ -1,17 +1,28 @@
+
 #include <xen/config.h>
 #include <xen/sched.h>
 #include <asm/desc.h>
 
-#define IDLE0_TASK(_t)           \
-{                                \
-    processor:   0,              \
-    id:          IDLE_DOMAIN_ID, \
-    mm:          IDLE0_MM,       \
-    thread:      INIT_THREAD,    \
-    flags:       1<<DF_IDLETASK, \
-    refcnt:      ATOMIC_INIT(1)  \
-}
+struct domain idle0_domain = {
+    domain_id:   IDLE_DOMAIN_ID,
+    domain_flags:DOMF_idle_domain,
+    refcnt:      ATOMIC_INIT(1)
+};
 
-struct domain idle0_task = IDLE0_TASK(idle0_task);
+struct exec_domain idle0_exec_domain = {
+    processor:   0,
+    domain:      &idle0_domain,
+    arch:        IDLE0_ARCH_EXEC_DOMAIN
+};
 
 struct tss_struct init_tss[NR_CPUS];
+
+/*
+ * Local variables:
+ * mode: C
+ * c-set-style: "BSD"
+ * c-basic-offset: 4
+ * tab-width: 4
+ * indent-tabs-mode: nil
+ * End:
+ */
