@@ -109,37 +109,8 @@ class XendDomain:
         """Event handler for virq.
         """
         print 'onVirq>', val
-        self.refresh()
+        self.refresh(cleanup=True)
 
-    def schedule_later(self, _delay, _name, _fn, *args):
-        """Schedule a function to be called later (if not already scheduled).
-
-        @param _delay: delay in seconds
-        @param _name:  schedule name
-        @param _fn:    function
-        @param args:   arguments
-        """
-        self.scheduler.later(_delay, _name, _fn, args)
-        
-    def schedule_cancel(self, name):
-        """Cancel a scheduled function call.
-        
-        @param name: schedule name to cancel
-        """
-        self.scheduler.cancel(name)
-
-    def domain_restarts_schedule(self, delay=1):
-        """Schedule domain_restarts to be called later.
-        
-        @param delay: delay in seconds
-        """
-        self.schedule_later(delay, 'domain_restarts', self.domain_restarts)
-        
-    def domain_restarts_cancel(self):
-        """Cancel any scheduled call of domain_restarts.
-        """
-        self.schedule_cancel('domain_restarts')
-        
     def rm_all(self):
         """Remove all domain info. Used after reboot.
         """
@@ -183,7 +154,7 @@ class XendDomain:
                     self._delete_domain(domid)
             else:
                 self._delete_domain(domid)
-        self.refresh()
+        self.refresh(cleanup=True)
 
     def sync(self):
         """Sync domain db to disk.
@@ -302,13 +273,12 @@ class XendDomain:
                eserver.inject('xend.domain.exit', [name, id, 'crash']) 
             destroyed += 1
             self.final_domain_destroy(id)
-        if self.domain_restarts_exist():
-            self.domain_restarts_schedule()
 
-    def refresh(self):
+    def refresh(self, cleanup=False):
         """Refresh domain list from Xen.
         """
-        self.reap()
+        if cleanup:
+            self.reap()
         doms = self.xen_domains()
         # Add entries for any domains we don't know about.
         for (id, d) in doms.items():
@@ -316,14 +286,17 @@ class XendDomain:
                 self.domain_lookup(id)
         # Remove entries for domains that no longer exist.
         # Update entries for existing domains.
+        do_domain_restarts = False
         for d in self.domain_by_id.values():
             info = doms.get(d.id)
             if info:
                 d.update(info)
             elif d.restart_pending():
-                pass
+                do_domain_restarts = True
             else:
                 self._delete_domain(d.id)
+        if cleanup and do_domain_restarts:
+            self.scheduler.now(self.domain_restarts)
 
     def update_domain(self, id):
         """Update the saved info for a domain.
@@ -353,6 +326,7 @@ class XendDomain:
 
         @return: domain names
         """
+        self.refresh()
         return self.domain_by_name.keys()
 
     def domain_ls_ids(self):
@@ -499,7 +473,8 @@ class XendDomain:
         if reason == 'halt':
             reason = 'poweroff'
         val = dominfo.shutdown(reason, key=key)
-        self.add_shutdown(dominfo, reason, key)
+        if reason != 'sysrq':
+            self.add_shutdown(dominfo, reason, key)
         return val
 
     def add_shutdown(self, dominfo, reason, key):
@@ -515,7 +490,6 @@ class XendDomain:
         """Process pending domain shutdowns.
         Destroys domains whose shutdowns have timed out.
         """
-        self.schedule_cancel('domain_shutdowns')
         timeout = SHUTDOWN_TIMEOUT
         for shutdown in self.shutdowns_by_id.values():
             id = shutdown.getDomain()
@@ -538,7 +512,7 @@ class XendDomain:
                 timeout = min(timeout, shutdown.getTimeout())
         if self.shutdowns_by_id:
             # Pending shutdowns remain - reschedule.
-            self.schedule_later(timeout, 'domain_shutdowns', self.domain_shutdowns)
+            self.scheduler.later(timeout, self.domain_shutdowns)
 
     def domain_restart_schedule(self, id, reason, force=False):
         """Schedule a restart for a domain if it needs one.
@@ -563,7 +537,6 @@ class XendDomain:
         log.info('Scheduling restart for domain: name=%s id=%s', dominfo.name, dominfo.id)
         eserver.inject("xend.domain.restart",
                        [dominfo.name, dominfo.id, "schedule"])
-        self.domain_restarts_schedule()
             
     def domain_restart_cancel(self, id):
         """Cancel any restart scheduled for a domain.
@@ -583,7 +556,6 @@ class XendDomain:
     def domain_restarts(self):
         """Execute any scheduled domain restarts for domains that have gone.
         """
-        self.domain_restarts_cancel()
         doms = self.xen_domains()
         for dominfo in self.restarts_by_id.values():
             print 'domain_restarts>', dominfo.name, dominfo.id
@@ -597,13 +569,7 @@ class XendDomain:
             del self.restarts_by_name[dominfo.name]
             print 'domain_restarts> restarting: ', dominfo.name
             self.domain_restart(dominfo)
-        if self.domain_restarts_exist():
-            # Run again later if any restarts remain.
-            self.domain_restarts_schedule(delay=10)
 
-    def domain_restarts_exist(self):
-        return len(self.restarts_by_id)
-        
     def final_domain_destroy(self, id):
         """Final destruction of a domain..
 
@@ -631,7 +597,6 @@ class XendDomain:
         """
         self.domain_restart_schedule(id, reason, force=True)
         val = self.final_domain_destroy(id)
-        self.refresh()
         return val
 
     def domain_migrate(self, id, dst, live=False, resource=0):
