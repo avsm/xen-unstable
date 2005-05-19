@@ -35,9 +35,15 @@ class XendDomain:
     """Path to domain database."""
     dbpath = "domain"
 
-    """Table of domain info indexed by domain id."""
-    domain_by_id = {}
-    domain_by_name = {}
+    class XendDomainDict(dict):
+        def get_by_name(self, name):
+            try:
+                return filter(lambda d: d.name == name, self.values())[0]
+            except IndexError, err:
+                return None
+
+    """Dict of domain info indexed by domain id."""
+    domains = XendDomainDict()
     
     def __init__(self):
         # Hack alert. Python does not support mutual imports, but XendDomainInfo
@@ -54,6 +60,13 @@ class XendDomain:
         eserver.subscribe('xend.virq', self.onVirq)
         self.initial_refresh()
 
+    def list(self):
+        """Get list of domain objects.
+
+        @return: domain objects
+        """
+        return self.domains.values()
+    
     def onVirq(self, event, val):
         """Event handler for virq.
         """
@@ -128,8 +141,7 @@ class XendDomain:
         @return: domain
         """
         dominfo = XendDomainInfo.vm_recreate(savedinfo, info)
-        self.domain_by_id[dominfo.id] = dominfo
-        self.domain_by_name[dominfo.name] = dominfo
+        self.domains[dominfo.id] = dominfo
         return dominfo
 
     def _add_domain(self, info, notify=True):
@@ -139,24 +151,16 @@ class XendDomain:
         @param notify: send a domain created event if true
         """
         # Remove entries under the wrong id.
-        for i, d in self.domain_by_id.items():
+        for i, d in self.domains.items():
             if i != d.id:
-                del self.domain_by_id[i]
+                del self.domains[i]
                 if i in self.domain_db:
                     del self.domain_db[i]
                 self.db.delete(i)
-        # Remove entries under the wrong name.
-        for n, d in self.domain_by_name.items():
-            if n != d.name:
-                del self.domain_by_name[n]
-        # But also need to make sure are indexed under correct name.
-        # What about entries under info.name ?
-        if info.id in self.domain_by_id:
+        if info.id in self.domains:
             notify = False
-        self.domain_by_id[info.id] = info
+        self.domains[info.id] = info
         self.domain_db[info.id] = info.sxpr()
-        if info.name:
-            self.domain_by_name[info.name] = info
         self.sync_domain(info.id)
         if notify:
             eserver.inject('xend.domain.create', [info.name, info.id])
@@ -167,12 +171,9 @@ class XendDomain:
         @param id:     domain id
         @param notify: send a domain died event if true
         """
-        for (k, info) in self.domain_by_name.items():
-            if info.id == id:
-                del self.domain_by_name[k]
-        info = self.domain_by_id.get(id)
+        info = self.domains.get(id)
         if info:
-            del self.domain_by_id[id]
+            del self.domains[id]
             if notify:
                 eserver.inject('xend.domain.died', [info.name, info.id])
         if id in self.domain_db:
@@ -196,7 +197,7 @@ class XendDomain:
         for d in casualties:
             id = str(d['dom'])
             #print 'reap>', id
-            dominfo = self.domain_by_id.get(id)
+            dominfo = self.domains.get(id)
             name = (dominfo and dominfo.name) or '??'
             if dominfo and dominfo.is_terminated():
                 #print 'reap> already terminated:', id
@@ -229,12 +230,12 @@ class XendDomain:
         doms = self.xen_domains()
         # Add entries for any domains we don't know about.
         for (id, d) in doms.items():
-            if id not in self.domain_by_id:
+            if id not in self.domains:
                 self.domain_lookup(id)
         # Remove entries for domains that no longer exist.
         # Update entries for existing domains.
         do_domain_restarts = False
-        for d in self.domain_by_id.values():
+        for d in self.domains.values():
             info = doms.get(d.id)
             if info:
                 d.update(info)
@@ -250,7 +251,7 @@ class XendDomain:
 
         @param id: domain id
         """
-        dominfo = self.domain_by_id.get(id)
+        dominfo = self.domains.get(id)
         if dominfo:
             self.domain_db[id] = dominfo.sxpr()
             self.sync_domain(id)
@@ -262,7 +263,7 @@ class XendDomain:
         """
         dominfo = self.xen_domain(id)
         if dominfo:
-            d = self.domain_by_id.get(id)
+            d = self.domains.get(id)
             if d:
                 d.update(dominfo)
         else:
@@ -274,7 +275,9 @@ class XendDomain:
         @return: domain names
         """
         self.refresh()
-        return self.domain_by_name.keys()
+        doms = self.domains.values()
+        doms.sort(lambda x, y: cmp(x.name, y.name))
+        return map(lambda x: x.name, doms)
 
     def domain_ls_ids(self):
         """Get list of domain ids.
@@ -282,16 +285,8 @@ class XendDomain:
         @return: domain names
         """
         self.refresh()
-        return self.domain_by_id.keys()
+        return self.domains.keys()
 
-    def domains(self):
-        """Get list of domain objects.
-
-        @return: domain objects
-        """
-        self.refresh()
-        return self.domain_by_id.values()
-    
     def domain_create(self, config):
         """Create a domain from a configuration.
 
@@ -357,27 +352,25 @@ class XendDomain:
         """
         id = str(id)
         self.refresh_domain(id)
-        return self.domain_by_id.get(id)
+        return self.domains.get(id)
 
     def domain_lookup(self, name):
         name = str(name)
-        dominfo = self.domain_by_name.get(name) or self.domain_by_id.get(name)
+        dominfo = self.domains.get_by_name(name) or self.domains.get(name)
         if dominfo:
             return dominfo
         try:
-            log.info("Creating entry for unknown domain: id=%s", name)
             d = self.xen_domain(name)
             if d:
+                log.info("Creating entry for unknown domain: id=%s", name)
                 dominfo = XendDomainInfo.vm_recreate(None, d)
                 self._add_domain(dominfo)
                 return dominfo
         except Exception, ex:
             log.exception("Error creating domain info: id=%s", name)
-        raise XendError('invalid domain: ' + name)
 
     def domain_exists(self, name):
-        name = str(name)
-        return self.domain_by_name.get(name) or self.domain_by_id.get(name)
+        return self.domain_lookup(name) != None
 
     def domain_unpause(self, id):
         """Unpause domain execution.
@@ -429,7 +422,7 @@ class XendDomain:
         Destroys domains whose shutdowns have timed out.
         """
         timeout = SHUTDOWN_TIMEOUT + 1
-        for dominfo in self.domain_by_id.values():
+        for dominfo in self.domains.values():
             if not dominfo.shutdown_pending:
                 # domain doesn't need shutdown
                 continue
@@ -480,7 +473,7 @@ class XendDomain:
         """Execute any scheduled domain restarts for domains that have gone.
         """
         doms = self.xen_domains()
-        for dominfo in self.domain_by_id.values():
+        for dominfo in self.domains.values():
             if not dominfo.restart_pending():
                 continue
             print 'domain_restarts>', dominfo.name, dominfo.id
