@@ -28,7 +28,6 @@
 #include <asm/debugger.h>
 
 unsigned int nmi_watchdog = NMI_NONE;
-unsigned int watchdog_on = 0;
 static unsigned int nmi_hz = HZ;
 unsigned int nmi_perfctr_msr;	/* the MSR to reset in NMI handler */
 
@@ -48,9 +47,6 @@ extern int logical_proc_id[];
 #define P6_EVENT_CPU_CLOCKS_NOT_HALTED	0x79
 #define P6_NMI_EVENT		P6_EVENT_CPU_CLOCKS_NOT_HALTED
 
-#define MSR_P4_MISC_ENABLE	0x1A0
-#define MSR_P4_MISC_ENABLE_PERF_AVAIL	(1<<7)
-#define MSR_P4_MISC_ENABLE_PEBS_UNAVAIL	(1<<12)
 #define MSR_P4_PERFCTR0		0x300
 #define MSR_P4_CCCR0		0x360
 #define P4_ESCR_EVENT_SELECT(N)	((N)<<25)
@@ -89,24 +85,20 @@ extern int logical_proc_id[];
 int __init check_nmi_watchdog (void)
 {
     unsigned int prev_nmi_count[NR_CPUS];
-    int j, cpu;
+    int cpu;
     
     if ( !nmi_watchdog )
         return 0;
 
     printk("Testing NMI watchdog --- ");
 
-    for ( j = 0; j < smp_num_cpus; j++ ) 
-    {
-        cpu = cpu_logical_map(j);
+    for ( cpu = 0; cpu < smp_num_cpus; cpu++ ) 
         prev_nmi_count[cpu] = nmi_count(cpu);
-    }
     __sti();
     mdelay((10*1000)/nmi_hz); /* wait 10 ticks */
 
-    for ( j = 0; j < smp_num_cpus; j++ ) 
+    for ( cpu = 0; cpu < smp_num_cpus; cpu++ ) 
     {
-        cpu = cpu_logical_map(j);
         if ( nmi_count(cpu) - prev_nmi_count[cpu] <= 5 )
             printk("CPU#%d stuck. ", cpu);
         else
@@ -186,15 +178,15 @@ static int __pminit setup_p4_watchdog(void)
 {
     unsigned int misc_enable, dummy;
 
-    rdmsr(MSR_P4_MISC_ENABLE, misc_enable, dummy);
-    if (!(misc_enable & MSR_P4_MISC_ENABLE_PERF_AVAIL))
+    rdmsr(MSR_IA32_MISC_ENABLE, misc_enable, dummy);
+    if (!(misc_enable & MSR_IA32_MISC_ENABLE_PERF_AVAIL))
         return 0;
 
     nmi_perfctr_msr = MSR_P4_IQ_COUNTER0;
 
     if ( logical_proc_id[smp_processor_id()] == 0 )
     {
-        if (!(misc_enable & MSR_P4_MISC_ENABLE_PEBS_UNAVAIL))
+        if (!(misc_enable & MSR_IA32_MISC_ENABLE_PEBS_UNAVAIL))
             clear_msr_range(0x3F1, 2);
         /* MSR 0x3F0 seems to have a default value of 0xFC00, but current
            docs doesn't fully define it, so leave it alone for now. */
@@ -263,6 +255,28 @@ static unsigned int
 last_irq_sums [NR_CPUS],
     alert_counter [NR_CPUS];
 
+static spinlock_t   watchdog_lock = SPIN_LOCK_UNLOCKED;
+static unsigned int watchdog_disable_count = 1;
+static unsigned int watchdog_on;
+
+void watchdog_disable(void)
+{
+    unsigned long flags;
+    spin_lock_irqsave(&watchdog_lock, flags);
+    if ( watchdog_disable_count++ == 0 )
+        watchdog_on = 0;
+    spin_unlock_irqrestore(&watchdog_lock, flags);
+}
+
+void watchdog_enable(void)
+{
+    unsigned long flags;
+    spin_lock_irqsave(&watchdog_lock, flags);
+    if ( --watchdog_disable_count == 0 )
+        watchdog_on = 1;
+    spin_unlock_irqrestore(&watchdog_lock, flags);
+}
+
 void touch_nmi_watchdog (void)
 {
     int i;
@@ -270,11 +284,11 @@ void touch_nmi_watchdog (void)
         alert_counter[i] = 0;
 }
 
-void nmi_watchdog_tick (struct xen_regs * regs)
+void nmi_watchdog_tick (struct cpu_user_regs * regs)
 {
     int sum, cpu = smp_processor_id();
 
-    sum = apic_timer_irqs[cpu];
+    sum = ac_timers[cpu].softirqs;
 
     if ( (last_irq_sums[cpu] == sum) && watchdog_on )
     {
