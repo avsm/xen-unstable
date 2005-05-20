@@ -7,8 +7,6 @@ INSTALL_DIR	= $(INSTALL) -d -m0755
 
 include $(XEN_ROOT)/tools/Rules.mk
 
-CC = gcc
-
 LIB_SRCS :=
 LIB_SRCS += allocate.c
 LIB_SRCS += enum.c
@@ -33,7 +31,7 @@ CFLAGS   += -Wall -Werror -O3 -fno-strict-aliasing
 CFLAGS   += -Wp,-MD,.$(@F).d
 DEPS     = .*.d
 
-MAJOR    := 2.0
+MAJOR    := 3.0
 MINOR    := 0
 LIB      := libxutil.so 
 LIB      += libxutil.so.$(MAJOR)
@@ -51,7 +49,7 @@ libxutil.so.$(MAJOR): libxutil.so.$(MAJOR).$(MINOR)
 	ln -sf $^ $@
 
 libxutil.so.$(MAJOR).$(MINOR): $(PIC_OBJS)
-	$(CC) -Wl,-soname -Wl,libxutil.so.$(MAJOR) -shared -o $@ $^
+	$(CC) $(CFLAGS) -Wl,-soname -Wl,libxutil.so.$(MAJOR) -shared -o $@ $^
 
 libxutil.a: $(LIB_OBJS)
 	$(AR) rc $@ $^
@@ -65,11 +63,11 @@ check-for-zlib:
 	fi
 
 install: build
-	[ -d $(DESTDIR)/usr/lib ] || $(INSTALL_DIR) -p $(DESTDIR)/usr/lib
-	$(INSTALL_PROG) libxutil.so.$(MAJOR).$(MINOR) $(DESTDIR)/usr/lib
-	$(INSTALL_DATA) libxutil.a $(DESTDIR)/usr/lib
-	ln -sf libxutil.so.$(MAJOR).$(MINOR) $(DESTDIR)/usr/lib/libxutil.so.$(MAJOR)
-	ln -sf libxutil.so.$(MAJOR) $(DESTDIR)/usr/lib/libxutil.so
+	[ -d $(DESTDIR)/usr/$(LIBDIR) ] || $(INSTALL_DIR) -p $(DESTDIR)/usr/$(LIBDIR)
+	$(INSTALL_PROG) libxutil.so.$(MAJOR).$(MINOR) $(DESTDIR)/usr/$(LIBDIR)
+	$(INSTALL_DATA) libxutil.a $(DESTDIR)/usr/$(LIBDIR)
+	ln -sf libxutil.so.$(MAJOR).$(MINOR) $(DESTDIR)/usr/$(LIBDIR)/libxutil.so.$(MAJOR)
+	ln -sf libxutil.so.$(MAJOR) $(DESTDIR)/usr/$(LIBDIR)/libxutil.so
 
 clean:
 	$(RM) *.a *.so* *.o *.opic *.rpm 

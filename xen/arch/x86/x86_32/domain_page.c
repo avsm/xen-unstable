@@ -19,7 +19,7 @@
 #include <asm/flushtlb.h>
 #include <asm/hardirq.h>
 
-unsigned long *mapcache;
+l1_pgentry_t *mapcache;
 static unsigned int map_idx, epoch, shadow_epoch[NR_CPUS];
 static spinlock_t map_lock = SPIN_LOCK_UNLOCKED;
 
@@ -28,12 +28,12 @@ static spinlock_t map_lock = SPIN_LOCK_UNLOCKED;
 
 static void flush_all_ready_maps(void)
 {
-    unsigned long *cache = mapcache;
+    l1_pgentry_t *cache = mapcache;
 
     /* A bit skanky -- depends on having an aligned PAGE_SIZE set of PTEs. */
     do {
-        if ( (*cache & READY_FOR_TLB_FLUSH) )
-            *cache = 0;
+        if ( (l1e_get_flags(*cache) & READY_FOR_TLB_FLUSH) )
+            *cache = l1e_empty();
     }
     while ( ((unsigned long)(++cache) & ~PAGE_MASK) != 0 );
 }
@@ -43,7 +43,10 @@ void *map_domain_mem(unsigned long pa)
 {
     unsigned long va;
     unsigned int idx, cpu = smp_processor_id();
-    unsigned long *cache = mapcache;
+    l1_pgentry_t *cache = mapcache;
+#ifndef NDEBUG
+    unsigned int flush_count = 0;
+#endif
 
     ASSERT(!in_irq());
     perfc_incrc(map_domain_mem_count);
@@ -62,15 +65,16 @@ void *map_domain_mem(unsigned long pa)
         idx = map_idx = (map_idx + 1) & (MAPCACHE_ENTRIES - 1);
         if ( unlikely(idx == 0) )
         {
+            ASSERT(flush_count++ == 0);
             flush_all_ready_maps();
             perfc_incrc(domain_page_tlb_flush);
             local_flush_tlb();
             shadow_epoch[cpu] = ++epoch;
         }
     }
-    while ( cache[idx] != 0 );
+    while ( l1e_get_value(cache[idx]) != 0 );
 
-    cache[idx] = (pa & PAGE_MASK) | __PAGE_HYPERVISOR;
+    cache[idx] = l1e_create_phys(pa, __PAGE_HYPERVISOR);
 
     spin_unlock(&map_lock);
 
@@ -81,6 +85,8 @@ void *map_domain_mem(unsigned long pa)
 void unmap_domain_mem(void *va)
 {
     unsigned int idx;
+    ASSERT((void *)MAPCACHE_VIRT_START <= va);
+    ASSERT(va < (void *)MAPCACHE_VIRT_END);
     idx = ((unsigned long)va - MAPCACHE_VIRT_START) >> PAGE_SHIFT;
-    mapcache[idx] |= READY_FOR_TLB_FLUSH;
+    l1e_add_flags(&mapcache[idx], READY_FOR_TLB_FLUSH);
 }

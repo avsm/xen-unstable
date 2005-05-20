@@ -1,4 +1,6 @@
 
+include Config.mk
+
 # We expect these two to already be set if people 
 # are using the top-level Makefile
 DISTDIR	?= $(CURDIR)/dist
@@ -53,6 +55,7 @@ endif
 $(patsubst %,pristine-%/.valid-pristine,$(ALLSPARSETREES)) : pristine-%/.valid-pristine: %.tar.bz2
 	rm -rf tmp-pristine-$* $(@D)
 	mkdir -p tmp-pristine-$*
+	touch tmp-pristine-$*/.bk_skip
 	tar -C tmp-pristine-$* -jxf $<
 	mv tmp-pristine-$*/* $(@D)
 	@rm -rf tmp-pristine-$*
@@ -83,6 +86,9 @@ ref-%/.valid-ref: pristine-%/.valid-pristine
 
 %-clean:
 	$(MAKE) -f buildconfigs/mk.$* clean
+
+%-config:
+	$(MAKE) -f buildconfigs/mk.$* config
 
 %-xen.patch: ref-%/.valid-ref
 	rm -rf tmp-$@

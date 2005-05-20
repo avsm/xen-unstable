@@ -13,6 +13,7 @@
 #define _ASM_FIXMAP_H
 
 #include <xen/config.h>
+#include <xen/lib.h>
 #include <asm/acpi.h>
 #include <asm/apicdef.h>
 #include <asm/page.h>
@@ -26,7 +27,7 @@
  */
 enum fixed_addresses {
 #ifdef CONFIG_X86_LOCAL_APIC
-    FIX_APIC_BASE,	/* local (CPU) APIC) -- required for SMP or not */
+    FIX_APIC_BASE,	/* local (CPU) APIC -- required for SMP or not */
 #endif
 #ifdef CONFIG_X86_IO_APIC
     FIX_IO_APIC_BASE_0,
@@ -39,19 +40,28 @@ enum fixed_addresses {
     __end_of_fixed_addresses
 };
 
-#define FIXADDR_TOP   (0xffffe000UL)
+#define FIXADDR_TOP   (IOREMAP_VIRT_END - PAGE_SIZE)
 #define FIXADDR_SIZE  (__end_of_fixed_addresses << PAGE_SHIFT)
 #define FIXADDR_START (FIXADDR_TOP - FIXADDR_SIZE)
 
-extern void __set_fixmap(enum fixed_addresses idx,
-                         l1_pgentry_t entry);
+extern void __set_fixmap(
+    enum fixed_addresses idx, unsigned long p, unsigned long flags);
 
 #define set_fixmap(idx, phys) \
-    __set_fixmap(idx, mk_l1_pgentry(phys|PAGE_HYPERVISOR))
+    __set_fixmap(idx, phys, PAGE_HYPERVISOR)
 
 #define set_fixmap_nocache(idx, phys) \
-    __set_fixmap(idx, mk_l1_pgentry(phys|PAGE_HYPERVISOR_NOCACHE))
+    __set_fixmap(idx, phys, PAGE_HYPERVISOR_NOCACHE)
 
-#define fix_to_virt(x) (FIXADDR_TOP - ((x) << PAGE_SHIFT))
+#define __fix_to_virt(x) (FIXADDR_TOP - ((x) << PAGE_SHIFT))
+#define __virt_to_fix(x) ((FIXADDR_TOP - ((x)&PAGE_MASK)) >> PAGE_SHIFT)
+
+#define fix_to_virt(x)   (__fix_to_virt(x))
+
+static inline unsigned long virt_to_fix(const unsigned long vaddr)
+{
+    BUG_ON(vaddr >= FIXADDR_TOP || vaddr < FIXADDR_START);
+    return __virt_to_fix(vaddr);
+}
 
 #endif
