@@ -10,6 +10,8 @@ import socket
 from xen.xend import sxp
 from xen.xend import PrettyPrint
 from xen.xend.XendClient import server, XendError
+from xen.xend.XendBootloader import bootloader
+from xen.util import blkif
 
 from xen.util import console_client
 
@@ -94,6 +96,14 @@ gopts.var('name', val='NAME',
           fn=set_value, default=None,
           use="Domain name. Must be unique.")
 
+gopts.var('bootloader', val='FILE',
+          fn=set_value, default=None,
+          use="Path to bootloader.")
+
+gopts.var('bootentry', val='NAME',
+          fn=set_value, default=None,
+          use="Entry to boot via boot loader")
+
 gopts.var('kernel', val='FILE',
           fn=set_value, default=None,
           use="Path to kernel image.")
@@ -117,6 +127,10 @@ gopts.var('maxmem', val='MEMORY',
 gopts.var('cpu', val='CPU',
           fn=set_int, default=None,
           use="CPU to run the domain on.")
+
+gopts.var('vcpus', val='VCPUS',
+          fn=set_int, default=1,
+          use="# of Virtual CPUS in domain.")
 
 gopts.var('cpu_weight', val='WEIGHT',
           fn=set_float, default=None,
@@ -156,15 +170,22 @@ gopts.var('pci', val='BUS,DEV,FUNC',
          For example '-pci c0,02,1a'.
          The option may be repeated to add more than one pci device.""")
 
+gopts.var('usb', val='PATH',
+          fn=append_value, default=[],
+          use="""Add a physical USB port to a domain, as specified by the path
+          to that port.  This option may be repeated to add more than one port.""")
+
 gopts.var('ipaddr', val="IPADDR",
           fn=append_value, default=[],
           use="Add an IP address to the domain.")
 
-gopts.var('vif', val="mac=MAC,bridge=BRIDGE,script=SCRIPT,backend=DOM,vifname=NAME",
+gopts.var('vif', val="mac=MAC,be_mac=MAC,bridge=BRIDGE,script=SCRIPT,backend=DOM,vifname=NAME",
           fn=append_value, default=[],
           use="""Add a network interface with the given MAC address and bridge.
           The vif is configured by calling the given configuration script.
           If mac is not specified a random MAC address is used.
+          The MAC address of the backend interface can be selected with be_mac.
+          If not specified then the network backend chooses it's own MAC address.
           If bridge is not specified the default bridge is used.
           If script is not specified the default script is used.
           If backend is not specified the default backend driver domain is used.
@@ -221,6 +242,18 @@ gopts.var('nfs_root', val="PATH",
           fn=set_value, default=None,
           use="Set the path of the root NFS directory.")
 
+gopts.var('memmap', val='FILE',
+          fn=set_value, default='',
+          use="Path to memap SXP file.")
+
+gopts.var('device_model', val='FILE',
+          fn=set_value, default='',
+          use="Path to device model program.")
+
+gopts.var('device_config', val='FILE',
+          fn=set_value, default='',
+          use="Path to device model configuration.")
+
 def strip(pre, s):
     """Strip prefix 'pre' if present.
     """
@@ -229,7 +262,7 @@ def strip(pre, s):
     else:
         return s
 
-def configure_image(config, vals):
+def configure_image(opts, config, vals):
     """Create the image config.
     """
     config_image = [ vals.builder ]
@@ -244,9 +277,12 @@ def configure_image(config, vals):
         config_image.append(['root', cmdline_root])
     if vals.extra:
         config_image.append(['args', vals.extra])
+    if vals.vcpus:
+        config_image.append(['vcpus', vals.vcpus])
     config.append(['image', config_image ])
+
     
-def configure_disks(config_devs, vals):
+def configure_disks(opts, config_devs, vals):
     """Create the config for disks (virtual block devices).
     """
     for (uname, dev, mode, backend) in vals.disk:
@@ -258,12 +294,17 @@ def configure_disks(config_devs, vals):
             config_vbd.append(['backend', backend])
         config_devs.append(['device', config_vbd])
 
-def configure_pci(config_devs, vals):
+def configure_pci(opts, config_devs, vals):
     """Create the config for pci devices.
     """
     for (bus, dev, func) in vals.pci:
         config_pci = ['pci', ['bus', bus], ['dev', dev], ['func', func]]
         config_devs.append(['device', config_pci])
+
+def configure_usb(opts, config_devs, vals):
+    for path in vals.usb:
+        config_usb = ['usb', ['path', path]]
+        config_devs.append(['device', config_usb])
 
 def randomMAC():
     """Generate a random MAC address.
@@ -284,7 +325,7 @@ def randomMAC():
             random.randint(0x00, 0xff) ]
     return ':'.join(map(lambda x: "%02x" % x, mac))
 
-def configure_vifs(config_devs, vals):
+def configure_vifs(opts, config_devs, vals):
     """Create the config for virtual network interfaces.
     """
     vifs = vals.vif
@@ -296,6 +337,7 @@ def configure_vifs(config_devs, vals):
             mac = d.get('mac')
             if not mac:
                 mac = randomMAC()
+            be_mac = d.get('be_mac')
             bridge = d.get('bridge')
             script = d.get('script')
             backend = d.get('backend')
@@ -303,6 +345,7 @@ def configure_vifs(config_devs, vals):
             vifname = d.get('vifname')
         else:
             mac = randomMAC()
+            be_mac = None
             bridge = None
             script = None
             backend = None
@@ -312,6 +355,8 @@ def configure_vifs(config_devs, vals):
         config_vif.append(['mac', mac])
         if vifname:
             config_vif.append(['vifname', vifname])
+        if be_mac:
+            config_vif.append(['be_mac', be_mac])
         if bridge:
             config_vif.append(['bridge', bridge])
         if script:
@@ -322,7 +367,7 @@ def configure_vifs(config_devs, vals):
             config_vif.append(['ip', ip])
         config_devs.append(['device', config_vif])
 
-def configure_vfr(config, vals):
+def configure_vfr(opts, config, vals):
      if not vals.ipaddr: return
      config_vfr = ['vfr']
      idx = 0 # No way of saying which IP is for which vif?
@@ -330,8 +375,31 @@ def configure_vfr(config, vals):
          config_vfr.append(['vif', ['id', idx], ['ip', ip]])
      config.append(config_vfr)
 
+def configure_vmx(opts, config_devs, vals):
+    """Create the config for VMX devices.
+    """
+    memmap = vals.memmap
+    device_model = vals.device_model
+    device_config = vals.device_config
+    config_devs.append(['memmap', memmap])
+    config_devs.append(['device_model', device_model])
+    config_devs.append(['device_config', device_config])
 
-def make_config(vals):
+def run_bootloader(opts, config, vals):
+    if not os.access(vals.bootloader, os.X_OK):
+        opts.err("Bootloader isn't executable")
+    if len(vals.disk) < 1:
+        opts.err("No disks configured and boot loader requested")
+    (uname, dev, mode, backend) = vals.disk[0]
+    file = blkif.blkdev_uname_to_file(uname)
+
+    blcfg = bootloader(vals.bootloader, file, not vals.console_autoconnect,
+                       vals.vcpus, vals.blentry)
+
+    config.append(['bootloader', vals.bootloader])
+    config.append(blcfg)
+
+def make_config(opts, vals):
     """Create the domain configuration.
     """
     
@@ -352,13 +420,19 @@ def make_config(vals):
         config.append(['restart', vals.restart])
     if vals.console:
         config.append(['console', vals.console])
-    
-    configure_image(config, vals)
+
+    if vals.bootloader:
+        run_bootloader(opts, config, vals)
+    else:
+        configure_image(opts, config, vals)
     config_devs = []
-    configure_disks(config_devs, vals)
-    configure_pci(config_devs, vals)
-    configure_vifs(config_devs, vals)
+    configure_disks(opts, config_devs, vals)
+    configure_pci(opts, config_devs, vals)
+    configure_vifs(opts, config_devs, vals)
+    configure_usb(opts, config_devs, vals)
+    configure_vmx(opts, config_devs, vals)
     config += config_devs
+
     return config
 
 def preprocess_disk(opts, vals):
@@ -398,7 +472,7 @@ def preprocess_vifs(opts, vals):
             (k, v) = b.strip().split('=', 1)
             k = k.strip()
             v = v.strip()
-            if k not in ['mac', 'bridge', 'script', 'backend', 'ip', 'vifname']:
+            if k not in ['mac', 'be_mac', 'bridge', 'script', 'backend', 'ip', 'vifname']:
                 opts.err('Invalid vif specifier: ' + vif)
             d[k] = v
         vifs.append(d)
@@ -541,13 +615,15 @@ def main(argv):
         preprocess(opts, opts.vals)
         if not opts.getopt('name') and opts.getopt('defconfig'):
             opts.setopt('name', os.path.basename(opts.getopt('defconfig')))
-        config = make_config(opts.vals)
+        config = make_config(opts, opts.vals)
+
     if opts.vals.dryrun:
         PrettyPrint.prettyprint(config)
     else:
         (dom, console) = make_domain(opts, config)
         if opts.vals.console_autoconnect:
-            console_client.connect('localhost', console)
+            path = "/var/lib/xend/console-%s" % console
+            console_client.connect('localhost', console, path=path)
         
 if __name__ == '__main__':
     main(sys.argv)

@@ -5,10 +5,12 @@
 
 #define E820MAX	32
 
-#define E820_RAM	1
-#define E820_RESERVED	2
-#define E820_ACPI	3
-#define E820_NVS	4
+#define E820_RAM          1
+#define E820_RESERVED     2
+#define E820_ACPI         3
+#define E820_NVS          4
+#define E820_IO          16
+#define E820_SHARED_PAGE 17
 
 #ifndef __ASSEMBLY__
 struct e820entry {
@@ -22,8 +24,12 @@ struct e820map {
     struct e820entry map[E820MAX];
 };
 
-extern unsigned long init_e820(struct e820entry *, int);
+extern unsigned long init_e820(struct e820entry *, int *);
 extern struct e820map e820;
+
+#ifndef NDEBUG
+extern void print_e820_memory_map(struct e820entry *map, int entries);
+#endif
 
 #endif /*!__ASSEMBLY__*/
 

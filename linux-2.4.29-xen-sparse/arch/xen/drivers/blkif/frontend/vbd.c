@@ -67,9 +67,14 @@ static int xlvbd_get_vbd_info(vdisk_t *disk_info)
     memset(&req, 0, sizeof(req));
     req.operation   = BLKIF_OP_PROBE;
     req.nr_segments = 1;
+#ifdef CONFIG_XEN_BLKDEV_GRANT
+    blkif_control_probe_send(&req, &rsp,
+                             (unsigned long)(virt_to_machine(buf)));
+#else
     req.frame_and_sects[0] = virt_to_machine(buf) | 7;
 
     blkif_control_send(&req, &rsp);
+#endif
 
     if ( rsp.status <= 0 )
     {
@@ -113,12 +118,6 @@ static int xlvbd_init_device(vdisk_t *xd)
 
     if ( (bd = bdget(device)) == NULL )
         return -1;
-
-    /*
-     * Update of partition info, and check of usage count, is protected
-     * by the per-block-device semaphore.
-     */
-    down(&bd->bd_sem);
 
     if ( ((disk = xldev_to_xldisk(device)) != NULL) && (disk->usage != 0) )
     {
@@ -331,7 +330,6 @@ static int xlvbd_init_device(vdisk_t *xd)
     }
 
  out:
-    up(&bd->bd_sem);
     bdput(bd);    
     return rc;
 }
@@ -355,12 +353,6 @@ static int xlvbd_remove_device(int device)
 
     if ( (bd = bdget(device)) == NULL )
         return -1;
-
-    /*
-     * Update of partition info, and check of usage count, is protected
-     * by the per-block-device semaphore.
-     */
-    down(&bd->bd_sem);
 
     if ( ((gd = get_gendisk(device)) == NULL) ||
          ((disk = xldev_to_xldisk(device)) == NULL) )
@@ -423,7 +415,6 @@ static int xlvbd_remove_device(int device)
     }
 
  out:
-    up(&bd->bd_sem);
     bdput(bd);
     return rc;
 }

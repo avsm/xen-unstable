@@ -84,16 +84,9 @@
 #define DECLARE_MUTEX(_m) spinlock_t _m = SPIN_LOCK_UNLOCKED
 #define down(_m) spin_lock(_m)
 #define up(_m) spin_unlock(_m)
-#define vmalloc(_s) xmalloc(_s)
+#define vmalloc(_s) xmalloc_bytes(_s)
 #define vfree(_p) xfree(_p)
 #define num_online_cpus() smp_num_cpus
-static inline int on_each_cpu(
-    void (*func) (void *info), void *info, int retry, int wait)
-{
-    int ret = smp_call_function(func, info, retry, wait);
-    func(info);
-    return ret;
-}
 
 #if 0
 MODULE_DESCRIPTION("Intel CPU (IA-32) Microcode Update Driver");

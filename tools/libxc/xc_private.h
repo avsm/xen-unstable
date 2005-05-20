@@ -72,7 +72,7 @@ static inline int do_xen_hypercall(int xc_handle,
 
 static inline int do_dom0_op(int xc_handle, dom0_op_t *op)
 {
-    int ret = -1, retries = 0;
+    int ret = -1, errno_saved;
     privcmd_hypercall_t hypercall;
 
     op->interface_version = DOM0_INTERFACE_VERSION;
@@ -86,26 +86,19 @@ static inline int do_dom0_op(int xc_handle, dom0_op_t *op)
         goto out1;
     }
 
- again:
     if ( (ret = do_xen_hypercall(xc_handle, &hypercall)) < 0 )
     {
-        if ( (errno == EAGAIN) && (retries++ < 10) )
-        {
-            /*
-             * This was added for memory allocation, where we can get EAGAIN
-             * if memory is unavailable because it is on the scrub list.
-             */
-            sleep(1);
-            goto again;
-        }
         if ( errno == EACCES )
             fprintf(stderr, "Dom0 operation failed -- need to"
                     " rebuild the user-space tool set?\n");
-        goto out2;
     }
 
- out2: (void)munlock(op, sizeof(*op));
- out1: return ret;
+    errno_saved = errno;
+    (void)munlock(op, sizeof(*op));
+    errno = errno_saved;
+
+ out1:
+    return ret;
 }
 
 static inline int do_dom_mem_op(int            xc_handle,
@@ -117,7 +110,8 @@ static inline int do_dom_mem_op(int            xc_handle,
 {
     privcmd_hypercall_t hypercall;
     long ret = -EINVAL;
-	
+    int errno_saved;
+
     hypercall.op     = __HYPERVISOR_dom_mem_op;
     hypercall.arg[0] = (unsigned long)memop;
     hypercall.arg[1] = (unsigned long)extent_list;
@@ -125,7 +119,47 @@ static inline int do_dom_mem_op(int            xc_handle,
     hypercall.arg[3] = (unsigned long)extent_order;
     hypercall.arg[4] = (unsigned long)domid;
 
-    if ( mlock(extent_list, nr_extents*sizeof(unsigned long)) != 0 )
+    if ( (extent_list != NULL) && 
+         (mlock(extent_list, nr_extents*sizeof(unsigned long)) != 0) )
+    {
+        PERROR("Could not lock memory for Xen hypercall");
+        goto out1;
+    }
+
+    if ( (ret = do_xen_hypercall(xc_handle, &hypercall)) < 0 )
+    {
+	fprintf(stderr, "Dom_mem operation failed (rc=%ld errno=%d)-- need to"
+                " rebuild the user-space tool set?\n",ret,errno);
+    }
+
+    if ( extent_list != NULL )
+    {
+        errno_saved = errno;
+        (void)munlock(extent_list, nr_extents*sizeof(unsigned long));
+        errno = errno_saved;
+    }
+
+ out1:
+    return ret;
+}    
+
+static inline int do_mmuext_op(
+    int xc_handle,
+    struct mmuext_op *op,
+    unsigned int nr_ops,
+    domid_t dom)
+{
+    privcmd_hypercall_t hypercall;
+    long ret = -EINVAL;
+    int errno_saved;
+
+    hypercall.op     = __HYPERVISOR_mmuext_op;
+    hypercall.arg[0] = (unsigned long)op;
+    hypercall.arg[1] = (unsigned long)nr_ops;
+    hypercall.arg[2] = (unsigned long)0;
+    hypercall.arg[3] = (unsigned long)dom;
+
+    if ( mlock(op, nr_ops*sizeof(*op)) != 0 )
     {
         PERROR("Could not lock memory for Xen hypercall");
         goto out1;
@@ -135,11 +169,14 @@ static inline int do_dom_mem_op(int            xc_handle,
     {
 	fprintf(stderr, "Dom_mem operation failed (rc=%ld errno=%d)-- need to"
                     " rebuild the user-space tool set?\n",ret,errno);
-        goto out2;
     }
 
- out2: (void)munlock(extent_list, nr_extents*sizeof(unsigned long));
- out1: return ret;
+    errno_saved = errno;
+    (void)munlock(op, nr_ops*sizeof(*op));
+    errno = errno_saved;
+
+ out1:
+    return ret;
 }    
 
 
@@ -198,5 +235,21 @@ typedef struct mfn_mapper {
 #include "xc_io.h"
 
 unsigned long xc_get_m2p_start_mfn ( int xc_handle );
+
+long xc_get_tot_pages(int xc_handle, u32 domid);
+
+int xc_copy_to_domain_page(int xc_handle, u32 domid,
+                            unsigned long dst_pfn, void *src_page);
+
+unsigned long xc_get_filesz(int fd);
+
+char *xc_read_kernel_image(const char *filename, unsigned long *size);
+
+void xc_map_memcpy(unsigned long dst, char *src, unsigned long size,
+                   int xch, u32 dom, unsigned long *parray,
+                   unsigned long vstart);
+
+int pin_table(
+    int xc_handle, unsigned int type, unsigned long mfn, domid_t dom);
 
 #endif /* __XC_PRIVATE_H__ */

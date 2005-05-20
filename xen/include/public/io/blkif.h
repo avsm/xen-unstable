@@ -9,6 +9,8 @@
 #ifndef __XEN_PUBLIC_IO_BLKIF_H__
 #define __XEN_PUBLIC_IO_BLKIF_H__
 
+#include "ring.h"
+
 #define blkif_vdev_t   u16
 #define blkif_sector_t u64
 
@@ -32,15 +34,23 @@ typedef struct {
     blkif_vdev_t   device;       /*  2: only for read/write requests         */
     unsigned long  id;           /*  4: private guest value, echoed in resp  */
     blkif_sector_t sector_number;    /* start sector idx on disk (r/w only)  */
-    /* @f_a_s[2:0]=last_sect ; @f_a_s[5:3]=first_sect ; @f_a_s[:12]=frame.   */
+    /* @f_a_s[2:0]=last_sect ; @f_a_s[5:3]=first_sect                        */
+#ifdef CONFIG_XEN_BLKDEV_GRANT
+    /* @f_a_s[:16]= grant reference (16 bits)                                */
+#else
+    /* @f_a_s[:12]=@frame: machine page frame number.                        */
+#endif
     /* @first_sect: first sector in frame to transfer (inclusive).           */
     /* @last_sect: last sector in frame to transfer (inclusive).             */
-    /* @frame: machine page frame number.                                    */
     unsigned long  frame_and_sects[BLKIF_MAX_SEGMENTS_PER_REQUEST];
 } PACKED blkif_request_t;
 
 #define blkif_first_sect(_fas) (((_fas)>>3)&7)
 #define blkif_last_sect(_fas)  ((_fas)&7)
+
+#ifdef CONFIG_XEN_BLKDEV_GRANT
+#define blkif_gref_from_fas(_fas) ((_fas)>>16)
+#endif
 
 typedef struct {
     unsigned long   id;              /* copied from request */
@@ -52,27 +62,10 @@ typedef struct {
 #define BLKIF_RSP_OKAY    0 /* non-specific 'okay'  */
 
 /*
- * We use a special capitalised type name because it is _essential_ that all 
- * arithmetic on indexes is done on an integer type of the correct size.
+ * Generate blkif ring structures and types.
  */
-typedef u32 BLKIF_RING_IDX;
 
-/*
- * Ring indexes are 'free running'. That is, they are not stored modulo the
- * size of the ring buffer. The following macro converts a free-running counter
- * into a value that can directly index a ring-buffer array.
- */
-#define MASK_BLKIF_IDX(_i) ((_i)&(BLKIF_RING_SIZE-1))
-
-typedef struct {
-    BLKIF_RING_IDX req_prod;  /*  0: Request producer. Updated by front-end. */
-    BLKIF_RING_IDX resp_prod; /*  4: Response producer. Updated by back-end. */
-    union {                   /*  8 */
-        blkif_request_t  req;
-        blkif_response_t resp;
-    } PACKED ring[BLKIF_RING_SIZE];
-} PACKED blkif_ring_t;
-
+DEFINE_RING_TYPES(blkif, blkif_request_t, blkif_response_t);
 
 /*
  * BLKIF_OP_PROBE:

@@ -15,24 +15,29 @@
 #include <asm/processor.h>
 
 extern void init_fpu(void);
-extern void save_init_fpu( struct domain *tsk );
-extern void restore_fpu( struct domain *tsk );
+extern void save_init_fpu(struct exec_domain *tsk);
+extern void restore_fpu(struct exec_domain *tsk);
 
-#define unlazy_fpu( tsk ) do { \
-	if ( test_bit(DF_USEDFPU, &tsk->flags) ) \
-		save_init_fpu( tsk ); \
-} while (0)
-
-#define clear_fpu( tsk ) do { \
-	if ( test_and_clear_bit(DF_USEDFPU, &tsk->flags) ) { \
-		asm volatile("fwait"); \
-		stts(); \
-	} \
-} while (0)
+#define unlazy_fpu(_tsk) do { \
+    if ( test_bit(_VCPUF_fpu_dirtied, &(_tsk)->vcpu_flags) ) \
+        save_init_fpu(_tsk); \
+} while ( 0 )
 
 #define load_mxcsr( val ) do { \
-        unsigned long __mxcsr = ((unsigned long)(val) & 0xffbf); \
-        asm volatile( "ldmxcsr %0" : : "m" (__mxcsr) ); \
-} while (0)
+    unsigned long __mxcsr = ((unsigned long)(val) & 0xffbf); \
+    __asm__ __volatile__ ( "ldmxcsr %0" : : "m" (__mxcsr) ); \
+} while ( 0 )
+
+/* Make domain the FPU owner */
+static inline void setup_fpu(struct exec_domain *ed)
+{
+    if ( !test_and_set_bit(_VCPUF_fpu_dirtied, &ed->vcpu_flags) )
+    {
+        if ( test_bit(_VCPUF_fpu_initialised, &ed->vcpu_flags) )
+            restore_fpu(ed);
+        else
+            init_fpu();
+    }
+}
 
 #endif /* __ASM_I386_I387_H */
