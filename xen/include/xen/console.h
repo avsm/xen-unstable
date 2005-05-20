@@ -26,4 +26,4 @@ void console_putc(char c);
 int console_getc(void);
 int irq_console_getc(void);
 
-#endif
+#endif /* __CONSOLE_H__ */

@@ -10,6 +10,7 @@
 #include <sys/time.h>
 #include "xc_private.h"
 #include <xen/linux/suspend.h>
+#include <xen/io/domain_controller.h>
 #include <time.h>
 
 #define BATCH_SIZE 1024   /* 1024 pages (4MB) at a time */
@@ -166,7 +167,8 @@ static int burst_time_us = -1;
 #define RATE_TO_BTU 781250
 #define BURST_TIME_US burst_time_us
 
-static int xcio_ratewrite(XcIOContext *ioctxt, void *buf, int n){
+static int xcio_ratewrite(XcIOContext *ioctxt, void *buf, int n)
+{
     static int budget = 0;
     static struct timeval last_put = { 0 };
     struct timeval now;
@@ -229,8 +231,8 @@ static int print_stats( int xc_handle, u32 domid,
 
     gettimeofday(&wall_now, NULL);
 
-    d0_cpu_now = xc_domain_get_cpu_usage( xc_handle, 0 )/1000;
-    d1_cpu_now = xc_domain_get_cpu_usage( xc_handle, domid )/1000;
+    d0_cpu_now = xc_domain_get_cpu_usage(xc_handle, 0, /* FIXME */ 0)/1000;
+    d1_cpu_now = xc_domain_get_cpu_usage(xc_handle, domid, /* FIXME */ 0)/1000;
 
     if ( (d0_cpu_now == -1) || (d1_cpu_now == -1) ) 
         printf("ARRHHH!!\n");
@@ -272,10 +274,13 @@ static int print_stats( int xc_handle, u32 domid,
  * @param ioctxt i/o context
  * @return 0 on success, non-zero on error.
  */
-static int write_vmconfig(XcIOContext *ioctxt){
+static int write_vmconfig(XcIOContext *ioctxt)
+{
     int err = -1;
-    if(xcio_write(ioctxt, &ioctxt->vmconfig_n, sizeof(ioctxt->vmconfig_n))) goto exit;
-    if(xcio_write(ioctxt, ioctxt->vmconfig, ioctxt->vmconfig_n)) goto exit;
+    if(xcio_write(ioctxt, &ioctxt->vmconfig_n, sizeof(ioctxt->vmconfig_n))) 
+        goto exit;
+    if(xcio_write(ioctxt, ioctxt->vmconfig, ioctxt->vmconfig_n)) 
+        goto exit;
     err = 0;
   exit:
     return err;
@@ -319,8 +324,8 @@ static int analysis_phase( int xc_handle, u32 domid,
 
 
 int suspend_and_state(int xc_handle, XcIOContext *ioctxt,		      
-                      xc_domaininfo_t *info,
-                      full_execution_context_t *ctxt)
+                      xc_dominfo_t *info,
+                      vcpu_guest_context_t *ctxt)
 {
     int i=0;
     
@@ -328,26 +333,29 @@ int suspend_and_state(int xc_handle, XcIOContext *ioctxt,
 
 retry:
 
-    if ( xc_domain_getfullinfo(xc_handle, ioctxt->domain, info, ctxt) )
+    if ( xc_domain_getinfo(xc_handle, ioctxt->domain, 1, info) != 1)
     {
-	xcio_error(ioctxt, "Could not get full domain info");
+	xcio_error(ioctxt, "Could not get domain info");
 	return -1;
     }
 
-    if ( (info->flags & 
-          (DOMFLAGS_SHUTDOWN | (SHUTDOWN_suspend<<DOMFLAGS_SHUTDOWNSHIFT))) ==
-         (DOMFLAGS_SHUTDOWN | (SHUTDOWN_suspend<<DOMFLAGS_SHUTDOWNSHIFT)) )
+    if ( xc_domain_get_vcpu_context(xc_handle, ioctxt->domain, 0 /* XXX */, 
+				    ctxt) )
+    {
+        xcio_error(ioctxt, "Could not get vcpu context");
+    }
+
+    if ( info->shutdown && info->shutdown_reason == SHUTDOWN_suspend )
     {
 	return 0; // success
     }
 
-    if ( info->flags & DOMFLAGS_PAUSED )
+    if ( info->paused )
     {
 	// try unpausing domain, wait, and retest	
 	xc_domain_unpause( xc_handle, ioctxt->domain );
 
-	xcio_error(ioctxt, "Domain was paused. Wait and re-test. (%lx)",
-		   info->flags);
+	xcio_error(ioctxt, "Domain was paused. Wait and re-test.");
 	usleep(10000);  // 10ms
 
 	goto retry;
@@ -356,21 +364,19 @@ retry:
 
     if( ++i < 100 )
     {
-	xcio_error(ioctxt, "Retry suspend domain (%lx)",
-		   info->flags);
+	xcio_error(ioctxt, "Retry suspend domain.");
 	usleep(10000);  // 10ms	
 	goto retry;
     }
 
-    xcio_error(ioctxt, "Unable to suspend domain. (%lx)",
-	       info->flags);
+    xcio_error(ioctxt, "Unable to suspend domain.");
 
     return -1;
 }
 
 int xc_linux_save(int xc_handle, XcIOContext *ioctxt)
 {
-    xc_domaininfo_t info;
+    xc_dominfo_t info;
 
     int rc = 1, i, j, k, last_iter, iter = 0;
     unsigned long mfn;
@@ -387,7 +393,7 @@ int xc_linux_save(int xc_handle, XcIOContext *ioctxt)
     unsigned long shared_info_frame;
     
     /* A copy of the CPU context of the guest. */
-    full_execution_context_t ctxt;
+    vcpu_guest_context_t ctxt;
 
     /* A table containg the type of each PFN (/not/ MFN!). */
     unsigned long *pfn_type = NULL;
@@ -440,10 +446,16 @@ int xc_linux_save(int xc_handle, XcIOContext *ioctxt)
         xcio_perror(ioctxt, "Unable to mlock ctxt");
         return 1;
     }
-
-    if ( xc_domain_getfullinfo( xc_handle, domid, &info, &ctxt) )
+    
+    if ( xc_domain_getinfo(xc_handle, domid, 1, &info) != 1)
     {
-        xcio_error(ioctxt, "Could not get full domain info");
+        xcio_error(ioctxt, "Could not get domain info");
+        goto out;
+    }
+    if ( xc_domain_get_vcpu_context( xc_handle, domid, /* FIXME */ 0, 
+                                &ctxt) )
+    {
+        xcio_error(ioctxt, "Could not get vcpu context");
         goto out;
     }
     shared_info_frame = info.shared_info_frame;
@@ -454,11 +466,13 @@ int xc_linux_save(int xc_handle, XcIOContext *ioctxt)
         goto out;
     }
     
-    nr_pfns = info.max_pages; 
+    nr_pfns = info.max_memkb >> PAGE_SHIFT; 
 
     /* cheesy sanity check */
     if ( nr_pfns > 1024*1024 ){
-        xcio_error(ioctxt, "Invalid state record -- pfn count out of range: %lu", nr_pfns);
+        xcio_error(ioctxt, 
+                   "Invalid state record -- pfn count out of range: %lu", 
+                   nr_pfns);
         goto out;
     }
 
@@ -512,7 +526,8 @@ int xc_linux_save(int xc_handle, XcIOContext *ioctxt)
 
     for ( i = 0; i < nr_pfns; i += 1024 ){
         if ( !translate_mfn_to_pfn(&pfn_to_mfn_frame_list[i/1024]) ){
-            xcio_error(ioctxt, "Frame # in pfn-to-mfn frame list is not in pseudophys");
+            xcio_error(ioctxt, 
+                       "Frame# in pfn-to-mfn frame list is not in pseudophys");
             goto out;
         }
     }
@@ -538,8 +553,7 @@ int xc_linux_save(int xc_handle, XcIOContext *ioctxt)
 
 	if ( suspend_and_state( xc_handle, ioctxt, &info, &ctxt) )
 	{
-	    xcio_error(ioctxt, "Domain appears not to have suspended: %lx",
-		       info.flags);
+	    xcio_error(ioctxt, "Domain appears not to have suspended");
 	    goto out;
 	}
 
@@ -835,7 +849,8 @@ int xc_linux_save(int xc_handle, XcIOContext *ioctxt)
                     } /* end of page table rewrite for loop */
       
                     if ( xcio_ratewrite(ioctxt, page, PAGE_SIZE) ){
-                        xcio_error(ioctxt, "Error when writing to state file (4)");
+                        xcio_error(ioctxt, 
+                                   "Error when writing to state file (4)");
                         goto out;
                     }
       
@@ -843,7 +858,8 @@ int xc_linux_save(int xc_handle, XcIOContext *ioctxt)
 
                     if ( xcio_ratewrite(ioctxt, region_base + (PAGE_SIZE*j), 
                                      PAGE_SIZE) ){
-                        xcio_error(ioctxt, "Error when writing to state file (5)");
+                        xcio_error(ioctxt, 
+                                   "Error when writing to state file (5)");
                         goto out;
                     }
                 }
@@ -902,16 +918,15 @@ int xc_linux_save(int xc_handle, XcIOContext *ioctxt)
 
 		if ( suspend_and_state( xc_handle, ioctxt, &info, &ctxt) )
 		{
-		    xcio_error(ioctxt, "Domain appears not to have suspended: %lx",
-			       info.flags);
+		    xcio_error(ioctxt, 
+                               "Domain appears not to have suspended");
 		    goto out;
 		}
 
 		xcio_info(ioctxt,
-                          "SUSPEND flags %08lx shinfo %08lx eip %08lx "
-                          "esi %08lx\n",info.flags,
+                          "SUSPEND shinfo %08lx eip %08u esi %08u\n",
                           info.shared_info_frame,
-                          ctxt.cpu_ctxt.eip, ctxt.cpu_ctxt.esi );
+                          ctxt.user_regs.eip, ctxt.user_regs.esi );
             } 
 
             if ( xc_shadow_control( xc_handle, domid, 
@@ -971,7 +986,8 @@ int xc_linux_save(int xc_handle, XcIOContext *ioctxt)
 	    {
 		if ( xcio_write(ioctxt, &pfntab, sizeof(unsigned long)*j) )
 		{
-		    xcio_error(ioctxt, "Error when writing to state file (6b)");
+		    xcio_error(ioctxt, 
+                               "Error when writing to state file (6b)");
 		    goto out;
 		}	
 		j = 0;
@@ -983,7 +999,7 @@ int xc_linux_save(int xc_handle, XcIOContext *ioctxt)
        domid for this to succeed. */
     p_srec = xc_map_foreign_range(xc_handle, domid,
                                    sizeof(*p_srec), PROT_READ, 
-                                   ctxt.cpu_ctxt.esi);
+                                   ctxt.user_regs.esi);
     if (!p_srec){
         xcio_error(ioctxt, "Couldn't map suspend record");
         goto out;
@@ -997,7 +1013,7 @@ int xc_linux_save(int xc_handle, XcIOContext *ioctxt)
     }
 
     /* Canonicalise the suspend-record frame number. */
-    if ( !translate_mfn_to_pfn(&ctxt.cpu_ctxt.esi) ){
+    if ( !translate_mfn_to_pfn(&ctxt.user_regs.esi) ){
         xcio_error(ioctxt, "Suspend record is not in range of pseudophys map");
         goto out;
     }
@@ -1026,14 +1042,24 @@ int xc_linux_save(int xc_handle, XcIOContext *ioctxt)
 
  out:
 
-    if ( live_shinfo )          munmap(live_shinfo, PAGE_SIZE);
-    if ( p_srec )               munmap(p_srec, sizeof(*p_srec));
-    if ( live_pfn_to_mfn_frame_list ) munmap(live_pfn_to_mfn_frame_list, PAGE_SIZE);
-    if ( live_pfn_to_mfn_table ) munmap(live_pfn_to_mfn_table, nr_pfns*4 );
-    if ( live_mfn_to_pfn_table ) munmap(live_mfn_to_pfn_table, PAGE_SIZE*1024 );
+    if(live_shinfo)
+        munmap(live_shinfo, PAGE_SIZE);
 
-    if ( pfn_type != NULL ) free(pfn_type);
+    if(p_srec) 
+        munmap(p_srec, sizeof(*p_srec));
+
+    if(live_pfn_to_mfn_frame_list) 
+        munmap(live_pfn_to_mfn_frame_list, PAGE_SIZE);
+
+    if(live_pfn_to_mfn_table) 
+        munmap(live_pfn_to_mfn_table, nr_pfns*4);
+
+    if(live_mfn_to_pfn_table) 
+        munmap(live_mfn_to_pfn_table, PAGE_SIZE*1024);
+
+    if (pfn_type != NULL) 
+        free(pfn_type);
+
     DPRINTF("Save exit rc=%d\n",rc);
     return !!rc;
-
 }

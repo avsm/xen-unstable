@@ -185,6 +185,8 @@ typedef struct {
     u32         __pad;
 } PACKED gnttab_unmap_grant_ref_t; /* 24 bytes */
 
+#define GNTUNMAP_DEV_FROM_VIRT (~0U)
+
 /*
  * GNTTABOP_setup_table: Set up a grant table for <dom> comprising at least
  * <nr_frames> pages. The frame addresses are written to the <frame_list>.
@@ -205,6 +207,19 @@ typedef struct {
     unsigned long *frame_list;        /*  8 */
     MEMORY_PADDING;
 } PACKED gnttab_setup_table_t; /* 16 bytes */
+
+/*
+ * GNTTABOP_dump_table: Dump the contents of the grant table to the
+ * xen console. Debugging use only.
+ */
+#define GNTTABOP_dump_table           3
+typedef struct {
+    /* IN parameters. */
+    domid_t     dom;                  /*  0 */
+    /* OUT parameters. */
+    s16         status;               /* 2: GNTST_* */
+} PACKED gnttab_dump_table_t; /* 4 bytes */
+
 
 /*
  * Bitfield values for update_pin_status.flags.
@@ -233,9 +248,11 @@ typedef struct {
 #define GNTST_general_error    (-1) /* General undefined error.              */
 #define GNTST_bad_domain       (-2) /* Unrecognsed domain id.                */
 #define GNTST_bad_gntref       (-3) /* Unrecognised or inappropriate gntref. */
-#define GNTST_bad_handle       (-3) /* Unrecognised or inappropriate handle. */
-#define GNTST_no_device_space  (-4) /* Out of space in I/O MMU.              */
-#define GNTST_permission_denied (-5) /* Not enough privilege for operation.  */
+#define GNTST_bad_handle       (-4) /* Unrecognised or inappropriate handle. */
+#define GNTST_bad_virt_addr    (-5) /* Inappropriate virtual address to map. */
+#define GNTST_bad_dev_addr     (-6) /* Inappropriate device address to unmap.*/
+#define GNTST_no_device_space  (-7) /* Out of space in I/O MMU.              */
+#define GNTST_permission_denied (-8) /* Not enough privilege for operation.  */
 
 #define GNTTABOP_error_msgs {                   \
     "okay",                                     \
@@ -243,9 +260,21 @@ typedef struct {
     "unrecognised domain id",                   \
     "invalid grant reference",                  \
     "invalid mapping handle",                   \
+    "invalid virtual address",                  \
+    "invalid device address",                   \
     "no spare translation slot in the I/O MMU", \
     "permission denied"                         \
 }
         
+                                                                                       
+typedef struct {
+    union {                           /*  0 */
+        gnttab_map_grant_ref_t    map_grant_ref;
+        gnttab_unmap_grant_ref_t  unmap_grant_ref;
+        gnttab_setup_table_t      setup_table;
+        gnttab_dump_table_t       dump_table;
+        u8                        __dummy[24];
+    } PACKED u;
+} PACKED gnttab_op_t; /* 32 bytes */
 
 #endif /* __XEN_PUBLIC_GRANT_TABLE_H__ */

@@ -153,7 +153,6 @@ void clear_page_tables(struct mm_struct *mm, unsigned long first, int nr)
 		free_one_pgd(page_dir);
 		page_dir++;
 	} while (--nr);
-	XEN_flush_page_update_queue();
 	spin_unlock(&mm->page_table_lock);
 
 	/* keep the page table cache within bounds */
@@ -249,10 +248,8 @@ skip_copy_pte_range:		address = (address + PMD_SIZE) & PMD_MASK;
 
 				/* If it's a COW mapping, write protect it both in the parent and the child */
 				if (cow && pte_write(pte)) {
-					/* XEN modification: modified ordering here to avoid RaW hazard. */
-					pte = *src_pte;
-					pte = pte_wrprotect(pte);
 					ptep_set_wrprotect(src_pte);
+					pte = *src_pte;
 				}
 
 				/* If it's a shared mapping, mark it clean in the child */
@@ -916,8 +913,7 @@ static inline void establish_pte(struct vm_area_struct * vma, unsigned long addr
 {
 #ifdef CONFIG_XEN
 	if ( likely(vma->vm_mm == current->mm) ) {
-		XEN_flush_page_update_queue();
-		HYPERVISOR_update_va_mapping(address>>PAGE_SHIFT, entry, UVMF_INVLPG);
+		HYPERVISOR_update_va_mapping(address, entry, UVMF_INVLPG|UVMF_LOCAL);
 	} else {
 		set_pte(page_table, entry);
 		flush_tlb_page(vma, address);
@@ -1191,13 +1187,10 @@ static int do_swap_page(struct mm_struct * mm,
 	flush_page_to_ram(page);
 	flush_icache_page(vma, page);
 #ifdef CONFIG_XEN
-	if ( likely(vma->vm_mm == current->mm) ) {
-		XEN_flush_page_update_queue();
-		HYPERVISOR_update_va_mapping(address>>PAGE_SHIFT, pte, 0);
-	} else {
+	if ( likely(vma->vm_mm == current->mm) )
+		HYPERVISOR_update_va_mapping(address, pte, 0);
+	else
 		set_pte(page_table, pte);
-		XEN_flush_page_update_queue();
-	}
 #else
 	set_pte(page_table, pte);
 #endif
@@ -1247,13 +1240,10 @@ static int do_anonymous_page(struct mm_struct * mm, struct vm_area_struct * vma,
 	}
 
 #ifdef CONFIG_XEN
-	if ( likely(vma->vm_mm == current->mm) ) {
-		XEN_flush_page_update_queue();
-		HYPERVISOR_update_va_mapping(addr>>PAGE_SHIFT, entry, 0);
-	} else {
+	if ( likely(vma->vm_mm == current->mm) )
+		HYPERVISOR_update_va_mapping(addr, entry, 0);
+	else
 		set_pte(page_table, entry);
-		XEN_flush_page_update_queue();
-	}
 #else
 	set_pte(page_table, entry);
 #endif
@@ -1333,13 +1323,10 @@ static int do_no_page(struct mm_struct * mm, struct vm_area_struct * vma,
 		if (write_access)
 			entry = pte_mkwrite(pte_mkdirty(entry));
 #ifdef CONFIG_XEN
-		if ( likely(vma->vm_mm == current->mm) ) {
-			XEN_flush_page_update_queue();
-			HYPERVISOR_update_va_mapping(address>>PAGE_SHIFT, entry, 0);
-		} else {
+		if ( likely(vma->vm_mm == current->mm) )
+			HYPERVISOR_update_va_mapping(address, entry, 0);
+		else
 			set_pte(page_table, entry);
-			XEN_flush_page_update_queue();
-		}
 #else
 		set_pte(page_table, entry);
 #endif
@@ -1486,7 +1473,6 @@ pte_t fastcall *pte_alloc(struct mm_struct *mm, pmd_t *pmd, unsigned long addres
 		/* "fast" allocation can happen without dropping the lock.. */
 		new = pte_alloc_one_fast(mm, address);
 		if (!new) {
-			XEN_flush_page_update_queue();
 			spin_unlock(&mm->page_table_lock);
 			new = pte_alloc_one(mm, address);
 			spin_lock(&mm->page_table_lock);
