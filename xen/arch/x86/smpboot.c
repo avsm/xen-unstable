@@ -51,8 +51,11 @@
 #include <mach_apic.h>
 #include <mach_wakecpu.h>
 
-/* Cconfigured maximum number of CPUs to activate. We name the parameter 
-"maxcpus" rather than max_cpus to be compatible with Linux */
+/* opt_nosmp: If true, secondary processors are ignored. */
+static int opt_nosmp = 0;
+boolean_param("nosmp", opt_nosmp);
+
+/* maxcpus: maximum number of CPUs to activate. */
 static int max_cpus = -1;
 integer_param("maxcpus", max_cpus); 
 
@@ -399,6 +402,7 @@ void __init start_secondary(void)
     extern void cpu_init(void);
 
     set_current(idle_task[cpu]);
+    set_processor_id(cpu);
 
     percpu_traps_init();
 
@@ -658,7 +662,7 @@ static void __init do_boot_cpu (int apicid)
 
     ed = idle->exec_domain[0];
 
-    set_bit(DF_IDLETASK, &idle->flags);
+    set_bit(_DOMF_idle_domain, &idle->domain_flags);
 
     ed->arch.monitor_table = mk_pagetable(__pa(idle_pg_table));
 
@@ -674,10 +678,11 @@ static void __init do_boot_cpu (int apicid)
 
     stack = (void *)alloc_xenheap_pages(STACK_ORDER);
 #if defined(__i386__)
-    stack_start.esp = __pa(stack) + STACK_SIZE - STACK_RESERVED;
+    stack_start.esp = __pa(stack);
 #elif defined(__x86_64__)
-    stack_start.esp = (unsigned long)stack + STACK_SIZE - STACK_RESERVED;
+    stack_start.esp = (unsigned long)stack;
 #endif
+    stack_start.esp += STACK_SIZE - sizeof(struct cpu_info);
 
     /* Debug build: detect stack overflow by setting up a guard page. */
     memguard_guard_stack(stack);
@@ -797,8 +802,7 @@ void __init smp_boot_cpus(void)
      * If we couldnt find an SMP configuration at boot time,
      * get out of here now!
      */
-    if (!smp_found_config) {
-        printk("SMP motherboard not detected.\n");
+    if (!smp_found_config || opt_nosmp) {
         io_apic_irqs = 0;
         phys_cpu_present_map = physid_mask_of_physid(0);
         cpu_online_map = 1;

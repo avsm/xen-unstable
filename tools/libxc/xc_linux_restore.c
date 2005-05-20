@@ -99,7 +99,7 @@ int xc_linux_restore(int xc_handle, XcIOContext *ioctxt)
     /* A temporary mapping of the guest's suspend record. */
     suspend_record_t *p_srec;
 
-    char *region_base, *p_gdt;
+    char *region_base;
 
     mmu_t *mmu = NULL;
 
@@ -181,8 +181,6 @@ int xc_linux_restore(int xc_handle, XcIOContext *ioctxt)
     /* Get the domain's shared-info frame. */
     op.cmd = DOM0_GETDOMAININFO;
     op.u.getdomaininfo.domain = (domid_t)dom;
-    op.u.getdomaininfo.exec_domain = 0;
-    op.u.getdomaininfo.ctxt = NULL;
     if ( do_dom0_op(xc_handle, &op) < 0 )
     {
         xcio_error(ioctxt, "Could not get information on new domain");
@@ -537,13 +535,6 @@ int xc_linux_restore(int xc_handle, XcIOContext *ioctxt)
         ctxt.gdt_frames[i] = pfn_to_mfn_table[pfn];
     }
 
-    /* Zero hypervisor GDT entries (supresses ugly warning) */
-    p_gdt = xc_map_foreign_range(
-        xc_handle, dom, PAGE_SIZE, PROT_WRITE, ctxt.gdt_frames[0]);
-    memset( p_gdt + FIRST_RESERVED_GDT_ENTRY*8, 0,
-               NR_RESERVED_GDT_ENTRIES*8 );
-    munmap( p_gdt, PAGE_SIZE );
-
     /* Uncanonicalise the page table base pointer. */
     pfn = ctxt.pt_base >> PAGE_SHIFT;
     if ( (pfn >= nr_pfns) || ((pfn_type[pfn]&LTABTYPE_MASK) != L2TAB) )
@@ -602,13 +593,12 @@ int xc_linux_restore(int xc_handle, XcIOContext *ioctxt)
      *  1. user_regs is fine, as Xen checks that on context switch.
      *  2. fpu_ctxt is fine, as it can't hurt Xen.
      *  3. trap_ctxt needs the code selectors checked.
-     *  4. fast_trap_idx is checked by Xen.
-     *  5. ldt base must be page-aligned, no more than 8192 ents, ...
-     *  6. gdt already done, and further checking is done by Xen.
-     *  7. check that kernel_ss is safe.
-     *  8. pt_base is already done.
-     *  9. debugregs are checked by Xen.
-     *  10. callback code selectors need checking.
+     *  4. ldt base must be page-aligned, no more than 8192 ents, ...
+     *  5. gdt already done, and further checking is done by Xen.
+     *  6. check that kernel_ss is safe.
+     *  7. pt_base is already done.
+     *  8. debugregs are checked by Xen.
+     *  9. callback code selectors need checking.
      */
     for ( i = 0; i < 256; i++ )
     {
@@ -636,9 +626,9 @@ int xc_linux_restore(int xc_handle, XcIOContext *ioctxt)
     xcio_info(ioctxt, "Domain ready to be built.\n");
 
     op.cmd = DOM0_SETDOMAININFO;
-    op.u.setdomaininfo.domain   = (domid_t)dom;
-    op.u.setdomaininfo.exec_domain   = 0;
-    op.u.setdomaininfo.ctxt = &ctxt;
+    op.u.setdomaininfo.domain = (domid_t)dom;
+    op.u.setdomaininfo.vcpu   = 0;
+    op.u.setdomaininfo.ctxt   = &ctxt;
     rc = do_dom0_op(xc_handle, &op);
 
     if ( rc != 0 )

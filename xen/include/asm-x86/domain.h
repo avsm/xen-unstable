@@ -17,7 +17,7 @@ struct trap_bounce {
 struct arch_domain
 {
     l1_pgentry_t *mm_perdomain_pt;
-#ifdef __x86_64__
+#ifdef CONFIG_X86_64
     l2_pgentry_t *mm_perdomain_l2;
     l3_pgentry_t *mm_perdomain_l3;
 #endif
@@ -30,7 +30,7 @@ struct arch_domain
 
     /* Shadow mode status and controls. */
     unsigned int shadow_mode;  /* flags to control shadow table operation */
-    spinlock_t   shadow_lock;
+    unsigned int shadow_nest;  /* Recursive depth of shadow_lock() nesting */
     /* Shadow mode has tainted page reference counts? */
     unsigned int shadow_tainted_refcnts;
 
@@ -82,9 +82,8 @@ struct arch_exec_domain
     int iobmp_limit;  /* Number of ports represented in the bitmap.  */
     int iopl;         /* Current IOPL for this VCPU. */
 
-    /* Trap info. */
-#ifdef ARCH_HAS_FAST_TRAP
-    struct desc_struct fast_trap_desc;
+#ifdef CONFIG_X86_32
+    struct desc_struct int80_desc;
 #endif
 
     /* Virtual Machine Extensions */
@@ -106,7 +105,7 @@ struct arch_exec_domain
     l2_pgentry_t *monitor_vtable;		/* virtual address of monitor_table */
     l1_pgentry_t *hl2_vtable;			/* virtual address of hl2_table */
 
-#ifdef __x86_64__
+#ifdef CONFIG_X86_64
     l3_pgentry_t *guest_vl3table;
     l4_pgentry_t *guest_vl4table;
 #endif
@@ -118,8 +117,6 @@ struct arch_exec_domain
 
     /* Current LDT details. */
     unsigned long shadow_ldt_mapcnt;
-    /* Next entry is passed to LGDT on domain switch. */
-    char gdt[10]; /* NB. 10 bytes needed for x86_64. Use 6 bytes for x86_32. */
 } __cacheline_aligned;
 
 #define IDLE0_ARCH_EXEC_DOMAIN                                      \

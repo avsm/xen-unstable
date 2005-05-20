@@ -1,5 +1,6 @@
 #include <xen/config.h>
 #include <public/xen.h>
+#include <asm/desc.h>
 #include <asm/page.h>
 #include <asm/msr.h>
 
@@ -45,13 +46,13 @@ print_err:
         mov     $7,%al
         stosb                  # Write an attribute to the VGA framebuffer
         jmp     1b
-        
+
 __start:
         cld
         cli
 
         /* Set up a few descriptors: on entry only CS is guaranteed good. */
-        lgdt    %cs:0x1001f0
+        lgdt    %cs:0x100306        # nopaging_gdt_descr
         mov     $(__HYPERVISOR_DS32),%ecx
         mov     %ecx,%ds
         mov     %ecx,%es
@@ -64,7 +65,7 @@ __start:
         jne     not_multiboot
         
         /* Save the Multiboot info structure for later use. */
-        mov     %ebx,0x1001e0
+        mov     %ebx,0x100300       # multiboot_ptr
 
         /* We begin by interrogating the CPU for the presence of long mode. */
         mov     $0x80000000,%eax
@@ -86,7 +87,7 @@ skip_boot_checks:
         mov     %ecx,%cr4
 
         /* Load pagetable base register. */
-        mov     $0x101000,%eax   /* idle_pg_table */
+        mov     $0x102000,%eax   /* idle_pg_table */
         mov     %eax,%cr3
 
         /* Set up EFER (Extended Feature Enable Register). */
@@ -167,90 +168,11 @@ __high_start:
         loop    1b
 
         /* Pass off the Multiboot info structure to C land. */
-        mov     0x1001e0,%edi
-        lea     start(%rip),%rax
-        sub     $0x100000,%rax
+        mov     multiboot_ptr(%rip),%edi
+        lea     start-0x100000(%rip),%rax
         add     %rax,%rdi
         call    __start_xen
         ud2     /* Force a panic (invalid opcode). */
-
-        .code32
-
-        .org    0x1e0
-                        
-/*** DESCRIPTOR TABLES ***/
-
-.globl idt
-.globl gdt        
-
-        .org    0x1f0
-        .word   (LAST_RESERVED_GDT_ENTRY*8)+7
-        .long   0x100200 # gdt_table
-        
-        .org    0x200
-ENTRY(gdt_table)
-        .fill FIRST_RESERVED_GDT_ENTRY,8,0
-        .quad 0x0000000000000000     /* unused */
-        .quad 0x00cf9a000000ffff     /* 0x0808 ring 0 code, compatibility */
-        .quad 0x00af9a000000ffff     /* 0x0810 ring 0 code, 64-bit mode   */
-        .quad 0x00cf92000000ffff     /* 0x0818 ring 0 data                */
-        .quad 0x00cffa000000ffff     /* 0x0823 ring 3 code, compatibility */
-        .quad 0x00cff2000000ffff     /* 0x082b ring 3 data                */
-        .quad 0x00affa000000ffff     /* 0x0833 ring 3 code, 64-bit mode   */
-        .quad 0x0000000000000000     /* unused                            */
-        .fill 4*NR_CPUS,8,0          /* space for TSS and LDT per CPU     */
-
-        .word   0
-gdt_descr:
-        .word   (LAST_RESERVED_GDT_ENTRY*8)+7
-gdt:       
-        .quad   gdt_table
-
-        .word   0    
-idt_descr:
-        .word   256*16-1
-idt:
-        .quad   idt_table
-
-ENTRY(stack_start)
-        .quad   cpu0_stack + STACK_SIZE - 200
-
-high_start:
-        .quad   __high_start
-                
-/* Initial PML4 -- level-4 page table */
-        .org 0x1000
-ENTRY(idle_pg_table)
-ENTRY(idle_pg_table_4)
-        .quad 0x0000000000102007 # PML4[0]
-        .fill 261,8,0
-        .quad 0x0000000000102007 # PML4[262]
-
-/* Initial PDP -- level-3 page table */
-        .org 0x2000
-ENTRY(idle_pg_table_l3)
-        .quad 0x0000000000103007
-
-/* Initial PDE -- level-2 page table. */
-        .org 0x3000
-ENTRY(idle_pg_table_l2)
-        .macro identmap from=0, count=512
-        .if \count-1
-        identmap "(\from+0)","(\count/2)"
-        identmap "(\from+(0x200000*(\count/2)))","(\count/2)"
-        .else
-        .quad 0x00000000000001e3 + \from
-        .endif
-        .endm
-        identmap /* Too orangey for crows :-) */
-
-        .org 0x4000
-ENTRY(cpu0_stack)
-
-        .org 0x4000 + STACK_SIZE
-        .code64
-ENTRY(stext)
-ENTRY(_stext)
 
 /* This is the default interrupt handler. */
 int_msg:
@@ -261,3 +183,85 @@ ignore_int:
         call    printf
 1:      jmp     1b
 
+
+/*** DESCRIPTOR TABLES ***/
+
+.globl idt
+.globl gdt        
+
+        .org    0x300
+        .code32
+
+multiboot_ptr:        /* 0x300 */
+        .long   0
+
+        .word   0
+nopaging_gdt_descr:   /* 0x306 */
+        .word   LAST_RESERVED_GDT_BYTE
+        .quad   gdt_table - FIRST_RESERVED_GDT_BYTE - __PAGE_OFFSET
+
+        .word   0,0,0
+gdt_descr:
+        .word   LAST_RESERVED_GDT_BYTE
+gdt:
+        .quad   gdt_table - FIRST_RESERVED_GDT_BYTE
+
+        .word   0,0,0
+idt_descr:
+        .word   256*16-1
+idt:
+        .quad   idt_table
+
+ENTRY(stack_start)
+        .quad   cpu0_stack + STACK_SIZE - 200
+
+high_start:
+        .quad   __high_start
+
+        .org    0x1000
+ENTRY(gdt_table)
+        .quad 0x0000000000000000     /* unused */
+        .quad 0x00cf9a000000ffff     /* 0xe008 ring 0 code, compatibility */
+        .quad 0x00af9a000000ffff     /* 0xe010 ring 0 code, 64-bit mode   */
+        .quad 0x00cf92000000ffff     /* 0xe018 ring 0 data                */
+        .quad 0x00cffa000000ffff     /* 0xe023 ring 3 code, compatibility */
+        .quad 0x00cff2000000ffff     /* 0xe02b ring 3 data                */
+        .quad 0x00affa000000ffff     /* 0xe033 ring 3 code, 64-bit mode   */
+        .quad 0x0000000000000000     /* unused                            */
+        .fill 4*NR_CPUS,8,0          /* space for TSS and LDT per CPU     */
+
+/* Initial PML4 -- level-4 page table. */
+        .org 0x2000
+ENTRY(idle_pg_table)
+ENTRY(idle_pg_table_4)
+        .quad idle_pg_table_l3 - __PAGE_OFFSET + 7 # PML4[0]
+        .fill 261,8,0
+        .quad idle_pg_table_l3 - __PAGE_OFFSET + 7 # PML4[262]
+
+/* Initial PDP -- level-3 page table. */
+        .org 0x3000
+ENTRY(idle_pg_table_l3)
+        .quad idle_pg_table_l2 - __PAGE_OFFSET + 7
+
+        .org 0x4000
+/* Maximum STACK_ORDER for x86/64 is 2. We must therefore ensure that the */
+/* CPU0 stack is aligned on a 4-page boundary.                            */
+ENTRY(cpu0_stack)
+
+/* Initial PDE -- level-2 page table. Maps first 64MB physical memory. */
+        .org 0x4000 + STACK_SIZE
+ENTRY(idle_pg_table_l2)
+        .macro identmap from=0, count=32
+        .if \count-1
+        identmap "(\from+0)","(\count/2)"
+        identmap "(\from+(0x200000*(\count/2)))","(\count/2)"
+        .else
+        .quad 0x00000000000001e3 + \from
+        .endif
+        .endm
+        identmap /* Too orangey for crows :-) */
+
+        .org 0x4000 + STACK_SIZE + PAGE_SIZE
+        .code64
+ENTRY(stext)
+ENTRY(_stext)

@@ -24,6 +24,7 @@
 #include <asm/regs.h>
 #include <asm/processor.h>
 #include <asm/vmx_vmcs.h>
+#include <asm/i387.h>
 
 extern void vmx_asm_vmexit_handler(struct cpu_user_regs);
 extern void vmx_asm_do_resume(void);
@@ -130,6 +131,11 @@ extern unsigned int cpu_rev;
 #define EXCEPTION_BITMAP_MC     (1 << 18)       /* Machine Check */
 #define EXCEPTION_BITMAP_XF     (1 << 19)       /* SIMD Floating-Point Exception */
 
+/* Pending Debug exceptions */
+
+#define PENDING_DEBUG_EXC_BP    (1 << 12)       /* break point */
+#define PENDING_DEBUG_EXC_BS    (1 << 14)       /* Single step */
+
 #ifdef XEN_DEBUGGER
 #define MONITOR_DEFAULT_EXCEPTION_BITMAP        \
     ( EXCEPTION_BITMAP_PG |                     \
@@ -230,6 +236,30 @@ static inline int __vmwrite (unsigned long field, unsigned long value)
     return 0;
 }
 
+static inline int __vm_set_bit(unsigned long field, unsigned long mask)
+{
+        unsigned long tmp;
+        int err = 0;
+
+        err |= __vmread(field, &tmp);
+        tmp |= mask;
+        err |= __vmwrite(field, tmp);
+
+        return err;
+}
+
+static inline int __vm_clear_bit(unsigned long field, unsigned long mask)
+{
+        unsigned long tmp;
+        int err = 0;
+
+        err |= __vmread(field, &tmp);
+        tmp &= ~mask;
+        err |= __vmwrite(field, tmp);
+
+        return err;
+}
+
 static inline void __vmxoff (void)
 {
     __asm__ __volatile__ ( VMXOFF_OPCODE 
@@ -251,4 +281,18 @@ static inline int __vmxon (u64 addr)
     return 0;
 }
 
+/* Make sure that xen intercepts any FP accesses from current */
+static inline void vmx_stts()
+{
+    unsigned long cr0;
+
+    __vmread(GUEST_CR0, &cr0);
+    if (!(cr0 & X86_CR0_TS))
+        __vmwrite(GUEST_CR0, cr0 | X86_CR0_TS);
+
+    __vmread(CR0_READ_SHADOW, &cr0);
+    if (!(cr0 & X86_CR0_TS))
+       __vm_set_bit(EXCEPTION_BITMAP, EXCEPTION_BITMAP_NM);
+}
+ 
 #endif /* __ASM_X86_VMX_H__ */

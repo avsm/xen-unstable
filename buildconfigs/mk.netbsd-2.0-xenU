@@ -1,4 +1,6 @@
 
+OS                = netbsd
+
 NETBSD_RELEASE   ?= 2.0
 NETBSD_CVSSNAP   ?= 20050309
 
@@ -6,13 +8,13 @@ EXTRAVERSION = xenU
 
 FULLVERSION  = $(NETBSD_VER)-$(EXTRAVERSION)
 
-NETBSD_DIR   = netbsd-$(FULLVERSION)
+NETBSD_DIR   = $(OS)-$(FULLVERSION)
 
 .PHONY: build clean mrproper mkpatch
 
 include buildconfigs/Rules.mk
 
-build: netbsd-$(EXTRAVERSION)
+build: $(OS)-$(EXTRAVERSION)
 
 netbsd-%-tools.tar.bz2:
 	@echo "Cannot find netbsd-$(NETBSD_VER)-tools.tar.gz in path $(NETBSD_SRC_PATH)"
@@ -22,9 +24,9 @@ netbsd-%-tools: netbsd-%-tools.tar.bz2
 	tar -jxf $<
 	touch $@ # update timestamp to avoid rebuild
 
-$(NETBSD_DIR)/.valid: pristine-netbsd-$(NETBSD_VER)
+$(NETBSD_DIR)/.valid: ref-$(OS)-$(NETBSD_VER)/.valid-ref
 	$(RM) -rf $(NETBSD_DIR)
-	cp -al $< $(NETBSD_DIR)
+	cp -al $(<D) $(NETBSD_DIR)
 	# Apply arch-xen patches
 	( cd netbsd-$(NETBSD_VER)-xen-sparse ; \
           ./mkbuildtree ../$(NETBSD_DIR) )
@@ -36,8 +38,8 @@ netbsd-xen%: $(NETBSD_DIR)/.valid netbsd-$(NETBSD_RELEASE)-tools
 	$(MAKE) -C netbsd-$(FULLVERSION) netbsd
 	$(MAKE) -C netbsd-$(FULLVERSION) INSTALL_PATH=$(DESTDIR) INSTALL_NAME=boot/netbsd-$(NETBSD_VER)-xen$* install
 
-clean:
+clean::
 	$(MAKE) -C netbsd-$(FULLVERSION) clean
 
 delete:
-	rm -rf tmp-netbsd-$(NETBSD_VER) $(NETBSD_DIR)
+	rm -rf tmp-$(OS)-$(NETBSD_VER) $(NETBSD_DIR)

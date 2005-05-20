@@ -376,7 +376,6 @@ long arch_do_dom0_op(dom0_op_t *op, dom0_op_t *u_dom0_op)
 void arch_getdomaininfo_ctxt(
     struct exec_domain *ed, struct vcpu_guest_context *c)
 { 
-    int i;
 #ifdef __i386__  /* Remove when x86_64 VMX is implemented */
 #ifdef CONFIG_VMX
     extern void save_vmx_cpu_user_regs(struct cpu_user_regs *);
@@ -397,7 +396,7 @@ void arch_getdomaininfo_ctxt(
 #endif
 
     c->flags = 0;
-    if ( test_bit(EDF_DONEFPUINIT, &ed->flags) )
+    if ( test_bit(_VCPUF_fpu_initialised, &ed->vcpu_flags) )
         c->flags |= VGCF_I387_VALID;
     if ( KERNEL_MODE(ed, &ed->arch.guest_context.user_regs) )
         c->flags |= VGCF_IN_KERNEL;
@@ -405,21 +404,6 @@ void arch_getdomaininfo_ctxt(
     if (VMX_DOMAIN(ed))
         c->flags |= VGCF_VMX_GUEST;
 #endif
-
-#ifdef ARCH_HAS_FAST_TRAP
-    if ( (ed->arch.fast_trap_desc.a == 0) &&
-         (ed->arch.fast_trap_desc.b == 0) )
-        c->fast_trap_idx = 0;
-#endif
-
-    c->gdt_ents = 0;
-    if ( GET_GDT_ADDRESS(ed) == GDT_VIRT_START(ed) )
-    {
-        for ( i = 0; i < 16; i++ )
-            c->gdt_frames[i] = 
-                l1e_get_pfn(ed->arch.perdomain_ptes[i]);
-        c->gdt_ents = GET_GDT_ENTRIES(ed);
-    }
 
     c->pt_base = pagetable_val(ed->arch.guest_table);
 

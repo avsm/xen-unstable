@@ -374,46 +374,23 @@ extern idt_entry_t *idt_tables[];
 
 extern struct tss_struct init_tss[NR_CPUS];
 
-#ifdef ARCH_HAS_FAST_TRAP
+#ifdef CONFIG_X86_32
 
-#define SET_DEFAULT_FAST_TRAP(_p) \
-    (_p)->guest_context.fast_trap_idx = 0x20;   \
-    (_p)->fast_trap_desc.a = 0;   \
-    (_p)->fast_trap_desc.b = 0;
-
-#define CLEAR_FAST_TRAP(_p) \
-    (memset(idt_tables[smp_processor_id()] + \
-            (_p)->guest_context.fast_trap_idx, \
-            0, 8))
-
-#define SET_FAST_TRAP(_p)   \
-    (memcpy(idt_tables[smp_processor_id()] + \
-            (_p)->guest_context.fast_trap_idx, \
-            &((_p)->fast_trap_desc), 8))
-
-long set_fast_trap(struct exec_domain *p, int idx);
+extern void init_int80_direct_trap(struct exec_domain *ed);
+#define set_int80_direct_trap(_ed)                  \
+    (memcpy(idt_tables[(_ed)->processor] + 0x80,    \
+            &((_ed)->arch.int80_desc), 8))
 
 #else
 
-#define SET_DEFAULT_FAST_TRAP(_p) ((void)0)
-#define CLEAR_FAST_TRAP(_p)       ((void)0)
-#define SET_FAST_TRAP(_p)         ((void)0)
-#define set_fast_trap(_p, _i)     (0)
+#define init_int80_direct_trap(_ed) ((void)0)
+#define set_int80_direct_trap(_ed)  ((void)0)
 
 #endif
 
 extern int gpf_emulate_4gb(struct cpu_user_regs *regs);
 
 extern void write_ptbase(struct exec_domain *ed);
-
-#define SET_GDT_ENTRIES(_p, _e) \
-    ((*(u16 *)((_p)->arch.gdt + 0)) = (((_e)<<3)-1))
-#define SET_GDT_ADDRESS(_p, _a) \
-    ((*(unsigned long *)((_p)->arch.gdt + 2)) = (_a))
-#define GET_GDT_ENTRIES(_p)     \
-    (((*(u16 *)((_p)->arch.gdt + 0))+1)>>3)
-#define GET_GDT_ADDRESS(_p)     \
-    (*(unsigned long *)((_p)->arch.gdt + 2))
 
 void destroy_gdt(struct exec_domain *d);
 long set_gdt(struct exec_domain *d, 

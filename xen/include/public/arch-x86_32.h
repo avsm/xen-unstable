@@ -31,31 +31,23 @@
  * A number of GDT entries are reserved by Xen. These are not situated at the
  * start of the GDT because some stupid OSes export hard-coded selector values
  * in their ABI. These hard-coded values are always near the start of the GDT,
- * so Xen places itself out of the way.
- * 
- * NR_RESERVED_GDT_ENTRIES is (8 + 2 * NR_CPUS) Please update this value if 
- * you increase NR_CPUS or add another GDT entry to gdt_table in x86_32.S
- *
- * NB. The reserved range is inclusive (that is, both FIRST_RESERVED_GDT_ENTRY
- * and LAST_RESERVED_GDT_ENTRY are reserved).
+ * so Xen places itself out of the way, at the far end of the GDT.
  */
-#define NR_RESERVED_GDT_ENTRIES    72
-#define FIRST_RESERVED_GDT_ENTRY   256
-#define LAST_RESERVED_GDT_ENTRY    \
-  (FIRST_RESERVED_GDT_ENTRY + NR_RESERVED_GDT_ENTRIES - 1)
-
+#define FIRST_RESERVED_GDT_PAGE  14
+#define FIRST_RESERVED_GDT_BYTE  (FIRST_RESERVED_GDT_PAGE * 4096)
+#define FIRST_RESERVED_GDT_ENTRY (FIRST_RESERVED_GDT_BYTE / 8)
 
 /*
  * These flat segments are in the Xen-private section of every GDT. Since these
  * are also present in the initial GDT, many OSes will be able to avoid
  * installing their own GDT.
  */
-#define FLAT_RING1_CS 0x0819    /* GDT index 259 */
-#define FLAT_RING1_DS 0x0821    /* GDT index 260 */
-#define FLAT_RING1_SS 0x0821    /* GDT index 260 */
-#define FLAT_RING3_CS 0x082b    /* GDT index 261 */
-#define FLAT_RING3_DS 0x0833    /* GDT index 262 */
-#define FLAT_RING3_SS 0x0833    /* GDT index 262 */
+#define FLAT_RING1_CS 0xe019    /* GDT index 259 */
+#define FLAT_RING1_DS 0xe021    /* GDT index 260 */
+#define FLAT_RING1_SS 0xe021    /* GDT index 260 */
+#define FLAT_RING3_CS 0xe02b    /* GDT index 261 */
+#define FLAT_RING3_DS 0xe033    /* GDT index 262 */
+#define FLAT_RING3_SS 0xe033    /* GDT index 262 */
 
 #define FLAT_KERNEL_CS FLAT_RING1_CS
 #define FLAT_KERNEL_DS FLAT_RING1_DS
@@ -108,14 +100,16 @@ typedef struct cpu_user_regs {
     u16 error_code;    /* private */
     u16 entry_vector;  /* private */
     u32 eip;
-    u32 cs;
+    u16 cs;
+    u8  saved_upcall_mask;
+    u8  _pad0;
     u32 eflags;
     u32 esp;
-    u32 ss;
-    u32 es;
-    u32 ds;
-    u32 fs;
-    u32 gs;
+    u16 ss, _pad1;
+    u16 es, _pad2;
+    u16 ds, _pad3;
+    u16 fs, _pad4;
+    u16 gs, _pad5;
 } cpu_user_regs_t;
 
 typedef u64 tsc_timestamp_t; /* RDTSC timestamp */
@@ -133,7 +127,6 @@ typedef struct vcpu_guest_context {
     struct { char x[512]; } fpu_ctxt        /* User-level FPU registers     */
     __attribute__((__aligned__(16)));       /* (needs 16-byte alignment)    */
     trap_info_t   trap_ctxt[256];           /* Virtual IDT                  */
-    unsigned int  fast_trap_idx;            /* "Fast trap" vector offset    */
     unsigned long ldt_base, ldt_ents;       /* LDT (linear address, # ents) */
     unsigned long gdt_frames[16], gdt_ents; /* GDT (machine frames, # ents) */
     unsigned long kernel_ss, kernel_sp;     /* Virtual TSS (only SS1/SP1)   */
@@ -153,8 +146,6 @@ typedef struct {
 
 typedef struct {
 } arch_vcpu_info_t;
-
-#define ARCH_HAS_FAST_TRAP
 
 #endif
 

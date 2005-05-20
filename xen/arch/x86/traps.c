@@ -70,25 +70,120 @@ string_param("nmi", opt_nmi);
 /* Master table, used by all CPUs on x86/64, and by CPU0 on x86/32.*/
 idt_entry_t idt_table[IDT_ENTRIES];
 
-asmlinkage void divide_error(void);
-asmlinkage void debug(void);
+#define DECLARE_TRAP_HANDLER(_name)                     \
+asmlinkage void _name(void);                            \
+asmlinkage int do_ ## _name(struct cpu_user_regs *regs)
+
 asmlinkage void nmi(void);
-asmlinkage void int3(void);
-asmlinkage void overflow(void);
-asmlinkage void bounds(void);
-asmlinkage void invalid_op(void);
-asmlinkage void device_not_available(void);
-asmlinkage void coprocessor_segment_overrun(void);
-asmlinkage void invalid_TSS(void);
-asmlinkage void segment_not_present(void);
-asmlinkage void stack_segment(void);
-asmlinkage void general_protection(void);
-asmlinkage void page_fault(void);
-asmlinkage void coprocessor_error(void);
-asmlinkage void simd_coprocessor_error(void);
-asmlinkage void alignment_check(void);
-asmlinkage void spurious_interrupt_bug(void);
-asmlinkage void machine_check(void);
+DECLARE_TRAP_HANDLER(divide_error);
+DECLARE_TRAP_HANDLER(debug);
+DECLARE_TRAP_HANDLER(int3);
+DECLARE_TRAP_HANDLER(overflow);
+DECLARE_TRAP_HANDLER(bounds);
+DECLARE_TRAP_HANDLER(invalid_op);
+DECLARE_TRAP_HANDLER(device_not_available);
+DECLARE_TRAP_HANDLER(coprocessor_segment_overrun);
+DECLARE_TRAP_HANDLER(invalid_TSS);
+DECLARE_TRAP_HANDLER(segment_not_present);
+DECLARE_TRAP_HANDLER(stack_segment);
+DECLARE_TRAP_HANDLER(general_protection);
+DECLARE_TRAP_HANDLER(page_fault);
+DECLARE_TRAP_HANDLER(coprocessor_error);
+DECLARE_TRAP_HANDLER(simd_coprocessor_error);
+DECLARE_TRAP_HANDLER(alignment_check);
+DECLARE_TRAP_HANDLER(spurious_interrupt_bug);
+DECLARE_TRAP_HANDLER(machine_check);
+
+static int debug_stack_lines = 20;
+integer_param("debug_stack_lines", debug_stack_lines);
+
+static inline int kernel_text_address(unsigned long addr)
+{
+    if (addr >= (unsigned long) &_stext &&
+        addr <= (unsigned long) &_etext)
+        return 1;
+    return 0;
+
+}
+
+void show_guest_stack(void)
+{
+    int i;
+    struct cpu_user_regs *regs = guest_cpu_user_regs();
+    unsigned long *stack = (unsigned long *)regs->esp, addr;
+
+    printk("Guest stack trace from "__OP"sp=%p:\n   ", stack);
+
+    for ( i = 0; i < (debug_stack_lines*8); i++ )
+    {
+        if ( ((long)stack & (STACK_SIZE-1)) == 0 )
+            break;
+        if ( get_user(addr, stack) )
+        {
+            if ( i != 0 )
+                printk("\n    ");
+            printk("Fault while accessing guest memory.");
+            i = 1;
+            break;
+        }
+        if ( (i != 0) && ((i % 8) == 0) )
+            printk("\n   ");
+        printk("%p ", _p(addr));
+        stack++;
+    }
+    if ( i == 0 )
+        printk("Stack empty.");
+    printk("\n");
+}
+
+void show_trace(unsigned long *esp)
+{
+    unsigned long *stack = esp, addr;
+    int i = 0;
+
+    printk("Xen call trace from "__OP"sp=%p:\n   ", stack);
+
+    while ( ((long) stack & (STACK_SIZE-1)) != 0 )
+    {
+        addr = *stack++;
+        if ( kernel_text_address(addr) )
+        {
+            if ( (i != 0) && ((i % 6) == 0) )
+                printk("\n   ");
+            printk("[<%p>] ", _p(addr));
+            i++;
+        }
+    }
+    if ( i == 0 )
+        printk("Trace empty.");
+    printk("\n");
+}
+
+void show_stack(unsigned long *esp)
+{
+    unsigned long *stack = esp, addr;
+    int i;
+
+    printk("Xen stack trace from "__OP"sp=%p:\n   ", stack);
+
+    for ( i = 0; i < (debug_stack_lines*8); i++ )
+    {
+        if ( ((long)stack & (STACK_SIZE-1)) == 0 )
+            break;
+        if ( (i != 0) && ((i % 8) == 0) )
+            printk("\n   ");
+        addr = *stack++;
+        if ( kernel_text_address(addr) )
+            printk("[%p] ", _p(addr));
+        else
+            printk("%p ", _p(addr));
+    }
+    if ( i == 0 )
+        printk("Stack empty.");
+    printk("\n");
+
+    show_trace(esp);
+}
 
 /*
  * This is called for faults at very unexpected times (e.g., when interrupts
@@ -108,7 +203,7 @@ asmlinkage void fatal_trap(int trapnr, struct cpu_user_regs *regs)
         "machine check", "simd error"
     };
 
-    watchdog_on = 0;
+    watchdog_disable();
 
     show_registers(regs);
 
@@ -152,7 +247,7 @@ static inline int do_trap(int trapnr, char *str,
 
 #ifndef NDEBUG
     if ( (ed->arch.guest_context.trap_ctxt[trapnr].address == 0) &&
-         (ed->domain->id == 0) )
+         (ed->domain->domain_id == 0) )
         goto xen_fault;
 #endif
 
@@ -166,7 +261,7 @@ static inline int do_trap(int trapnr, char *str,
         tb->error_code = regs->error_code;
     }
     if ( TI_GET_IF(ti) )
-        ed->vcpu_info->evtchn_upcall_mask = 1;
+        tb->flags |= TBF_INTERRUPT;
     return 0;
 
  xen_fault:
@@ -231,14 +326,15 @@ asmlinkage int do_int3(struct cpu_user_regs *regs)
     tb->cs    = ti->cs;
     tb->eip   = ti->address;
     if ( TI_GET_IF(ti) )
-        ed->vcpu_info->evtchn_upcall_mask = 1;
+        tb->flags |= TBF_INTERRUPT;
 
     return 0;
 }
 
-asmlinkage void do_machine_check(struct cpu_user_regs *regs)
+asmlinkage int do_machine_check(struct cpu_user_regs *regs)
 {
     fatal_trap(TRAP_machine_check, regs);
+    return 0;
 }
 
 void propagate_page_fault(unsigned long addr, u16 error_code)
@@ -254,17 +350,62 @@ void propagate_page_fault(unsigned long addr, u16 error_code)
     tb->cs         = ti->cs;
     tb->eip        = ti->address;
     if ( TI_GET_IF(ti) )
-        ed->vcpu_info->evtchn_upcall_mask = 1;
+        tb->flags |= TBF_INTERRUPT;
 
     ed->arch.guest_cr2 = addr;
 }
 
+static int handle_perdomain_mapping_fault(
+    unsigned long offset, struct cpu_user_regs *regs)
+{
+    extern int map_ldt_shadow_page(unsigned int);
+
+    struct exec_domain *ed = current;
+    struct domain      *d  = ed->domain;
+    int ret;
+
+    /* Which vcpu's area did we fault in, and is it in the ldt sub-area? */
+    unsigned int is_ldt_area = (offset >> (PDPT_VCPU_VA_SHIFT-1)) & 1;
+    unsigned int vcpu_area   = (offset >> PDPT_VCPU_VA_SHIFT);
+
+    /* Should never fault in another vcpu's area. */
+    BUG_ON(vcpu_area != current->vcpu_id);
+
+    /* Byte offset within the gdt/ldt sub-area. */
+    offset &= (1UL << (PDPT_VCPU_VA_SHIFT-1)) - 1UL;
+
+    if ( likely(is_ldt_area) )
+    {
+        /* LDT fault: Copy a mapping from the guest's LDT, if it is valid. */
+        LOCK_BIGLOCK(d);
+        ret = map_ldt_shadow_page(offset >> PAGE_SHIFT);
+        UNLOCK_BIGLOCK(d);
+
+        if ( unlikely(ret == 0) )
+        {
+            /* In hypervisor mode? Leave it to the #PF handler to fix up. */
+            if ( !GUEST_MODE(regs) )
+                return 0;
+            /* In guest mode? Propagate #PF to guest, with adjusted %cr2. */
+            propagate_page_fault(
+                ed->arch.guest_context.ldt_base + offset, regs->error_code);
+        }
+    }
+    else
+    {
+        /* GDT fault: handle the fault as #GP(selector). */
+        regs->error_code = (u16)offset & ~7;
+        (void)do_general_protection(regs);
+    }
+
+    return EXCRET_fault_fixed;
+}
+
 asmlinkage int do_page_fault(struct cpu_user_regs *regs)
 {
-    unsigned long off, addr, fixup;
+    unsigned long addr, fixup;
     struct exec_domain *ed = current;
     struct domain *d = ed->domain;
-    int ret;
 
     __asm__ __volatile__ ("mov %%cr2,%0" : "=r" (addr) : );
 
@@ -299,34 +440,19 @@ asmlinkage int do_page_fault(struct cpu_user_regs *regs)
          ((addr < HYPERVISOR_VIRT_START) ||
           (shadow_mode_external(d) && GUEST_CONTEXT(ed, regs))) &&
          shadow_fault(addr, regs) )
-    {
         return EXCRET_fault_fixed;
-    }
 
-    if ( unlikely(addr >= LDT_VIRT_START(ed)) && 
-         (addr < (LDT_VIRT_START(ed) + 
-                  (ed->arch.guest_context.ldt_ents*LDT_ENTRY_SIZE))) )
-    {
-        /*
-         * Copy a mapping from the guest's LDT, if it is valid. Otherwise we
-         * send the fault up to the guest OS to be handled.
-         */
-        extern int map_ldt_shadow_page(unsigned int);
-        LOCK_BIGLOCK(d);
-        off  = addr - LDT_VIRT_START(ed);
-        addr = ed->arch.guest_context.ldt_base + off;
-        ret = map_ldt_shadow_page(off >> PAGE_SHIFT);
-        UNLOCK_BIGLOCK(d);
-        if ( likely(ret) )
-            return EXCRET_fault_fixed; /* successfully copied the mapping */
-    }
+    if ( unlikely(addr >= PERDOMAIN_VIRT_START) &&
+         unlikely(addr < PERDOMAIN_VIRT_END) &&
+         handle_perdomain_mapping_fault(addr - PERDOMAIN_VIRT_START, regs) )
+        return EXCRET_fault_fixed;
 
     if ( !GUEST_MODE(regs) )
         goto xen_fault;
 
 #ifndef NDEBUG
     if ( (ed->arch.guest_context.trap_ctxt[TRAP_page_fault].address == 0) &&
-         (d->id == 0) )
+         (d->domain_id == 0) )
         goto xen_fault;
 #endif
 
@@ -361,13 +487,13 @@ long do_fpu_taskswitch(int set)
 
     if ( set )
     {
-        set_bit(EDF_GUEST_STTS, &ed->flags);
+        set_bit(_VCPUF_guest_stts, &ed->vcpu_flags);
         stts();
     }
     else
     {
-        clear_bit(EDF_GUEST_STTS, &ed->flags);
-        if ( test_bit(EDF_USEDFPU, &ed->flags) )
+        clear_bit(_VCPUF_guest_stts, &ed->vcpu_flags);
+        if ( test_bit(_VCPUF_fpu_dirtied, &ed->vcpu_flags) )
             clts();
     }
 
@@ -433,10 +559,19 @@ static inline int admin_io_okay(
 #define outl_user(_v, _p, _d, _r) \
     (admin_io_okay(_p, 4, _d, _r) ? outl(_v, _p) : ((void)0))
 
+/* Propagate a fault back to the guest kernel. */
+#define USER_READ_FAULT  4 /* user mode, read fault */
+#define USER_WRITE_FAULT 6 /* user mode, write fault */
+#define PAGE_FAULT(_faultaddr, _errcode)        \
+({  propagate_page_fault(_faultaddr, _errcode); \
+    return EXCRET_fault_fixed;                  \
+})
+
+/* Isntruction fetch with error handling. */
 #define insn_fetch(_type, _size, _ptr)          \
 ({  unsigned long _x;                           \
     if ( get_user(_x, (_type *)eip) )           \
-        goto read_fault;                        \
+        PAGE_FAULT(eip, USER_READ_FAULT);       \
     eip += _size; (_type)_x; })
 
 static int emulate_privileged_op(struct cpu_user_regs *regs)
@@ -502,17 +637,17 @@ static int emulate_privileged_op(struct cpu_user_regs *regs)
             case 1:
                 data = (u8)inb_user((u16)regs->edx, ed, regs);
                 if ( put_user((u8)data, (u8 *)regs->edi) )
-                    goto write_fault;
+                    PAGE_FAULT(regs->edi, USER_WRITE_FAULT);
                 break;
             case 2:
                 data = (u16)inw_user((u16)regs->edx, ed, regs);
                 if ( put_user((u16)data, (u16 *)regs->edi) )
-                    goto write_fault;
+                    PAGE_FAULT(regs->edi, USER_WRITE_FAULT);
                 break;
             case 4:
                 data = (u32)inl_user((u16)regs->edx, ed, regs);
                 if ( put_user((u32)data, (u32 *)regs->edi) )
-                    goto write_fault;
+                    PAGE_FAULT(regs->edi, USER_WRITE_FAULT);
                 break;
             }
             regs->edi += (regs->eflags & EF_DF) ? -op_bytes : op_bytes;
@@ -527,17 +662,17 @@ static int emulate_privileged_op(struct cpu_user_regs *regs)
             {
             case 1:
                 if ( get_user(data, (u8 *)regs->esi) )
-                    goto read_fault;
+                    PAGE_FAULT(regs->esi, USER_READ_FAULT);
                 outb_user((u8)data, (u16)regs->edx, ed, regs);
                 break;
             case 2:
                 if ( get_user(data, (u16 *)regs->esi) )
-                    goto read_fault;
+                    PAGE_FAULT(regs->esi, USER_READ_FAULT);
                 outw_user((u16)data, (u16)regs->edx, ed, regs);
                 break;
             case 4:
                 if ( get_user(data, (u32 *)regs->esi) )
-                    goto read_fault;
+                    PAGE_FAULT(regs->esi, USER_READ_FAULT);
                 outl_user((u32)data, (u16)regs->edx, ed, regs);
                 break;
             }
@@ -665,7 +800,7 @@ static int emulate_privileged_op(struct cpu_user_regs *regs)
         case 0: /* Read CR0 */
             *reg = 
                 (read_cr0() & ~X86_CR0_TS) | 
-                (test_bit(EDF_GUEST_STTS, &ed->flags) ? X86_CR0_TS : 0);
+                (test_bit(_VCPUF_guest_stts, &ed->vcpu_flags) ? X86_CR0_TS:0);
             break;
 
         case 2: /* Read CR2 */
@@ -736,14 +871,6 @@ static int emulate_privileged_op(struct cpu_user_regs *regs)
 
  fail:
     return 0;
-
- read_fault:
-    propagate_page_fault(eip, 4); /* user mode, read fault */
-    return EXCRET_fault_fixed;
-
- write_fault:
-    propagate_page_fault(eip, 6); /* user mode, write fault */
-    return EXCRET_fault_fixed;
 }
 
 asmlinkage int do_general_protection(struct cpu_user_regs *regs)
@@ -807,7 +934,7 @@ asmlinkage int do_general_protection(struct cpu_user_regs *regs)
 
 #ifndef NDEBUG
     if ( (ed->arch.guest_context.trap_ctxt[TRAP_gp_fault].address == 0) &&
-         (ed->domain->id == 0) )
+         (ed->domain->domain_id == 0) )
         goto gp_in_kernel;
 #endif
 
@@ -819,7 +946,7 @@ asmlinkage int do_general_protection(struct cpu_user_regs *regs)
     tb->cs         = ti->cs;
     tb->eip        = ti->address;
     if ( TI_GET_IF(ti) )
-        ed->vcpu_info->evtchn_upcall_mask = 1;
+        tb->flags |= TBF_INTERRUPT;
     return 0;
 
  gp_in_kernel:
@@ -919,15 +1046,9 @@ asmlinkage int math_state_restore(struct cpu_user_regs *regs)
     /* Prevent recursion. */
     clts();
 
-    if ( !test_and_set_bit(EDF_USEDFPU, &current->flags) )
-    {
-        if ( test_bit(EDF_DONEFPUINIT, &current->flags) )
-            restore_fpu(current);
-        else
-            init_fpu();
-    }
+    setup_fpu(current);
 
-    if ( test_and_clear_bit(EDF_GUEST_STTS, &current->flags) )
+    if ( test_and_clear_bit(_VCPUF_guest_stts, &current->vcpu_flags) )
     {
         struct trap_bounce *tb = &current->arch.trap_bounce;
         tb->flags = TBF_EXCEPTION;
@@ -1011,7 +1132,7 @@ void set_task_gate(unsigned int n, unsigned int sel)
 void set_tss_desc(unsigned int n, void *addr)
 {
     _set_tssldt_desc(
-        gdt_table + __TSS(n),
+        gdt_table + __TSS(n) - FIRST_RESERVED_GDT_ENTRY,
         (unsigned long)addr,
         offsetof(struct tss_struct, __cacheline_filler) - 1,
         9);
@@ -1090,7 +1211,11 @@ long do_set_trap_table(trap_info_t *traps)
             break;
         }
 
-        memcpy(dst+cur.vector, &cur, sizeof(cur));
+        memcpy(&dst[cur.vector], &cur, sizeof(cur));
+
+        if ( cur.vector == 0x80 )
+            init_int80_direct_trap(current);
+
         traps++;
     }
 

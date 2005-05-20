@@ -263,15 +263,13 @@ static void switch_serial_input(void)
 static void __serial_rx(unsigned char c, struct cpu_user_regs *regs)
 {
     if ( xen_rx )
-    {
-        handle_keypress(c, regs);
-    }
-    else if ( (serial_rx_prod-serial_rx_cons) != SERIAL_RX_SIZE )
-    {
-        serial_rx_ring[SERIAL_RX_MASK(serial_rx_prod)] = c;
-        if ( serial_rx_prod++ == serial_rx_cons )
-            send_guest_virq(dom0->exec_domain[0], VIRQ_CONSOLE);
-    }
+        return handle_keypress(c, regs);
+
+    /* Deliver input to guest buffer, unless it is already full. */
+    if ( (serial_rx_prod-serial_rx_cons) != SERIAL_RX_SIZE )
+        serial_rx_ring[SERIAL_RX_MASK(serial_rx_prod++)] = c;
+    /* Always notify the guest: prevents receive path from getting stuck. */
+    send_guest_virq(dom0->exec_domain[0], VIRQ_CONSOLE);
 }
 
 static void serial_rx(unsigned char c, struct cpu_user_regs *regs)
@@ -303,7 +301,7 @@ long do_console_io(int cmd, int count, char *buffer)
 
 #ifndef VERBOSE
     /* Only domain-0 may access the emergency console. */
-    if ( current->domain->id != 0 )
+    if ( current->domain->domain_id != 0 )
         return -EPERM;
 #endif
 
@@ -496,19 +494,18 @@ int debugtrace_send_to_console;
 static char        *debugtrace_buf; /* Debug-trace buffer */
 static unsigned int debugtrace_prd; /* Producer index     */
 static unsigned int debugtrace_kilobytes = 128, debugtrace_bytes;
+static unsigned int debugtrace_used;
 static spinlock_t   debugtrace_lock = SPIN_LOCK_UNLOCKED;
 integer_param("debugtrace", debugtrace_kilobytes);
 
 void debugtrace_dump(void)
 {
-    int _watchdog_on = watchdog_on;
     unsigned long flags;
 
-    if ( debugtrace_bytes == 0 )
+    if ( (debugtrace_bytes == 0) || !debugtrace_used )
         return;
 
-    /* Watchdog can trigger if we print a really large buffer. */
-    watchdog_on = 0;
+    watchdog_disable();
 
     spin_lock_irqsave(&debugtrace_lock, flags);
 
@@ -528,7 +525,7 @@ void debugtrace_dump(void)
 
     spin_unlock_irqrestore(&debugtrace_lock, flags);
 
-    watchdog_on = _watchdog_on;
+    watchdog_enable();
 }
 
 void debugtrace_printk(const char *fmt, ...)
@@ -541,6 +538,8 @@ void debugtrace_printk(const char *fmt, ...)
 
     if ( debugtrace_bytes == 0 )
         return;
+
+    debugtrace_used = 1;
 
     spin_lock_irqsave(&debugtrace_lock, flags);
 
@@ -608,7 +607,7 @@ __initcall(debugtrace_init);
 void panic(const char *fmt, ...)
 {
     va_list args;
-    char buf[128];
+    char buf[128], cpustr[10];
     unsigned long flags;
     extern void machine_restart(char *);
     
@@ -623,16 +622,16 @@ void panic(const char *fmt, ...)
     /* Spit out multiline message in one go. */
     spin_lock_irqsave(&console_lock, flags);
     __putstr("\n****************************************\n");
+    __putstr("Panic on CPU");
+    sprintf(cpustr, "%d", smp_processor_id());
+    __putstr(cpustr);
+    __putstr(":\n");
     __putstr(buf);
-    __putstr("Aieee! CPU");
-    sprintf(buf, "%d", smp_processor_id());
-    __putstr(buf);
-    __putstr(" is toast...\n");
     __putstr("****************************************\n\n");
     __putstr("Reboot in five seconds...\n");
     spin_unlock_irqrestore(&console_lock, flags);
 
-    watchdog_on = 0;
+    watchdog_disable();
     mdelay(5000);
     machine_restart(0);
 }

@@ -274,20 +274,17 @@ static inline unsigned long phys_to_machine_mapping(unsigned long pfn)
 }
 #define set_machinetophys(_mfn, _pfn) machine_to_phys_mapping[(_mfn)] = (_pfn)
 
-#define DEFAULT_GDT_ENTRIES     (LAST_RESERVED_GDT_ENTRY+1)
-#define DEFAULT_GDT_ADDRESS     ((unsigned long)gdt_table)
-
 #ifdef MEMORY_GUARD
-void *memguard_init(void *heap_start);
-void memguard_guard_stack(void *p);
+void memguard_init(void);
 void memguard_guard_range(void *p, unsigned long l);
 void memguard_unguard_range(void *p, unsigned long l);
 #else
-#define memguard_init(_s)              (_s)
-#define memguard_guard_stack(_p)       ((void)0)
+#define memguard_init()                ((void)0)
 #define memguard_guard_range(_p,_l)    ((void)0)
 #define memguard_unguard_range(_p,_l)  ((void)0)
 #endif
+
+void memguard_guard_stack(void *p);
 
 /* Writable Pagetables */
 struct ptwr_info {

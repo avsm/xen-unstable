@@ -7,6 +7,7 @@
 /* number of pages to write at a time */
 #define DUMP_INCREMENT 4 * 1024
 #define round_pgup(_p)    (((_p)+(PAGE_SIZE-1))&PAGE_MASK)
+
 static int
 copy_from_domain_page(int xc_handle,
 		      u32 domid,
@@ -28,13 +29,14 @@ xc_domain_dumpcore(int xc_handle,
 		   u32 domid,
 		   const char *corename)
 {
-	vcpu_guest_context_t st_ctxt, *ctxt = &st_ctxt;
 	unsigned long nr_pages;
 	unsigned long *page_array;
-	xc_domaininfo_t st_info, *info = &st_info;
-	int i, dump_fd;
+	xc_dominfo_t info;
+	int i, j, vcpu_map_size, dump_fd;
 	char *dump_mem, *dump_mem_start = NULL;
 	struct xc_core_header header;
+	vcpu_guest_context_t     ctxt[MAX_VIRT_CPUS];
+
 	
 	if ((dump_fd = open(corename, O_CREAT|O_RDWR, S_IWUSR|S_IRUSR)) < 0) {
 		PERROR("Could not open corefile %s: %s", corename, strerror(errno));
@@ -46,23 +48,38 @@ xc_domain_dumpcore(int xc_handle,
 		goto error_out;
 	}
 	
-	if (xc_domain_getfullinfo(xc_handle, domid, 0/* XXX hardcode */, info, ctxt)) {
-		PERROR("Could not get full info for domain");
+	if (xc_domain_getinfo(xc_handle, domid, 1, &info) != 1) {
+		PERROR("Could not get info for domain");
 		goto error_out;
 	}
+	
+	vcpu_map_size =  sizeof(info.vcpu_to_cpu) / sizeof(info.vcpu_to_cpu[0]);
 
-	nr_pages = info->tot_pages;
+	for (i = 0, j = 0; i < vcpu_map_size; i++) {
+		if (info.vcpu_to_cpu[i] == -1) {
+			continue;
+		}
+		if (xc_domain_get_vcpu_context(xc_handle, domid, i, &ctxt[j])) {
+			PERROR("Could not get all vcpu contexts for domain");
+			goto error_out;
+		}
+		j++;
+	}
+	
+	nr_pages = info.nr_pages;
+
 	header.xch_magic = 0xF00FEBED; 
-	header.xch_nr_vcpus = 1; /* no interface to query at the moment */
+	header.xch_nr_vcpus = info.vcpus;
 	header.xch_nr_pages = nr_pages;
 	header.xch_ctxt_offset = sizeof(struct xc_core_header);
 	header.xch_index_offset = sizeof(struct xc_core_header) +
-	    sizeof(vcpu_guest_context_t);
+	    sizeof(vcpu_guest_context_t)*info.vcpus;
 	header.xch_pages_offset = round_pgup(sizeof(struct xc_core_header) +
-	    sizeof(vcpu_guest_context_t) + nr_pages * sizeof(unsigned long));
+	    (sizeof(vcpu_guest_context_t) * info.vcpus) + 
+	    (nr_pages * sizeof(unsigned long)));
 
 	write(dump_fd, &header, sizeof(struct xc_core_header));
-	write(dump_fd, ctxt, sizeof(st_ctxt));
+	write(dump_fd, &ctxt, sizeof(ctxt[0]) * info.vcpus);
 
 	if ((page_array = malloc(nr_pages * sizeof(unsigned long))) == NULL) {
 	    printf("Could not allocate memory\n");

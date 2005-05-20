@@ -15,8 +15,6 @@ KERNELS ?= linux-2.6-xen0 linux-2.6-xenU
 # linux-2.4-xen0 linux-2.4-xenU netbsd-2.0-xenU
 # You may use wildcards in the above e.g. KERNELS=*2.4*
 
-ALLKERNELS = $(patsubst buildconfigs/mk.%,%,$(wildcard buildconfigs/mk.*))
-ALLSPARSETREES = $(patsubst %-xen-sparse,%,$(wildcard *-xen-sparse))
 XKERNELS := $(foreach kernel, $(KERNELS), $(patsubst buildconfigs/mk.%,%,$(wildcard buildconfigs/mk.$(kernel))) )
 
 export DESTDIR
@@ -87,7 +85,7 @@ world:
 	$(MAKE) dist
 
 # clean doesn't do a kclean
-clean: 
+clean:: 
 	$(MAKE) -C xen clean
 	$(MAKE) -C tools clean
 	$(MAKE) -C docs clean
@@ -160,7 +158,7 @@ help:
 uninstall: DESTDIR=
 uninstall: D=$(DESTDIR)
 uninstall:
-	[ ! -d $(D)/etc/xen ] || mv -f $(D)/etc/xen $(D)/etc/xen.old
+	[ -d $(D)/etc/xen ] && mv -f $(D)/etc/xen $(D)/etc/xen.old-$(date +%s)
 	rm -rf $(D)/etc/init.d/xend*
 	rm -rf $(D)/usr/$(LIBDIR)/libxc* $(D)/usr/$(LIBDIR)/libxutil*
 	rm -rf $(D)/usr/lib/python/xen $(D)/usr/include/xen

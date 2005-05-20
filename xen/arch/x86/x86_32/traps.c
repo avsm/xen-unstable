@@ -12,83 +12,8 @@
 #include <asm/vmx.h>
 #endif
 
-/* All CPUs have their own IDT to allow set_fast_trap(). */
+/* All CPUs have their own IDT to allow int80 direct trap. */
 idt_entry_t *idt_tables[NR_CPUS] = { 0 };
-
-static int kstack_depth_to_print = 8*20;
-
-static inline int kernel_text_address(unsigned long addr)
-{
-    if (addr >= (unsigned long) &_stext &&
-        addr <= (unsigned long) &_etext)
-        return 1;
-    return 0;
-
-}
-
-void show_guest_stack(void)
-{
-    int i;
-    struct cpu_user_regs *regs = get_cpu_user_regs();
-    unsigned long *stack = (unsigned long *)regs->esp;
-
-    printk("Guest EIP is %08x\n   ", regs->eip);
-
-    for ( i = 0; i < kstack_depth_to_print; i++ )
-    {
-        if ( ((long)stack & (STACK_SIZE-1)) == 0 )
-            break;
-        if ( i && ((i % 8) == 0) )
-            printk("\n   ");
-        printk("%08lx ", *stack++);
-    }
-    printk("\n");
-    
-}
-
-void show_trace(unsigned long *esp)
-{
-    unsigned long *stack, addr;
-    int i;
-
-    printk("Call Trace from ESP=%p:\n   ", esp);
-    stack = esp;
-    i = 0;
-    while (((long) stack & (STACK_SIZE-1)) != 0) {
-        addr = *stack++;
-        if (kernel_text_address(addr)) {
-            if (i && ((i % 6) == 0))
-                printk("\n   ");
-            printk("[<%08lx>] ", addr);
-            i++;
-        }
-    }
-    printk("\n");
-}
-
-void show_stack(unsigned long *esp)
-{
-    unsigned long *stack;
-    int i;
-
-    printk("Stack trace from ESP=%p:\n   ", esp);
-
-    stack = esp;
-    for ( i = 0; i < kstack_depth_to_print; i++ )
-    {
-        if ( ((long)stack & (STACK_SIZE-1)) == 0 )
-            break;
-        if ( i && ((i % 8) == 0) )
-            printk("\n   ");
-        if ( kernel_text_address(*stack) )
-            printk("[%08lx] ", *stack++);
-        else
-            printk("%08lx ", *stack++);
-    }
-    printk("\n");
-
-    show_trace( esp );
-}
 
 void show_registers(struct cpu_user_regs *regs)
 {
@@ -186,8 +111,7 @@ asmlinkage void do_double_fault(void)
     struct tss_struct *tss = &doublefault_tss;
     unsigned int cpu = ((tss->back_link>>3)-__FIRST_TSS_ENTRY)>>1;
 
-    /* Disable the NMI watchdog. It's useless now. */
-    watchdog_on = 0;
+    watchdog_disable();
 
     console_force_unlock();
 
@@ -254,56 +178,30 @@ void __init percpu_traps_init(void)
     tss->eip    = (unsigned long)do_double_fault;
     tss->eflags = 2;
     tss->bitmap = IOBMP_INVALID_OFFSET;
-    _set_tssldt_desc(gdt_table+__DOUBLEFAULT_TSS_ENTRY,
-                     (unsigned long)tss, 235, 9);
+    _set_tssldt_desc(
+        gdt_table + __DOUBLEFAULT_TSS_ENTRY - FIRST_RESERVED_GDT_ENTRY,
+        (unsigned long)tss, 235, 9);
 
     set_task_gate(TRAP_double_fault, __DOUBLEFAULT_TSS_ENTRY<<3);
 }
 
-long set_fast_trap(struct exec_domain *p, int idx)
+void init_int80_direct_trap(struct exec_domain *ed)
 {
-    trap_info_t *ti;
-
-    /* Index 0 is special: it disables fast traps. */
-    if ( idx == 0 )
-    {
-        if ( p == current )
-            CLEAR_FAST_TRAP(&p->arch);
-        SET_DEFAULT_FAST_TRAP(&p->arch);
-        return 0;
-    }
-
-    /* We only fast-trap vector 0x80 (used by Linux and the BSD variants). */
-    if ( idx != 0x80 )
-        return -1;
-
-    ti = &p->arch.guest_context.trap_ctxt[idx];
+    trap_info_t *ti = &ed->arch.guest_context.trap_ctxt[0x80];
 
     /*
      * We can't virtualise interrupt gates, as there's no way to get
      * the CPU to automatically clear the events_mask variable.
      */
     if ( TI_GET_IF(ti) )
-        return -1;
+        return;
 
-    if ( p == current )
-        CLEAR_FAST_TRAP(&p->arch);
+    ed->arch.int80_desc.a = (ti->cs << 16) | (ti->address & 0xffff);
+    ed->arch.int80_desc.b =
+        (ti->address & 0xffff0000) | 0x8f00 | ((TI_GET_DPL(ti) & 3) << 13);
 
-    p->arch.guest_context.fast_trap_idx = idx;
-    p->arch.fast_trap_desc.a = (ti->cs << 16) | (ti->address & 0xffff);
-    p->arch.fast_trap_desc.b = 
-        (ti->address & 0xffff0000) | 0x8f00 | (TI_GET_DPL(ti)&3)<<13;
-
-    if ( p == current )
-        SET_FAST_TRAP(&p->arch);
-
-    return 0;
-}
-
-
-long do_set_fast_trap(int idx)
-{
-    return set_fast_trap(current, idx);
+    if ( ed == current )
+        set_int80_direct_trap(ed);
 }
 
 long do_set_callbacks(unsigned long event_selector,

@@ -23,8 +23,6 @@ unsigned long wait_init_idle;
 int phys_proc_id[NR_CPUS];
 unsigned long loops_per_jiffy = (1<<12);	// from linux/init/main.c
 
-unsigned int watchdog_on = 0;	// from arch/x86/nmi.c ?!?
-
 void unw_init(void) { printf("unw_init() skipped (NEED FOR KERNEL UNWIND)\n"); }
 void ia64_mca_init(void) { printf("ia64_mca_init() skipped (Machine check abort handling)\n"); }
 void ia64_mca_cpu_init(void *x) { }
@@ -72,7 +70,7 @@ void grant_table_destroy(struct domain *d)
 	return;
 }
 
-struct pt_regs *get_cpu_user_regs(void) { return ia64_task_regs(current); }
+struct pt_regs *guest_cpu_user_regs(void) { return ia64_task_regs(current); }
 
 void raise_actimer_softirq(void)
 {
@@ -238,10 +236,10 @@ void context_switch(struct exec_domain *prev, struct exec_domain *next)
 {
 //printk("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n");
 //printk("@@@@@@ context switch from domain %d (%x) to domain %d (%x)\n",
-//prev->domain->id,(long)prev&0xffffff,next->domain->id,(long)next&0xffffff);
-//if (prev->domain->id == 1 && next->domain->id == 0) cs10foo();
-//if (prev->domain->id == 0 && next->domain->id == 1) cs01foo();
-//printk("@@sw %d->%d\n",prev->domain->id,next->domain->id);
+//prev->domain->domain_id,(long)prev&0xffffff,next->domain->domain_id,(long)next&0xffffff);
+//if (prev->domain->domain_id == 1 && next->domain->domain_id == 0) cs10foo();
+//if (prev->domain->domain_id == 0 && next->domain->domain_id == 1) cs01foo();
+//printk("@@sw %d->%d\n",prev->domain->domain_id,next->domain->domain_id);
 #ifdef CONFIG_VTI
 	unsigned long psr;
 	/* Interrupt is enabled after next task is chosen.
@@ -263,11 +261,11 @@ void context_switch(struct exec_domain *prev, struct exec_domain *next)
 {
 static long cnt[16] = { 50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50};
 static int i = 100;
-int id = ((struct exec_domain *)current)->domain->id & 0xf;
+int id = ((struct exec_domain *)current)->domain->domain_id & 0xf;
 if (!cnt[id]--) { printk("%x",id); cnt[id] = 50; }
 if (!i--) { printk("+",id); cnt[id] = 100; }
 }
-	clear_bit(EDF_RUNNING, &prev->flags);
+	clear_bit(_VCPUF_running, &prev->vcpu_flags);
 	//if (!is_idle_task(next->domain) )
 		//send_guest_virq(next, VIRQ_TIMER);
 #ifdef CONFIG_VTI
@@ -296,15 +294,15 @@ void panic_domain(struct pt_regs *regs, const char *fmt, ...)
     
 loop:
 	printf("$$$$$ PANIC in domain %d (k6=%p): ",
-		ed->domain->id, ia64_get_kr(IA64_KR_CURRENT));
+		ed->domain->domain_id, ia64_get_kr(IA64_KR_CURRENT));
 	va_start(args, fmt);
 	(void)vsnprintf(buf, sizeof(buf), fmt, args);
 	va_end(args);
 	printf(buf);
 	if (regs) show_registers(regs);
 	domain_pause_by_systemcontroller(current->domain);
-	set_bit(DF_CRASHED, ed->domain->flags);
-	if (ed->domain->id == 0) {
+	set_bit(_DOMF_crashed, ed->domain->domain_flags);
+	if (ed->domain->domain_id == 0) {
 		int i = 1000000000L;
 		// if domain0 crashes, just periodically print out panic
 		// message to make post-mortem easier

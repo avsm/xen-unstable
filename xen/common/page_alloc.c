@@ -156,6 +156,8 @@ void init_boot_pages(unsigned long ps, unsigned long pe)
 
     ps = round_pgup(ps);
     pe = round_pgdown(pe);
+    if ( pe <= ps )
+        return;
 
     map_free(ps >> PAGE_SHIFT, (pe - ps) >> PAGE_SHIFT);
 
@@ -356,15 +358,13 @@ void scrub_heap_pages(void)
     unsigned long pfn, flags;
 
     printk("Scrubbing Free RAM: ");
+    watchdog_disable();
 
     for ( pfn = 0; pfn < (bitmap_size * 8); pfn++ )
     {
-        /* Every 100MB, print a progress dot and appease the watchdog. */
+        /* Every 100MB, print a progress dot. */
         if ( (pfn % ((100*1024*1024)/PAGE_SIZE)) == 0 )
-        {
             printk(".");
-            touch_nmi_watchdog();
-        }
 
         /* Quick lock-free check. */
         if ( allocated_in_map(pfn) )
@@ -383,6 +383,7 @@ void scrub_heap_pages(void)
         spin_unlock_irqrestore(&heap_lock, flags);
     }
 
+    watchdog_enable();
     printk("done.\n");
 }
 
@@ -504,13 +505,13 @@ struct pfn_info *alloc_domheap_pages(struct domain *d, unsigned int order)
 
     spin_lock(&d->page_alloc_lock);
 
-    if ( unlikely(test_bit(DF_DYING, &d->flags)) ||
+    if ( unlikely(test_bit(_DOMF_dying, &d->domain_flags)) ||
          unlikely((d->tot_pages + (1 << order)) > d->max_pages) )
     {
         DPRINTK("Over-allocation for domain %u: %u > %u\n",
-                d->id, d->tot_pages + (1 << order), d->max_pages);
+                d->domain_id, d->tot_pages + (1 << order), d->max_pages);
         DPRINTK("...or the domain is dying (%d)\n", 
-                !!test_bit(DF_DYING, &d->flags));
+                !!test_bit(_DOMF_dying, &d->domain_flags));
         spin_unlock(&d->page_alloc_lock);
         free_heap_pages(MEMZONE_DOM, pg, order);
         return NULL;
@@ -575,7 +576,7 @@ void free_domheap_pages(struct pfn_info *pg, unsigned int order)
 
         spin_unlock_recursive(&d->page_alloc_lock);
 
-        if ( likely(!test_bit(DF_DYING, &d->flags)) )
+        if ( likely(!test_bit(_DOMF_dying, &d->domain_flags)) )
         {
             free_heap_pages(MEMZONE_DOM, pg, order);
         }
