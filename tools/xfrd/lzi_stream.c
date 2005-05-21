@@ -239,7 +239,8 @@ LZIState * LZIState_new(IOStream *io, int flags){
 }
 
 int read_block(LZIState *s){
-    int err = 0, k = 0;
+    int err = 0;
+    uint32_t k = 0;
     //dprintf(">\n");
     if(s->eof) goto exit;
     err = unmarshal_uint32(s->io, &k);
@@ -474,7 +475,6 @@ static int lzi_close(IOStream *io){
  */
 static void lzi_free(IOStream *s){
     LZIState *state = lzi_state(s);
-    IOStream_free(state->io);
     LZIState_free(state);
     s->data = NULL;
 }
@@ -524,8 +524,8 @@ IOStream *lzi_stream_fdopen(int fd, const char *mode){
     err = 0;
   exit:
     if(err){
-        IOStream_free(io);
-        IOStream_free(zio);
+        IOStream_close(io);
+        IOStream_close(zio);
         zio = NULL;
     }
     return zio;
