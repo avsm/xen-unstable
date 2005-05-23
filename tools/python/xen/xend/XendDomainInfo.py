@@ -183,6 +183,13 @@ def vm_create(config):
     vm.construct(config)
     return vm
 
+def tmp_restore_create_domain():
+    # dom input parameter is ignored
+    vm = XendDomainInfo()
+    dom = xc.domain_create()
+    vm.setdom(dom)
+    return vm
+
 def vm_recreate(savedinfo, info):
     """Create the VM object for an existing domain.
 
@@ -681,8 +688,7 @@ class XendDomainInfo:
             raise VmError('invalid cpu')
         cpu_weight = self.cpu_weight
         memory = memory * 1024 + self.pgtable_size(memory)
-        dom = xc.domain_create(dom= dom, mem_kb= memory,
-                               cpu= cpu, cpu_weight= cpu_weight)
+        dom = xc.domain_create(dom= dom)
         if self.bootloader:
             try:
                 if kernel: os.unlink(kernel)
@@ -693,6 +699,11 @@ class XendDomainInfo:
         if dom <= 0:
             raise VmError('Creating domain failed: name=%s memory=%d'
                           % (self.name, memory))
+        xc.domain_setcpuweight(dom, cpu_weight)
+        xc.domain_setmaxmem(dom, memory)
+        xc.domain_memory_increase_reservation(dom, memory)
+        if cpu != -1:
+            xc.domain_pincpu(dom, 0, 1<<int(cpu))
         log.debug('init_domain> Created domain=%d name=%s memory=%d', dom, self.name, memory)
         self.setdom(dom)
 

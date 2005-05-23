@@ -75,8 +75,6 @@ static void vbd_update(void){};
 #define BLKIF_STATE_DISCONNECTED 1
 #define BLKIF_STATE_CONNECTED    2
 
-#define WPRINTK(fmt, args...) printk(KERN_WARNING "xen_blk: " fmt, ##args)
-
 static int blkif_handle = 0;
 static unsigned int blkif_state = BLKIF_STATE_CLOSED;
 static unsigned int blkif_evtchn = 0;
@@ -195,19 +193,20 @@ static void vbd_update(void)
 }
 #endif /* ENABLE_VBD_UPDATE */
 
+static struct xlbd_disk_info *head_waiting = NULL;
 static void kick_pending_request_queues(void)
 {
-    if ( (xlbd_blk_queue != NULL) &&
-         test_bit(QUEUE_FLAG_STOPPED, &xlbd_blk_queue->queue_flags) )
+    struct xlbd_disk_info *di;
+    while ( ((di = head_waiting) != NULL) && !RING_FULL(&blk_ring) )
     {
-        blk_start_queue(xlbd_blk_queue);
-        /* XXXcl call to request_fn should not be needed but
-         * we get stuck without...  needs investigating
-         */
-        xlbd_blk_queue->request_fn(xlbd_blk_queue);
+        head_waiting = di->next_waiting;
+        di->next_waiting = NULL;
+        /* Re-enable calldowns. */
+        blk_start_queue(di->rq);
+        /* Kick things off immediately. */
+        do_blkif_request(di->rq);
     }
 }
-
 
 int blkif_open(struct inode *inode, struct file *filep)
 {
@@ -258,9 +257,9 @@ int blkif_ioctl(struct inode *inode, struct file *filep,
         return 0;
 
     default:
-        printk(KERN_ALERT "ioctl %08x not supported by Xen blkdev\n",
-               command);
-        return -ENOSYS;
+        /*printk(KERN_ALERT "ioctl %08x not supported by Xen blkdev\n",
+          command);*/
+        return -EINVAL; /* same return as native Linux */
     }
 
     return 0;
@@ -279,8 +278,7 @@ int blkif_ioctl(struct inode *inode, struct file *filep,
  */
 static int blkif_queue_request(struct request *req)
 {
-    struct xlbd_disk_info *di =
-        (struct xlbd_disk_info *)req->rq_disk->private_data;
+    struct xlbd_disk_info *di = req->rq_disk->private_data;
     unsigned long buffer_ma;
     blkif_request_t *ring_req;
     struct bio *bio;
@@ -355,6 +353,7 @@ static int blkif_queue_request(struct request *req)
  */
 void do_blkif_request(request_queue_t *rq)
 {
+    struct xlbd_disk_info *di;
     struct request *req;
     int queued;
 
@@ -371,10 +370,7 @@ void do_blkif_request(request_queue_t *rq)
         }
 
         if ( RING_FULL(&blk_ring) )
-        {
-            blk_stop_queue(rq);
-            break;
-        }
+            goto wait;
 
         DPRINTK("do_blk_req %p: cmd %p, sec %lx, (%u/%li) buffer:%p [%s]\n",
                 req, req->cmd, req->sector, req->current_nr_sectors,
@@ -384,7 +380,15 @@ void do_blkif_request(request_queue_t *rq)
         blkdev_dequeue_request(req);
         if ( blkif_queue_request(req) )
         {
-            blk_stop_queue(rq);
+        wait:
+            di = req->rq_disk->private_data;
+            if ( di->next_waiting == NULL )
+            {
+                di->next_waiting = head_waiting;
+                head_waiting = di;
+                /* Avoid pointless unplugs. */
+                blk_stop_queue(rq);
+            }
             break;
         }
 
@@ -453,7 +457,7 @@ static irqreturn_t blkif_int(int irq, void *dev_id, struct pt_regs *ptregs)
     }
 
     blk_ring.rsp_cons = i;
-    
+
     kick_pending_request_queues();
 
     spin_unlock_irqrestore(&blkif_io_lock, flags);
@@ -671,7 +675,7 @@ int blkif_ioctl(struct inode *inode, struct file *filep,
         return -ENOSYS;
 
     default:
-        printk(KERN_ALERT "ioctl %08x not supported by XL blkif\n", command);
+        WPRINTK("ioctl %08x not supported by XL blkif\n", command);
         return -ENOSYS;
     }
     
@@ -1264,7 +1268,7 @@ static void blkif_connect(blkif_fe_interface_status_t *status)
     err = request_irq(blkif_irq, blkif_int, SA_SAMPLE_RANDOM, "blkif", NULL);
     if ( err )
     {
-        printk(KERN_ALERT "xen_blk: request_irq failed (err=%d)\n", err);
+        WPRINTK("request_irq failed (err=%d)\n", err);
         return;
     }
 
@@ -1406,7 +1410,7 @@ int wait_for_blkif(void)
 
     if ( blkif_state != BLKIF_STATE_CONNECTED )
     {
-        printk(KERN_INFO "xen_blk: Timeout connecting to device!\n");
+        WPRINTK("Timeout connecting to device!\n");
         err = -ENOSYS;
     }
     return err;
@@ -1427,7 +1431,7 @@ int __init xlblk_init(void)
          (xen_start_info.flags & SIF_BLK_BE_DOMAIN) )
         return 0;
 
-    printk(KERN_INFO "xen_blk: Initialising virtual block device driver\n");
+    IPRINTK("Initialising virtual block device driver\n");
 
     blk_shadow_free = 0;
     memset(blk_shadow, 0, sizeof(blk_shadow));

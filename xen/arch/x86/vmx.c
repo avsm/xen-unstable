@@ -51,10 +51,10 @@ void do_nmi(struct cpu_user_regs *, unsigned long);
 int start_vmx()
 {
     struct vmcs_struct *vmcs;
-    unsigned long ecx;
+    u32 ecx;
+    u32 eax, edx;
     u64 phys_vmcs;      /* debugging */
 
-    vmcs_size = VMCS_SIZE;
     /*
      * Xen does not fill x86_capability words except 0.
      */
@@ -63,6 +63,18 @@ int start_vmx()
 
     if (!(test_bit(X86_FEATURE_VMXE, &boot_cpu_data.x86_capability)))
         return 0;
+ 
+    rdmsr(IA32_FEATURE_CONTROL_MSR, eax, edx);
+
+    if (eax & IA32_FEATURE_CONTROL_MSR_LOCK) {
+        if ((eax & IA32_FEATURE_CONTROL_MSR_ENABLE_VMXON) == 0x0) {
+                printk("VMX disabled by Feature Control MSR.\n");
+		return 0;
+        }
+    }
+    else 
+        wrmsr(IA32_FEATURE_CONTROL_MSR, 
+              IA32_FEATURE_CONTROL_MSR_LOCK | IA32_FEATURE_CONTROL_MSR_ENABLE_VMXON, 0);
 
     set_in_cr4(X86_CR4_VMXE);   /* Enable VMXE */
 
@@ -354,18 +366,17 @@ static void vmx_io_instruction(struct cpu_user_regs *regs,
             if (p->dir == IOREQ_WRITE) {
                 __vmread(GUEST_DS_SELECTOR, &seg);
                 p->u.pdata = (void *)
-                        ((seg << 4) | (regs->esi & 0xFFFF));
+                        ((seg << 4) + (regs->esi & 0xFFFF));
             } else {
                 __vmread(GUEST_ES_SELECTOR, &seg);
                 p->u.pdata = (void *)
-                        ((seg << 4) | (regs->edi & 0xFFFF));
+                        ((seg << 4) + (regs->edi & 0xFFFF));
             }
         } else {
                p->u.pdata = (void *) ((p->dir == IOREQ_WRITE) ?
                    regs->esi : regs->edi);
         }
         p->u.pdata = (void *) gva_to_gpa(p->u.data);
-
 
         if (test_bit(5, &exit_qualification))
 	    p->count = vm86 ? regs->ecx & 0xFFFF : regs->ecx;
@@ -1176,7 +1187,6 @@ asmlinkage void vmx_vmexit_handler(struct cpu_user_regs regs)
     }
     case EXIT_REASON_EXTERNAL_INTERRUPT: 
     {
-        extern int vector_irq[];
         extern asmlinkage void do_IRQ(struct cpu_user_regs *);
         extern void smp_apic_timer_interrupt(struct cpu_user_regs *);
         extern void timer_interrupt(int, void *, struct cpu_user_regs *);

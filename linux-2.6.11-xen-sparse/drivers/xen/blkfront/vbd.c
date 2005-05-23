@@ -53,21 +53,21 @@ struct lvdisk
 
 static struct xlbd_type_info xlbd_ide_type = {
     .partn_shift = 6,
-    .partn_per_major = 2,
+    .disks_per_major = 2,
     .devname = "ide",
     .diskname = "hd",
 };
 
 static struct xlbd_type_info xlbd_scsi_type = {
     .partn_shift = 4,
-    .partn_per_major = 16,
+    .disks_per_major = 16,
     .devname = "sd",
     .diskname = "sd",
 };
 
 static struct xlbd_type_info xlbd_vbd_type = {
     .partn_shift = 4,
-    .partn_per_major = 16,
+    .disks_per_major = 16,
     .devname = "xvd",
     .diskname = "xvd",
 };
@@ -87,8 +87,6 @@ static struct xlbd_major_info *major_info[NUM_IDE_MAJORS + NUM_SCSI_MAJORS +
 #define MAX_VBDS 64
 struct list_head vbds_list;
 
-struct request_queue *xlbd_blk_queue = NULL;
-
 #define MAJOR_XEN(dev) ((dev)>>8)
 #define MINOR_XEN(dev) ((dev) & 0xff)
 
@@ -107,7 +105,7 @@ static struct lvdisk *xlvbd_device_alloc(void)
     struct lvdisk *disk;
 
     disk = kmalloc(sizeof(*disk), GFP_KERNEL);
-    if (disk) {
+    if (disk != NULL) {
         memset(disk, 0, sizeof(*disk));
         INIT_LIST_HEAD(&disk->list);
     }
@@ -120,7 +118,7 @@ static void xlvbd_device_free(struct lvdisk *disk)
     kfree(disk);
 }
 
-static vdisk_t * xlvbd_probe(int *ret)
+static vdisk_t *xlvbd_probe(int *ret)
 {
     blkif_response_t rsp;
     blkif_request_t req;
@@ -129,7 +127,7 @@ static vdisk_t * xlvbd_probe(int *ret)
     int nr;
 
     buf = __get_free_page(GFP_KERNEL);
-    if ( !buf )
+    if ((void *)buf == NULL)
         goto out;
 
     memset(&req, 0, sizeof(req));
@@ -144,7 +142,7 @@ static vdisk_t * xlvbd_probe(int *ret)
     blkif_control_send(&req, &rsp);
 #endif
     if ( rsp.status <= 0 ) {
-        printk(KERN_ALERT "Could not probe disks (%d)\n", rsp.status);
+        WPRINTK("Could not probe disks (%d)\n", rsp.status);
         goto out;
     }
     nr = rsp.status;
@@ -152,21 +150,24 @@ static vdisk_t * xlvbd_probe(int *ret)
         nr = MAX_VBDS;
 
     disk_info = kmalloc(nr * sizeof(vdisk_t), GFP_KERNEL);
-    if ( disk_info )
+    if (disk_info != NULL)
         memcpy(disk_info, (void *) buf, nr * sizeof(vdisk_t));
-    if ( ret )
+
+    if (ret != NULL)
         *ret = nr;
+
 out:
     free_page(buf);
     return disk_info;
 }
 
-static struct xlbd_major_info *xlbd_alloc_major_info(int major, int minor, int index)
+static struct xlbd_major_info *xlbd_alloc_major_info(
+    int major, int minor, int index)
 {
     struct xlbd_major_info *ptr;
 
     ptr = kmalloc(sizeof(struct xlbd_major_info), GFP_KERNEL);
-    if ( !ptr )
+    if (ptr == NULL)
         return NULL;
 
     memset(ptr, 0, sizeof(struct xlbd_major_info));
@@ -188,9 +189,9 @@ static struct xlbd_major_info *xlbd_alloc_major_info(int major, int minor, int i
         break;
     }
     
-    if ( register_blkdev(ptr->major, ptr->type->devname) ) {
-        printk(KERN_ALERT "XL VBD: can't get major %d with name %s\n",
-                    ptr->major, ptr->type->devname);
+    if (register_blkdev(ptr->major, ptr->type->devname)) {
+        WPRINTK("can't get major %d with name %s\n",
+                ptr->major, ptr->type->devname);
         kfree(ptr);
         return NULL;
     }
@@ -226,72 +227,70 @@ static struct xlbd_major_info *xlbd_get_major_info(int device)
     default: index = 19; break;
     }
 
-    return major_info[index]
-        ? major_info[index]
-        : xlbd_alloc_major_info(major, minor, index);
+    return ((major_info[index] != NULL) ? major_info[index] :
+            xlbd_alloc_major_info(major, minor, index));
 }
 
-static int xlvbd_blk_queue_alloc(struct xlbd_type_info *type)
+static int xlvbd_init_blk_queue(struct gendisk *gd, vdisk_t *disk)
 {
-    xlbd_blk_queue = blk_init_queue(do_blkif_request, &blkif_io_lock);
-    if ( !xlbd_blk_queue )
+    request_queue_t *rq;
+
+    rq = blk_init_queue(do_blkif_request, &blkif_io_lock);
+    if (rq == NULL)
         return -1;
 
-    elevator_init(xlbd_blk_queue, "noop");
-
-    /*
-    * Turn off barking 'headactive' mode. We dequeue
-    * buffer heads as soon as we pass them to back-end
-    * driver.
-    */
-    blk_queue_headactive(xlbd_blk_queue, 0);
+    elevator_init(rq, "noop");
 
     /* Hard sector size and max sectors impersonate the equiv. hardware. */
-    blk_queue_hardsect_size(xlbd_blk_queue, 512);
-    blk_queue_max_sectors(xlbd_blk_queue, 512);
+    blk_queue_hardsect_size(rq, disk->sector_size);
+    blk_queue_max_sectors(rq, 512);
 
     /* Each segment in a request is up to an aligned page in size. */
-    blk_queue_segment_boundary(xlbd_blk_queue, PAGE_SIZE - 1);
-    blk_queue_max_segment_size(xlbd_blk_queue, PAGE_SIZE);
+    blk_queue_segment_boundary(rq, PAGE_SIZE - 1);
+    blk_queue_max_segment_size(rq, PAGE_SIZE);
 
     /* Ensure a merged request will fit in a single I/O ring slot. */
-    blk_queue_max_phys_segments(xlbd_blk_queue, BLKIF_MAX_SEGMENTS_PER_REQUEST);
-    blk_queue_max_hw_segments(xlbd_blk_queue, BLKIF_MAX_SEGMENTS_PER_REQUEST);
+    blk_queue_max_phys_segments(rq, BLKIF_MAX_SEGMENTS_PER_REQUEST);
+    blk_queue_max_hw_segments(rq, BLKIF_MAX_SEGMENTS_PER_REQUEST);
 
     /* Make sure buffer addresses are sector-aligned. */
-    blk_queue_dma_alignment(xlbd_blk_queue, 511);
+    blk_queue_dma_alignment(rq, 511);
+
+    gd->queue = rq;
+
     return 0;
 }
 
-struct gendisk *xlvbd_alloc_gendisk(struct xlbd_major_info *mi, int minor,
-                    vdisk_t *disk)
+struct gendisk *xlvbd_alloc_gendisk(
+    struct xlbd_major_info *mi, int minor, vdisk_t *disk)
 {
     struct gendisk *gd;
     struct xlbd_disk_info *di;
-    int nb_minors;
+    int nr_minors = 1;
 
     di = kmalloc(sizeof(struct xlbd_disk_info), GFP_KERNEL);
-    if ( !di )
-        goto out;
+    if (di == NULL)
+        return NULL;
+    memset(di, 0, sizeof(*di));
     di->mi = mi;
     di->xd_device = disk->device;
 
-    nb_minors = ((minor & ((1 << mi->type->partn_shift) - 1)) == 0)
-            ? mi->type->partn_per_major
-            : 1;
+    if (((disk->info & (VDISK_CDROM|VDISK_REMOVABLE)) == 0) &&
+        ((minor & ((1 << mi->type->partn_shift) - 1)) == 0))
+        nr_minors = 1 << mi->type->partn_shift;
 
-    gd = alloc_disk(nb_minors);
-    if ( !gd )
+    gd = alloc_disk(nr_minors);
+    if (gd == NULL)
         goto out;
 
-    if ( nb_minors > 1 )
+    if (((disk->info & (VDISK_CDROM|VDISK_REMOVABLE)) != 0) || (nr_minors > 1))
         sprintf(gd->disk_name, "%s%c", mi->type->diskname,
-                'a' + mi->index * mi->type->partn_per_major +
+                'a' + mi->index * mi->type->disks_per_major +
                     (minor >> mi->type->partn_shift));
     else
         sprintf(gd->disk_name, "%s%c%d", mi->type->diskname,
-                'a' + mi->index * mi->type->partn_per_major +
-                    (minor >> mi->type->partn_shift),
+                'a' + mi->index * mi->type->disks_per_major +
+                (minor >> mi->type->partn_shift),
                 minor & ((1 << mi->type->partn_shift) - 1));
 
     gd->major = mi->major;
@@ -300,18 +299,27 @@ struct gendisk *xlvbd_alloc_gendisk(struct xlbd_major_info *mi, int minor,
     gd->private_data = di;
     set_capacity(gd, disk->capacity);
 
-    if ( !xlbd_blk_queue )
-        if ( xlvbd_blk_queue_alloc(mi->type) )
-            goto out_gendisk;
+    if (xlvbd_init_blk_queue(gd, disk)) {
+        del_gendisk(gd);
+        goto out;
+    }
 
-    gd->queue = xlbd_blk_queue;
+    di->rq = gd->queue;
+
+    if (disk->info & VDISK_READONLY)
+        set_disk_ro(gd, 1);
+
+    if (disk->info & VDISK_REMOVABLE)
+        gd->flags |= GENHD_FL_REMOVABLE;
+
+    if (disk->info & VDISK_CDROM)
+        gd->flags |= GENHD_FL_CD;
+
     add_disk(gd);
+
     return gd;
-out_gendisk:
-    printk(KERN_ALERT "error gendisk\n");
-    del_gendisk(gd);
+
 out:
-    printk(KERN_ALERT "error out\n");
     kfree(di);
     return NULL;
 }
@@ -326,11 +334,11 @@ static int xlvbd_device_add(struct list_head *list, vdisk_t *disk)
     struct xlbd_major_info *mi;
 
     mi = xlbd_get_major_info(disk->device);
-    if ( !mi )
+    if (mi == NULL)
         return -EPERM;
 
     new = xlvbd_device_alloc();
-    if ( !new )
+    if (new == NULL)
         return -1;
     new->capacity = disk->capacity;
     new->device = disk->device;
@@ -340,31 +348,12 @@ static int xlvbd_device_add(struct list_head *list, vdisk_t *disk)
     device = MKDEV(mi->major, minor);
     
     bd = bdget(device);
-    if ( !bd )
+    if (bd == NULL)
         goto out;
     
     gd = xlvbd_alloc_gendisk(mi, minor, disk);
-    if ( !gd )
+    if (gd == NULL)
         goto out_bd;
-
-    if ( VDISK_READONLY(disk->info) )
-        set_disk_ro(gd, 1);
-
-    switch (VDISK_TYPE(disk->info)) {
-    case VDISK_TYPE_CDROM:
-        gd->flags |= GENHD_FL_REMOVABLE | GENHD_FL_CD;
-        break;
-    case VDISK_TYPE_FLOPPY: 
-    case VDISK_TYPE_TAPE:
-        gd->flags |= GENHD_FL_REMOVABLE;
-        break;
-    case VDISK_TYPE_DISK:
-        break;
-    default:
-        printk(KERN_ALERT "XenLinux: unknown device type %d\n",
-                        VDISK_TYPE(disk->info));
-        break;
-    }    
 
     list_add(&new->list, list);
 out_bd:
@@ -380,23 +369,27 @@ static int xlvbd_device_del(struct lvdisk *disk)
     struct gendisk *gd;
     struct xlbd_disk_info *di;
     int ret = 0, unused;
+    request_queue_t *rq;
 
     device = MKDEV(MAJOR_XEN(disk->device), MINOR_XEN(disk->device));
 
     bd = bdget(device);
-    if ( !bd )
+    if (bd == NULL)
         return -1;
 
     gd = get_gendisk(device, &unused);
     di = gd->private_data;
 
-    if ( di->mi->usage != 0 ) {
-        printk(KERN_ALERT "VBD removal failed: used [dev=%x]\n", device);
+    if (di->mi->usage != 0) {
+        WPRINTK("disk removal failed: used [dev=%x]\n", device);
         ret = -1;
         goto out;
     }
 
+    rq = gd->queue;
     del_gendisk(gd);
+    put_disk(gd);
+    blk_cleanup_queue(rq);
 
     xlvbd_device_free(disk);
 out:
@@ -411,13 +404,13 @@ static int xlvbd_device_update(struct lvdisk *ldisk, vdisk_t *disk)
     struct gendisk *gd;
     int unused;
 
-    if ( ldisk->capacity == disk->capacity && ldisk->info == disk->info )
+    if ((ldisk->capacity == disk->capacity) && (ldisk->info == disk->info))
         return 0;    
 
     device = MKDEV(MAJOR_XEN(ldisk->device), MINOR_XEN(ldisk->device));
 
     bd = bdget(device);
-    if ( !bd )
+    if (bd == NULL)
         return -1;
 
     gd = get_gendisk(device, &unused);
@@ -437,8 +430,8 @@ void xlvbd_refresh(void)
     int i, nr;
 
     newdisks = xlvbd_probe(&nr);
-    if ( !newdisks ) {
-        printk(KERN_ALERT "failed to probe\n");
+    if (newdisks == NULL) {
+        WPRINTK("failed to probe\n");
         return;
     }
     
@@ -455,7 +448,7 @@ void xlvbd_refresh(void)
                 break;
             }
         }
-        if ( i == nr ) {
+        if (i == nr) {
             xlvbd_device_del(disk);
             newdisks[i].device = 0;
         }
@@ -495,13 +488,14 @@ int xlvbd_init(void)
     memset(major_info, 0, sizeof(major_info));
     
     disks = xlvbd_probe(&nr);
-    if ( !disks ) {
-        printk(KERN_ALERT "failed to probe\n");
+    if (disks == NULL) {
+        WPRINTK("failed to probe\n");
         return -1;
     }
 
     for (i = 0; i < nr; i++)
         xlvbd_device_add(&vbds_list, &disks[i]);
+
     kfree(disks);
     return 0;
 }

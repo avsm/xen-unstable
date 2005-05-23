@@ -24,6 +24,9 @@ import scheduler
 from xen.xend.server import channel
 
 
+import errno
+from struct import pack, unpack, calcsize
+
 __all__ = [ "XendDomain" ]
 
 SHUTDOWN_TIMEOUT = 30
@@ -53,10 +56,6 @@ class XendDomain:
         xroot.add_component("xen.xend.XendDomain", self)
         # Table of domain info indexed by domain id.
         self.db = XendDB.XendDB(self.dbpath)
-        self.domain_db = self.db.fetchall("")
-        # XXXcl maybe check if there's only dom0 if we _really_ need
-        #       to remove the db 
-        # self.rm_all()
         eserver.subscribe('xend.virq', self.onVirq)
         self.initial_refresh()
 
@@ -72,12 +71,6 @@ class XendDomain:
         """
         print 'onVirq>', val
         self.refresh(cleanup=True)
-
-    def rm_all(self):
-        """Remove all domain info. Used after reboot.
-        """
-        for (k, v) in self.domain_db.items():
-            self._delete_domain(k, notify=False)
 
     def xen_domains(self):
         """Get table of domains indexed by id from xc.
@@ -102,10 +95,10 @@ class XendDomain:
         return dominfo
             
     def initial_refresh(self):
-        """Refresh initial domain info from domain_db.
+        """Refresh initial domain info from db.
         """
         doms = self.xen_domains()
-        for config in self.domain_db.values():
+        for config in self.db.fetchall("").values():
             domid = str(sxp.child_value(config, 'id'))
             if domid in doms:
                 try:
@@ -118,17 +111,12 @@ class XendDomain:
                 self._delete_domain(domid)
         self.refresh(cleanup=True)
 
-    def sync(self):
-        """Sync domain db to disk.
-        """
-        self.db.saveall("", self.domain_db)
-
-    def sync_domain(self, dom):
+    def sync_domain(self, info):
         """Sync info for a domain to disk.
 
-        dom	domain id (string)
+        info	domain info
         """
-        self.db.save(dom, self.domain_db[dom])
+        self.db.save(info.id, info.sxpr())
 
     def close(self):
         pass
@@ -154,14 +142,11 @@ class XendDomain:
         for i, d in self.domains.items():
             if i != d.id:
                 del self.domains[i]
-                if i in self.domain_db:
-                    del self.domain_db[i]
                 self.db.delete(i)
         if info.id in self.domains:
             notify = False
         self.domains[info.id] = info
-        self.domain_db[info.id] = info.sxpr()
-        self.sync_domain(info.id)
+        self.sync_domain(info)
         if notify:
             eserver.inject('xend.domain.create', [info.name, info.id])
 
@@ -176,8 +161,6 @@ class XendDomain:
             del self.domains[id]
             if notify:
                 eserver.inject('xend.domain.died', [info.name, info.id])
-        if id in self.domain_db:
-            del self.domain_db[id]
             self.db.delete(id)
 
     def reap(self):
@@ -253,8 +236,7 @@ class XendDomain:
         """
         dominfo = self.domains.get(id)
         if dominfo:
-            self.domain_db[id] = dominfo.sxpr()
-            self.sync_domain(id)
+            self.sync_domain(dominfo)
 
     def refresh_domain(self, id):
         """Refresh information for a single domain.
@@ -319,7 +301,7 @@ class XendDomain:
                            [dominfo.name, dominfo.id, "fail"])
         return dominfo
 
-    def domain_configure(self, id, vmconfig):
+    def domain_configure(self, vmconfig):
         """Configure an existing domain. This is intended for internal
         use by domain restore and migrate.
 
@@ -327,10 +309,7 @@ class XendDomain:
         @param vmconfig: vm configuration
         """
         config = sxp.child_value(vmconfig, 'config')
-        dominfo = self.domain_lookup(id)
-        log.debug('domain_configure> id=%s config=%s', str(id), str(config))
-        if dominfo.config:
-            raise XendError("Domain already configured: " + dominfo.id)
+        dominfo = XendDomainInfo.tmp_restore_create_domain()
         dominfo.dom_construct(dominfo.dom, config)
         self._add_domain(dominfo)
         return dominfo
@@ -341,8 +320,65 @@ class XendDomain:
         @param src:      source file
         @param progress: output progress if true
         """
-        xmigrate = XendMigrate.instance()
-        return xmigrate.restore_begin(src)
+
+        SIGNATURE = "LinuxGuestRecord"
+        sizeof_int = calcsize("L")
+        sizeof_unsigned_long = calcsize("i")
+        PAGE_SIZE = 4096
+
+        class XendFile(file):
+            def read_exact(self, size, error_msg):
+                buf = self.read(size)
+                if len(buf) != size:
+                    raise XendError(error_msg)
+                return buf
+        
+        try:
+            fd = XendFile(src, 'rb')
+
+            signature = fd.read_exact(len(SIGNATURE),
+                "not a valid guest state file: signature read")
+            if signature != SIGNATURE:
+                raise XendError("not a valid guest state file: found '%s'" %
+                                signature)
+
+            l = fd.read_exact(sizeof_unsigned_long,
+                              "not a valid guest state file: pfn count read")
+            nr_pfns = unpack("=L", l)[0]   # XXX endianess
+            if nr_pfns > 1024*1024:     # XXX
+                raise XendError(
+                    "not a valid guest state file: pfn count out of range")
+
+            pfn_to_mfn_frame_list = fd.read_exact(PAGE_SIZE,
+                "not a valid guest state file: pfn_to_mfn_frame_list read")
+
+            l = fd.read_exact(sizeof_int,
+                              "not a valid guest state file: config size read")
+            vmconfig_size = unpack("i", l)[0] # XXX endianess
+            vmconfig_buf = fd.read_exact(vmconfig_size,
+                "not a valid guest state file: config read")
+
+            p = sxp.Parser()
+            p.input(vmconfig_buf)
+            if not p.ready:
+                raise XendError("not a valid guest state file: config parse")
+
+            vmconfig = p.get_val()
+            dominfo = self.domain_configure(vmconfig)
+
+            # XXXcl hack: fd.tell will sync up the object and
+            #             underlying file descriptor
+            ignore = fd.tell()
+
+            xc.linux_restore(fd.fileno(), int(dominfo.id), nr_pfns,
+                             pfn_to_mfn_frame_list)
+            return dominfo
+
+        except IOError, ex:
+            if ex.errno == errno.ENOENT:
+                raise XendError("can't open guest state file %s" % src)
+            else:
+                raise
     
     def domain_get(self, id):
         """Get up-to-date info about a domain.

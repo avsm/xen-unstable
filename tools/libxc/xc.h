@@ -124,9 +124,6 @@ typedef struct {
 
 typedef dom0_getdomaininfo_t xc_domaininfo_t;
 int xc_domain_create(int xc_handle, 
-                     unsigned int mem_kb, 
-                     int cpu,
-                     float cpu_weight,
                      u32 *pdomid);
 
 
@@ -247,7 +244,8 @@ int xc_linux_save(int xc_handle, struct XcIOContext *ioctxt);
  * @parm ioctxt the IO context to restore a domain from
  * @return 0 on success, -1 on failure
  */
-int xc_linux_restore(int xc_handle, struct XcIOContext *ioctxt);
+int xc_linux_restore(int xc_handle, int io_fd, u32 dom, unsigned long nr_pfns,
+		     unsigned char *pfn2mfn);
 
 int xc_linux_build(int xc_handle,
                    u32 domid,
@@ -406,6 +404,10 @@ int xc_sched_id(int xc_handle,
 int xc_domain_setmaxmem(int xc_handle,
                         u32 domid, 
                         unsigned int max_memkb);
+
+int xc_domain_memory_increase_reservation(int xc_handle,
+                                          u32 domid, 
+                                          unsigned int mem_kb);
 
 typedef dom0_perfc_desc_t xc_perfc_desc_t;
 /* IMPORTANT: The caller is responsible for mlock()'ing the @desc array. */
