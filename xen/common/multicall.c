@@ -24,11 +24,10 @@ long do_multicall(multicall_entry_t *call_list, unsigned int nr_calls)
         return -EINVAL;
     }
 
-    if ( unlikely(!array_access_ok(VERIFY_WRITE, call_list, 
-                                   nr_calls, sizeof(*call_list))) )
+    if ( unlikely(!array_access_ok(call_list, nr_calls, sizeof(*call_list))) )
     {
         DPRINTK("Bad memory range %p for %u*%u bytes.\n",
-                call_list, nr_calls, sizeof(*call_list));
+                call_list, nr_calls, (unsigned int)sizeof(*call_list));
         goto fault;
     }
 
@@ -38,7 +37,7 @@ long do_multicall(multicall_entry_t *call_list, unsigned int nr_calls)
                                        sizeof(*call_list))) )
         {
             DPRINTK("Error copying from user range %p for %u bytes.\n",
-                    &call_list[i], sizeof(*call_list));
+                    &call_list[i], (unsigned int)sizeof(*call_list));
             goto fault;
         }
 
@@ -66,8 +65,8 @@ long do_multicall(multicall_entry_t *call_list, unsigned int nr_calls)
             if ( i < nr_calls )
             {
                 mcs->flags = 0;
-                return hypercall_create_continuation(
-                    __HYPERVISOR_multicall, 2, &call_list[i], nr_calls-i);
+                return hypercall2_create_continuation(
+                    __HYPERVISOR_multicall, &call_list[i], nr_calls-i);
             }
         }
     }
@@ -79,3 +78,13 @@ long do_multicall(multicall_entry_t *call_list, unsigned int nr_calls)
     mcs->flags = 0;
     return -EFAULT;
 }
+
+/*
+ * Local variables:
+ * mode: C
+ * c-set-style: "BSD"
+ * c-basic-offset: 4
+ * tab-width: 4
+ * indent-tabs-mode: nil
+ * End:
+ */
