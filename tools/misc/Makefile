@@ -16,7 +16,7 @@ HDRS     = $(wildcard *.h)
 TARGETS  = xenperf xc_shadow
 
 INSTALL_BIN  = $(TARGETS) xencons
-INSTALL_SBIN = netfix xm xend xensv xenperf
+INSTALL_SBIN = netfix xm xend xenperf
 
 all: build
 build: $(TARGETS)
@@ -45,4 +45,4 @@ clean:
 	$(CC) -c $(CFLAGS) -o $@ $<
 
 $(TARGETS): %: %.o Makefile
-	$(CC) $(CFLAGS) -o $@ $< -L$(XEN_LIBXC) -lxc -L$(XEN_LIBXUTIL) -lxutil
+	$(CC) $(CFLAGS) -o $@ $< -L$(XEN_LIBXC) -lxc

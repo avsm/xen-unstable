@@ -103,14 +103,16 @@ class BlkifBackend:
         msg = packMsg('blkif_be_disconnect_t',
                       { 'domid'        : self.frontendDomain,
                         'blkif_handle' : self.id })
-        self.backendChannel.writeRequest(msg)
+        self.backendChannel.requestResponse(msg)
+        #todo: check return status
         self.connected = False
 
     def send_be_destroy(self):
         msg = packMsg('blkif_be_destroy_t',
                       { 'domid'        : self.frontendDomain,
                         'blkif_handle' : self.id })
-        self.backendChannel.writeRequest(msg)
+        self.backendChannel.requestResponse(msg)
+        #todo: check return status
 
     def connectInterface(self, val):
         self.openEvtchn()
@@ -213,7 +215,6 @@ class BlkDev(Dev):
     def attach(self, recreate=False, change=False):
         if recreate:
             node = sxp.child_value(recreate, 'node')
-            print 'BlkDev>attach>', 'recreate=', recreate, 'node=', node
             self.setNode(node)
         else:
             node = Blkctl.block('bind', self.type, self.params)

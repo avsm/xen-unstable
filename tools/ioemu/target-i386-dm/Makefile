@@ -189,7 +189,7 @@ endif
 #########################################################
 
 DEFINES+=-D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE
-LIBS+=-lm -L../../libxc -L../../libxutil -lxc -lxutil
+LIBS+=-lm -L../../libxc -lxc
 ifndef CONFIG_USER_ONLY
 LIBS+=-lz
 endif
@@ -271,7 +271,7 @@ endif
 
 # Hardware support
 VL_OBJS+= ide.o ne2000.o pckbd.o vga.o dma.o
-VL_OBJS+= fdc.o mc146818rtc.o serial.o i8259.o i8254.o pc.o
+VL_OBJS+= fdc.o mc146818rtc.o serial.o i8259.o i8254.o pc.o port-e9.o
 
 ifeq ($(TARGET_ARCH), ppc)
 VL_OBJS+= ppc.o ide.o ne2000.o pckbd.o vga.o $(SOUND_HW) dma.o $(AUDIODRV)
@@ -376,6 +376,9 @@ mixeng.o: mixeng.c mixeng.h mixeng_template.h
 	$(CC) $(DEFINES) -c -o $@ $<
 
 clean:
+	rm -rf *.o  *.a *~ $(PROGS) gen-op.h opc.h op.h nwfpe slirp qemu-vgaram-bin
+
+distclean:
 	rm -rf *.o  *.a *~ $(PROGS) gen-op.h opc.h op.h nwfpe slirp qemu-vgaram-bin
 
 install: all 

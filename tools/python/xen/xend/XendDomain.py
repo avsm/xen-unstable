@@ -1,31 +1,30 @@
 # Copyright (C) 2004 Mike Wray <mike.wray@hp.com>
+# Copyright (C) 2005 Christian Limpach <Christian.Limpach@cl.cam.ac.uk>
 
 """Handler for domain operations.
  Nothing here is persistent (across reboots).
  Needs to be persistent for one uptime.
 """
+import errno
+import os
+import scheduler
 import sys
 import traceback
 import time
 
 import xen.lowlevel.xc; xc = xen.lowlevel.xc.new()
 
+from xen.xend.server import relocate
 import sxp
 import XendRoot; xroot = XendRoot.instance()
+import XendCheckpoint
 import XendDB
 import XendDomainInfo
-import XendMigrate
 import EventServer; eserver = EventServer.instance()
 from XendError import XendError
 from XendLogging import log
 
-import scheduler
-
 from xen.xend.server import channel
-
-
-import errno
-from struct import pack, unpack, calcsize
 
 __all__ = [ "XendDomain" ]
 
@@ -69,7 +68,6 @@ class XendDomain:
     def onVirq(self, event, val):
         """Event handler for virq.
         """
-        print 'onVirq>', val
         self.refresh(cleanup=True)
 
     def xen_domains(self):
@@ -86,7 +84,10 @@ class XendDomain:
         """Get info about a single domain from xc.
         Returns None if not found.
         """
-        dom = int(dom)
+        try:
+            dom = int(dom)
+        except ValueError:
+            return None
         dominfo = xc.domain_getinfo(dom, 1)
         if dominfo == [] or dominfo[0]['dom'] != dom:
             dominfo = None
@@ -194,6 +195,8 @@ class XendDomain:
                         log.debug('XendDomain>reap> Suspended domain died id=%s', id)
                     else:
                         eserver.inject('xend.domain.suspended', [name, id])
+                        if dominfo:
+                            dominfo.state_set("suspended")
                         continue
                 if reason in ['poweroff', 'reboot']:
                     eserver.inject('xend.domain.exit', [name, id, reason])
@@ -321,65 +324,15 @@ class XendDomain:
         @param progress: output progress if true
         """
 
-        SIGNATURE = "LinuxGuestRecord"
-        sizeof_int = calcsize("L")
-        sizeof_unsigned_long = calcsize("i")
-        PAGE_SIZE = 4096
-
-        class XendFile(file):
-            def read_exact(self, size, error_msg):
-                buf = self.read(size)
-                if len(buf) != size:
-                    raise XendError(error_msg)
-                return buf
-        
         try:
-            fd = XendFile(src, 'rb')
+            fd = os.open(src, os.O_RDONLY)
 
-            signature = fd.read_exact(len(SIGNATURE),
-                "not a valid guest state file: signature read")
-            if signature != SIGNATURE:
-                raise XendError("not a valid guest state file: found '%s'" %
-                                signature)
+            return XendCheckpoint.restore(self, fd)
 
-            l = fd.read_exact(sizeof_unsigned_long,
-                              "not a valid guest state file: pfn count read")
-            nr_pfns = unpack("=L", l)[0]   # XXX endianess
-            if nr_pfns > 1024*1024:     # XXX
-                raise XendError(
-                    "not a valid guest state file: pfn count out of range")
+        except OSError, ex:
+            raise XendError("can't read guest state file %s: %s" %
+                            (src, ex[1]))
 
-            pfn_to_mfn_frame_list = fd.read_exact(PAGE_SIZE,
-                "not a valid guest state file: pfn_to_mfn_frame_list read")
-
-            l = fd.read_exact(sizeof_int,
-                              "not a valid guest state file: config size read")
-            vmconfig_size = unpack("i", l)[0] # XXX endianess
-            vmconfig_buf = fd.read_exact(vmconfig_size,
-                "not a valid guest state file: config read")
-
-            p = sxp.Parser()
-            p.input(vmconfig_buf)
-            if not p.ready:
-                raise XendError("not a valid guest state file: config parse")
-
-            vmconfig = p.get_val()
-            dominfo = self.domain_configure(vmconfig)
-
-            # XXXcl hack: fd.tell will sync up the object and
-            #             underlying file descriptor
-            ignore = fd.tell()
-
-            xc.linux_restore(fd.fileno(), int(dominfo.id), nr_pfns,
-                             pfn_to_mfn_frame_list)
-            return dominfo
-
-        except IOError, ex:
-            if ex.errno == errno.ENOENT:
-                raise XendError("can't open guest state file %s" % src)
-            else:
-                raise
-    
     def domain_get(self, id):
         """Get up-to-date info about a domain.
 
@@ -449,7 +402,7 @@ class XendDomain:
         if reason == 'halt':
             reason = 'poweroff'
         val = dominfo.shutdown(reason, key=key)
-        if reason != 'sysrq':
+        if not reason in ['suspend', 'sysrq']:
             self.domain_shutdowns()
         return val
 
@@ -475,7 +428,6 @@ class XendDomain:
                     pass
             else:
                 # Shutdown still pending.
-                print 'domain_shutdowns> pending: ', id
                 timeout = min(timeout, left)
         if timeout <= SHUTDOWN_TIMEOUT:
             # Pending shutdowns remain - reschedule.
@@ -559,8 +511,12 @@ class XendDomain:
         # Need a cancel too?
         # Don't forget to cancel restart for it.
         dominfo = self.domain_lookup(id)
-        xmigrate = XendMigrate.instance()
-        return xmigrate.migrate_begin(dominfo, dst, live=live, resource=resource)
+
+        port = xroot.get_xend_relocation_port()
+        sock = relocate.setupRelocation(dst, port)
+
+        XendCheckpoint.save(self, sock.fileno(), dominfo)
+        return None
 
     def domain_save(self, id, dst, progress=False):
         """Start saving a domain to file.
@@ -569,10 +525,18 @@ class XendDomain:
         @param dst:      destination file
         @param progress: output progress if true
         """
-        dominfo = self.domain_lookup(id)
-        xmigrate = XendMigrate.instance()
-        return xmigrate.save_begin(dominfo, dst)
-    
+
+        try:
+            dominfo = self.domain_lookup(id)
+
+            fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
+
+            return XendCheckpoint.save(self, fd, dominfo)
+
+        except OSError, ex:
+            raise XendError("can't write guest state file %s: %s" %
+                            (dst, ex[1]))
+
     def domain_pincpu(self, id, vcpu, cpumap):
         """Set which cpus vcpu can use
 
