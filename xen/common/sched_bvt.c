@@ -94,9 +94,9 @@ static inline int __task_on_runqueue(struct exec_domain *d)
 
 
 /* Warp/unwarp timer functions */
-static void warp_timer_fn(unsigned long pointer)
+static void warp_timer_fn(void *data)
 {
-    struct bvt_dom_info *inf = (struct bvt_dom_info *)pointer;
+    struct bvt_dom_info *inf = data;
     unsigned int cpu = inf->domain->exec_domain[0]->processor;
     
     spin_lock_irq(&schedule_data[cpu].schedule_lock);
@@ -110,16 +110,14 @@ static void warp_timer_fn(unsigned long pointer)
         cpu_raise_softirq(cpu, SCHEDULE_SOFTIRQ);   
     }
     
-    /* set unwarp timer */
-    inf->unwarp_timer.expires = NOW() + inf->warpu;
-    add_ac_timer(&inf->unwarp_timer);
+    set_ac_timer(&inf->unwarp_timer, NOW() + inf->warpu);
 
     spin_unlock_irq(&schedule_data[cpu].schedule_lock);
 }
 
-static void unwarp_timer_fn(unsigned long pointer)
+static void unwarp_timer_fn(void *data)
 {
-    struct bvt_dom_info *inf = (struct bvt_dom_info *)pointer;
+    struct bvt_dom_info *inf = data;
     unsigned int cpu = inf->domain->exec_domain[0]->processor;
 
     spin_lock_irq(&schedule_data[cpu].schedule_lock);
@@ -169,14 +167,19 @@ static inline u32 calc_evt(struct exec_domain *d, u32 avt)
 static int bvt_alloc_task(struct exec_domain *ed)
 {
     struct domain *d = ed->domain;
-    if ( (d->sched_priv == NULL) ) {
+
+    if ( (d->sched_priv == NULL) )
+    {
         if ( (d->sched_priv = xmalloc(struct bvt_dom_info)) == NULL )
             return -1;
         memset(d->sched_priv, 0, sizeof(struct bvt_dom_info));
     }
+
     ed->sched_priv = &BVT_INFO(d)->ed_inf[ed->vcpu_id];
+
     BVT_INFO(d)->ed_inf[ed->vcpu_id].inf = BVT_INFO(d);
     BVT_INFO(d)->ed_inf[ed->vcpu_id].exec_domain = ed;
+
     return 0;
 }
 
@@ -190,6 +193,15 @@ static void bvt_add_task(struct exec_domain *d)
     ASSERT(inf != NULL);
     ASSERT(d   != NULL);
 
+    /* Allocate per-CPU context if this is the first domain to be added. */
+    if ( CPU_INFO(d->processor) == NULL )
+    {
+        schedule_data[d->processor].sched_priv = xmalloc(struct bvt_cpu_info);
+        BUG_ON(CPU_INFO(d->processor) == NULL);
+        INIT_LIST_HEAD(RUNQUEUE(d->processor));
+        CPU_SVT(d->processor) = 0;
+    }
+
     if ( d->vcpu_id == 0 )
     {
         inf->mcu_advance = MCU_ADVANCE;
@@ -200,22 +212,18 @@ static void bvt_add_task(struct exec_domain *d)
         inf->warp_value  = 0;
         inf->warpl       = MILLISECS(2000);
         inf->warpu       = MILLISECS(1000);
-        /* initialise the timers */
-        init_ac_timer(&inf->warp_timer);
-        inf->warp_timer.cpu = d->processor;
-        inf->warp_timer.data = (unsigned long)inf;
-        inf->warp_timer.function = &warp_timer_fn;
-        init_ac_timer(&inf->unwarp_timer);
-        inf->unwarp_timer.cpu = d->processor;
-        inf->unwarp_timer.data = (unsigned long)inf;
-        inf->unwarp_timer.function = &unwarp_timer_fn;
+        /* Initialise the warp timers. */
+        init_ac_timer(&inf->warp_timer, warp_timer_fn, inf, d->processor);
+        init_ac_timer(&inf->unwarp_timer, unwarp_timer_fn, inf, d->processor);
     }
 
     einf->exec_domain = d;
 
-    if ( d->domain->domain_id == IDLE_DOMAIN_ID )
+    if ( is_idle_task(d->domain) )
     {
         einf->avt = einf->evt = ~0U;
+        BUG_ON(__task_on_runqueue(d));
+        __add_to_runqueue_head(d);
     } 
     else 
     {
@@ -223,20 +231,6 @@ static void bvt_add_task(struct exec_domain *d)
         einf->avt = CPU_SVT(d->processor);
         einf->evt = CPU_SVT(d->processor);
     }
-}
-
-static int bvt_init_idle_task(struct exec_domain *ed)
-{
-    if ( bvt_alloc_task(ed) < 0 )
-        return -1;
-
-    bvt_add_task(ed);
-
-    set_bit(_VCPUF_running, &ed->vcpu_flags);
-    if ( !__task_on_runqueue(ed) )
-        __add_to_runqueue_head(ed);
-
-    return 0;
 }
 
 static void bvt_wake(struct exec_domain *ed)
@@ -274,7 +268,7 @@ static void bvt_wake(struct exec_domain *ed)
     if ( is_idle_task(curr->domain) || (einf->evt <= curr_evt) )
         cpu_raise_softirq(cpu, SCHEDULE_SOFTIRQ);
     else if ( schedule_data[cpu].s_timer.expires > r_time )
-        mod_ac_timer(&schedule_data[cpu].s_timer, r_time);
+        set_ac_timer(&schedule_data[cpu].s_timer, r_time);
 }
 
 
@@ -437,13 +431,8 @@ static struct task_slice bvt_do_schedule(s_time_t now)
             min_avt = p_einf->avt;
     }
     
-    if(next_einf->inf->warp && next_einf->inf->warpl > 0)
-    {
-        /* Set the timer up */ 
-        next_einf->inf->warp_timer.expires = now + next_einf->inf->warpl;
-        /* Add it to the heap */
-        add_ac_timer(&next_einf->inf->warp_timer);
-    }
+    if ( next_einf->inf->warp && next_einf->inf->warpl > 0 )
+        set_ac_timer(&next_einf->inf->warp_timer, now + next_einf->inf->warpl);
    
     /* Extract the domain pointers from the dom infos */
     next        = next_einf->exec_domain;
@@ -548,36 +537,11 @@ static void bvt_dump_cpu_state(int i)
     }
 }
 
-/* Initialise the data structures. */
-static int bvt_init_scheduler(void)
-{
-    int i;
-
-    for ( i = 0; i < NR_CPUS; i++ )
-    {
-        schedule_data[i].sched_priv = xmalloc(struct bvt_cpu_info);
-       
-        if ( schedule_data[i].sched_priv == NULL )
-        {
-            printk("Failed to allocate BVT scheduler per-CPU memory!\n");
-            return -1;
-        }
-
-        INIT_LIST_HEAD(RUNQUEUE(i));
-        
-        CPU_SVT(i) = 0; /* XXX do I really need to do this? */
-    }
-
-    return 0;
-}
-
 struct scheduler sched_bvt_def = {
     .name     = "Borrowed Virtual Time",
     .opt_name = "bvt",
     .sched_id = SCHED_BVT,
     
-    .init_scheduler = bvt_init_scheduler,
-    .init_idle_task = bvt_init_idle_task,
     .alloc_task     = bvt_alloc_task,
     .add_task       = bvt_add_task,
     .free_task      = bvt_free_task,

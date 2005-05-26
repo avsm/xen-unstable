@@ -2,14 +2,13 @@ XEN_ROOT = ../
 include $(XEN_ROOT)/tools/Rules.mk
 
 SUBDIRS :=
-SUBDIRS += libxutil
 SUBDIRS += libxc
 SUBDIRS += misc
 SUBDIRS += examples
 SUBDIRS += xentrace
 SUBDIRS += python
-SUBDIRS += xfrd
 SUBDIRS += xcs
+SUBDIRS += xcutils
 SUBDIRS += pygrub
 
 .PHONY: all install clean check check_clean ioemu eioemuinstall ioemuclean
@@ -41,7 +40,7 @@ check_clean:
 ifndef XEN_NO_IOEMU
 ioemu ioemuinstall ioemuclean:
 	[ -f ioemu/config-host.h ] || \
-	(cd ioemu; ./configure --prefix=$(DESTDIR)/usr)
+	(cd ioemu; ./configure --prefix=usr)
 	$(MAKE) -C ioemu $(patsubst ioemu%,%,$@)
 else
 ioemu ioemuinstall ioemuclean:

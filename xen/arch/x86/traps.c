@@ -99,6 +99,7 @@ integer_param("debug_stack_lines", debug_stack_lines);
 
 static inline int kernel_text_address(unsigned long addr)
 {
+    extern char _stext, _etext;
     if (addr >= (unsigned long) &_stext &&
         addr <= (unsigned long) &_etext)
         return 1;
@@ -244,12 +245,6 @@ static inline int do_trap(int trapnr, char *str,
 
     if ( !GUEST_MODE(regs) )
         goto xen_fault;
-
-#ifndef NDEBUG
-    if ( (ed->arch.guest_context.trap_ctxt[trapnr].address == 0) &&
-         (ed->domain->domain_id == 0) )
-        goto xen_fault;
-#endif
 
     ti = &current->arch.guest_context.trap_ctxt[trapnr];
     tb->flags = TBF_EXCEPTION;
@@ -449,12 +444,6 @@ asmlinkage int do_page_fault(struct cpu_user_regs *regs)
 
     if ( !GUEST_MODE(regs) )
         goto xen_fault;
-
-#ifndef NDEBUG
-    if ( (ed->arch.guest_context.trap_ctxt[TRAP_page_fault].address == 0) &&
-         (d->domain_id == 0) )
-        goto xen_fault;
-#endif
 
     propagate_page_fault(addr, regs->error_code);
     return 0; 
@@ -930,12 +919,6 @@ asmlinkage int do_general_protection(struct cpu_user_regs *regs)
          (regs->error_code == 0) && 
          gpf_emulate_4gb(regs) )
         return 0;
-#endif
-
-#ifndef NDEBUG
-    if ( (ed->arch.guest_context.trap_ctxt[TRAP_gp_fault].address == 0) &&
-         (ed->domain->domain_id == 0) )
-        goto gp_in_kernel;
 #endif
 
     /* Pass on GPF as is. */

@@ -15,7 +15,6 @@
 #include <netdb.h>
 #include <arpa/inet.h>
 #include "xc_private.h"
-#include "gzip_stream.h"
 #include "linux_boot_params.h"
 
 /* Needed for Python versions earlier than 2.3. */
@@ -61,6 +60,13 @@ static PyObject *pyxc_domain_dumpcore(PyObject *self,
 
  exit:
     return NULL;
+}
+
+static PyObject *pyxc_handle(PyObject *self)
+{
+    XcObject *xc = (XcObject *)self;
+
+    return PyInt_FromLong(xc->xc_handle);
 }
 
 static PyObject *pyxc_domain_create(PyObject *self,
@@ -245,133 +251,6 @@ static PyObject *pyxc_domain_getinfo(PyObject *self,
     free(info);
 
     return list;
-}
-
-static int file_save(XcObject *xc, XcIOContext *ctxt, char *state_file)
-{
-    int rc = -1;
-    int fd = -1;
-    int open_flags = (O_CREAT | O_EXCL | O_WRONLY);
-    int open_mode = 0644;
-
-    printf("%s>\n", __FUNCTION__);
-
-    if ( (fd = open(state_file, open_flags, open_mode)) < 0 )
-    {
-        xcio_perror(ctxt, "Could not open file for writing");
-        goto exit;
-    }
-
-    printf("%s>gzip_stream_fdopen... \n", __FUNCTION__);
-
-    /* Compression rate 1: we want speed over compression. 
-     * We're mainly going for those zero pages, after all.
-     */
-    ctxt->io = gzip_stream_fdopen(fd, "wb1");
-    if ( ctxt->io == NULL )
-    {
-        xcio_perror(ctxt, "Could not allocate compression state");
-        goto exit;
-    }
-
-    printf("%s> xc_linux_save...\n", __FUNCTION__);
-
-    rc = xc_linux_save(xc->xc_handle, ctxt);
-
-  exit:
-    if ( ctxt->io != NULL )
-        IOStream_close(ctxt->io);
-    if ( fd >= 0 )
-        close(fd);
-    unlink(state_file);
-    printf("%s> rc=%d\n", __FUNCTION__, rc);
-    return rc;
-}
-
-static PyObject *pyxc_linux_save(PyObject *self,
-                                 PyObject *args,
-                                 PyObject *kwds)
-{
-    XcObject *xc = (XcObject *)self;
-
-    char *state_file;
-    int progress = 1, debug = 0;
-    PyObject *val = NULL;
-    int rc = -1;
-    XcIOContext ioctxt = { .info = iostdout, .err = iostderr };
-
-    static char *kwd_list[] = { "dom", "state_file", "vmconfig", "progress", "debug", NULL };
-
-    if ( !PyArg_ParseTupleAndKeywords(args, kwds, "is|sii", kwd_list, 
-                                      &ioctxt.domain,
-                                      &state_file,
-                                      &ioctxt.vmconfig,
-                                      &progress, 
-                                      &debug) )
-        goto exit;
-
-    ioctxt.vmconfig_n = (ioctxt.vmconfig ? strlen(ioctxt.vmconfig) : 0);
-
-    if ( progress )
-        ioctxt.flags |= XCFLAGS_VERBOSE;
-    if ( debug )
-        ioctxt.flags |= XCFLAGS_DEBUG;
-
-    if ( (state_file == NULL) || (state_file[0] == '\0') )
-        goto exit;
-    
-    rc = file_save(xc, &ioctxt, state_file);
-    if ( rc != 0 )
-    {
-        PyErr_SetFromErrno(xc_error);
-        goto exit;
-    } 
-
-    Py_INCREF(zero);
-    val = zero;
-
-  exit:
-    return val;
-}
-
-static PyObject *pyxc_linux_restore(PyObject *self,
-                                    PyObject *args,
-                                    PyObject *kwds)
-{
-    XcObject *xc = (XcObject *)self;
-    PyObject *val = NULL;
-    int rc =-1;
-    int io_fd, dom;
-    unsigned long nr_pfns;
-    char *pfn2mfn;
-    int pfn2mfn_len;
-    PyObject *pfn2mfn_object;
-
-    static char *kwd_list[] = { "fd", "dom", "pfns", "pfn2mfn", NULL };
-
-    if ( !PyArg_ParseTupleAndKeywords(args, kwds, "iilO", kwd_list,
-                                      &io_fd, &dom, &nr_pfns,
-				      &pfn2mfn_object) )
-        goto exit;
-
-    if (PyString_AsStringAndSize(pfn2mfn_object, &pfn2mfn, &pfn2mfn_len))
-	goto exit;
-
-    if (pfn2mfn_len != PAGE_SIZE)
-	goto exit;
-
-    rc = xc_linux_restore(xc->xc_handle, io_fd, dom, nr_pfns, pfn2mfn);
-    if ( rc != 0 )
-    {
-        PyErr_SetFromErrno(xc_error);
-        goto exit;
-    }
-
-    Py_INCREF(zero);
-    val = zero;
-
-  exit:
-    return val;
 }
 
 static PyObject *pyxc_linux_build(PyObject *self,
@@ -948,6 +827,11 @@ static PyObject *pyxc_domain_memory_increase_reservation(PyObject *self,
 
 
 static PyMethodDef pyxc_methods[] = {
+    { "handle",
+      (PyCFunction)pyxc_handle,
+      0, "\n"
+      "Query the xc control interface file descriptor.\n\n"
+      "Returns: [int] file descriptor\n" },
     { "domain_create", 
       (PyCFunction)pyxc_domain_create, 
       METH_VARARGS | METH_KEYWORDS, "\n"
@@ -1026,24 +910,6 @@ static PyMethodDef pyxc_methods[] = {
       " shutdown_reason [int]: Numeric code from guest OS, explaining "
       "reason why it shut itself down.\n" 
       " vcpu_to_cpu [[int]]: List that maps VCPUS to CPUS\n" },
-
-    { "linux_save", 
-      (PyCFunction)pyxc_linux_save, 
-      METH_VARARGS | METH_KEYWORDS, "\n"
-      "Save the CPU and memory state of a Linux guest OS.\n"
-      " dom        [int]:    Identifier of domain to be saved.\n"
-      " state_file [str]:    Name of state file. Must not currently exist.\n"
-      " progress   [int, 1]: Bool - display a running progress indication?\n\n"
-      "Returns: [int] 0 on success; -1 on error.\n" },
-
-    { "linux_restore", 
-      (PyCFunction)pyxc_linux_restore, 
-      METH_VARARGS | METH_KEYWORDS, "\n"
-      "Restore the CPU and memory state of a Linux guest OS.\n"
-      " dom        [int]:    Identifier of domain to be restored.\n"
-      " pfns       [int]:    Number of pages domain uses.\n"
-      " pfn2mfn    [str]:    String containing the pfn to mfn frame list.\n\n"
-      "Returns: [int] new domain identifier on success; -1 on error.\n" },
 
     { "linux_build", 
       (PyCFunction)pyxc_linux_build, 

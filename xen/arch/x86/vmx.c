@@ -22,10 +22,10 @@
 #include <xen/lib.h>
 #include <xen/trace.h>
 #include <xen/sched.h>
+#include <xen/irq.h>
 #include <xen/softirq.h>
 #include <asm/current.h>
 #include <asm/io.h>
-#include <asm/irq.h>
 #include <asm/shadow.h>
 #include <asm/regs.h>
 #include <asm/cpufeature.h>
@@ -43,12 +43,13 @@
 
 int vmcs_size;
 unsigned int opt_vmx_debug_level = 0;
+integer_param("vmx_debug", opt_vmx_debug_level);
 
 extern long evtchn_send(int lport);
 extern long do_block(void);
 void do_nmi(struct cpu_user_regs *, unsigned long);
 
-int start_vmx()
+int start_vmx(void)
 {
     struct vmcs_struct *vmcs;
     u32 ecx;
@@ -69,12 +70,14 @@ int start_vmx()
     if (eax & IA32_FEATURE_CONTROL_MSR_LOCK) {
         if ((eax & IA32_FEATURE_CONTROL_MSR_ENABLE_VMXON) == 0x0) {
                 printk("VMX disabled by Feature Control MSR.\n");
-		return 0;
+                return 0;
         }
     }
-    else 
+    else {
         wrmsr(IA32_FEATURE_CONTROL_MSR, 
-              IA32_FEATURE_CONTROL_MSR_LOCK | IA32_FEATURE_CONTROL_MSR_ENABLE_VMXON, 0);
+              IA32_FEATURE_CONTROL_MSR_LOCK |
+              IA32_FEATURE_CONTROL_MSR_ENABLE_VMXON, 0);
+    }
 
     set_in_cr4(X86_CR4_VMXE);   /* Enable VMXE */
 
@@ -92,7 +95,7 @@ int start_vmx()
     return 1;
 }
 
-void stop_vmx()
+void stop_vmx(void)
 {
     if (read_cr4() & X86_CR4_VMXE)
         __vmxoff();
@@ -166,7 +169,7 @@ static int vmx_do_page_fault(unsigned long va, struct cpu_user_regs *regs)
     return result;
 }
 
-static void vmx_do_no_device_fault() 
+static void vmx_do_no_device_fault(void)
 {
     unsigned long cr0;
         
@@ -1098,7 +1101,7 @@ asmlinkage void vmx_vmexit_handler(struct cpu_user_regs regs)
         unsigned long va;
 
         if ((error = __vmread(VM_EXIT_INTR_INFO, &vector))
-            && !(vector & INTR_INFO_VALID_MASK))
+            || !(vector & INTR_INFO_VALID_MASK))
             __vmx_bug(&regs);
         vector &= 0xff;
 
