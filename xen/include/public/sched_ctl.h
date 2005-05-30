@@ -1,4 +1,4 @@
-/**
+/******************************************************************************
  * Generic scheduler control interface.
  *
  * Mark Williamson, (C) 2004 Intel Research Cambridge
@@ -7,13 +7,11 @@
 #ifndef __XEN_PUBLIC_SCHED_CTL_H__
 #define __XEN_PUBLIC_SCHED_CTL_H__
 
-/* Scheduler types */
+/* Scheduler types. */
 #define SCHED_BVT      0
-#define SCHED_ATROPOS  2
-#define SCHED_RROBIN   3
+#define SCHED_SEDF     4
 
-/* these describe the intended direction used for a scheduler control or domain
- * command */
+/* Set or get info? */
 #define SCHED_INFO_PUT 0
 #define SCHED_INFO_GET 1
 
@@ -23,22 +21,14 @@
  */
 struct sched_ctl_cmd
 {
-    u32 sched_id;                     /*  0 */
-    u32 direction;                    /*  4 */
-    union {                           /*  8 */
-        struct bvt_ctl
-        {
-            /* IN variables. */
-            u32 ctx_allow;            /*  8: context switch allowance */
-        } PACKED bvt;
-
-        struct rrobin_ctl
-        {
-            /* IN variables */
-            u64 slice;                /*  8: round robin time slice */
-        } PACKED rrobin;
-    } PACKED u;
-} PACKED; /* 16 bytes */
+    u32 sched_id;
+    u32 direction;
+    union {
+        struct bvt_ctl {
+            u32 ctx_allow;
+        } bvt;
+    } u;
+};
 
 struct sched_adjdom_cmd
 {
@@ -56,14 +46,16 @@ struct sched_adjdom_cmd
             long long warpl;        /* 32: warp limit */
             long long warpu;        /* 40: unwarp time requirement */
         } PACKED bvt;
-
-        struct atropos_adjdom
+        
+	struct sedf_adjdom
         {
-            u64 nat_period; /* 16 */
-            u64 nat_slice;  /* 24 */
+            u64 period;     /* 16 */
+            u64 slice;      /* 24 */
             u64 latency;    /* 32 */
-            u32 xtratime;   /* 36 */
-        } PACKED atropos;
+            u16 extratime;  /* 36 */
+	    u16 weight;     /* 38 */
+        } PACKED sedf;
+
     } PACKED u;
 } PACKED; /* 40 bytes */
 

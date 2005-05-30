@@ -16,51 +16,65 @@
 
 void cmdline_parse(char *cmdline)
 {
-    unsigned char *opt_end, *opt;
+    char opt[100], *optval, *p = cmdline, *q;
     struct kernel_param *param;
     
-    if ( cmdline == NULL )
+    if ( p == NULL )
         return;
 
-    while ( *cmdline == ' ' )
-        cmdline++;
-    cmdline = strchr(cmdline, ' '); /* skip the image name */
-    while ( cmdline != NULL )
+    /* Skip whitespace and the image name. */
+    while ( *p == ' ' )
+        p++;
+    if ( (p = strchr(p, ' ')) == NULL )
+        return;
+
+    for ( ; ; )
     {
-        while ( *cmdline == ' ' )
-            cmdline++;
-        if ( *cmdline == '\0' )
+        /* Skip whitespace. */
+        while ( *p == ' ' )
+            p++;
+        if ( *p == '\0' )
             break;
-        opt_end = strchr(cmdline, ' ');
-        if ( opt_end != NULL )
-            *opt_end++ = '\0';
-        opt = strchr(cmdline, '=');
-        if ( opt != NULL )
-            *opt++ = '\0';
+
+        /* Grab the next whitespace-delimited option. */
+        q = opt;
+        while ( (*p != ' ') && (*p != '\0') )
+            *q++ = *p++;
+        *q = '\0';
+
+        /* Search for value part of a key=value option. */
+        optval = strchr(opt, '=');
+        if ( optval != NULL )
+            *optval++ = '\0';
+
         for ( param = &__setup_start; param != &__setup_end; param++ )
         {
-            if ( strcmp(param->name, cmdline ) != 0 )
+            if ( strcmp(param->name, opt ) != 0 )
                 continue;
+
             switch ( param->type )
             {
             case OPT_STR:
-                if ( opt != NULL )
+                if ( optval != NULL )
                 {
-                    strncpy(param->var, opt, param->len);
+                    strncpy(param->var, optval, param->len);
                     ((char *)param->var)[param->len-1] = '\0';
                 }
                 break;
             case OPT_UINT:
-                if ( opt != NULL )
+                if ( optval != NULL )
                     *(unsigned int *)param->var =
-                        simple_strtol(opt, (char **)&opt, 0);
+                        simple_strtol(optval, (char **)&optval, 0);
                 break;
             case OPT_BOOL:
                 *(int *)param->var = 1;
                 break;
+            case OPT_CUSTOM:
+                if ( optval != NULL )
+                    ((void (*)(char *))param->var)(optval);
+                break;
             }
         }
-        cmdline = opt_end;
     }
 }
 
@@ -75,10 +89,9 @@ long do_xen_version(int cmd)
     return (XEN_VERSION<<16) | (XEN_SUBVERSION);
 }
 
-vm_assist_info_t vm_assist_info[MAX_VMASST_TYPE + 1];
 long do_vm_assist(unsigned int cmd, unsigned int type)
 {
-    return vm_assist(current, cmd, type);
+    return vm_assist(current->domain, cmd, type);
 }
 
 long do_ni_hypercall(void)
@@ -86,3 +99,13 @@ long do_ni_hypercall(void)
     /* No-op hypercall. */
     return -ENOSYS;
 }
+
+/*
+ * Local variables:
+ * mode: C
+ * c-set-style: "BSD"
+ * c-basic-offset: 4
+ * tab-width: 4
+ * indent-tabs-mode: nil
+ * End:
+ */

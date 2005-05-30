@@ -2,6 +2,7 @@
 #define __ASM_SYSTEM_H
 
 #include <xen/config.h>
+#include <xen/types.h>
 #include <asm/bitops.h>
 
 /* Clear and set 'TS' bit respectively */
@@ -70,8 +71,8 @@ static always_inline unsigned long __xchg(unsigned long x, volatile void * ptr, 
  * indicated by comparing RETURN with OLD.
  */
 
-static always_inline unsigned long __cmpxchg(volatile void *ptr, unsigned long old,
-				      unsigned long new, int size)
+static always_inline unsigned long __cmpxchg(
+    volatile void *ptr, unsigned long old, unsigned long new, int size)
 {
 	unsigned long prev;
 	switch (size) {
@@ -112,9 +113,50 @@ static always_inline unsigned long __cmpxchg(volatile void *ptr, unsigned long o
 	return old;
 }
 
-#define cmpxchg(ptr,o,n)\
-	((__typeof__(*(ptr)))__cmpxchg((ptr),(unsigned long)(o),\
-					(unsigned long)(n),sizeof(*(ptr))))
+#define __HAVE_ARCH_CMPXCHG
+
+#if BITS_PER_LONG == 64
+
+#define cmpxchg(ptr,o,n)                                                \
+    ((__typeof__(*(ptr)))__cmpxchg((ptr),(unsigned long)(o),            \
+                                   (unsigned long)(n),sizeof(*(ptr))))
+#else
+
+static always_inline unsigned long long __cmpxchg8b(
+    volatile void *ptr, unsigned long long old, unsigned long long new)
+{
+    unsigned long long prev;
+    __asm__ __volatile__ (
+        LOCK_PREFIX "cmpxchg8b %3"
+        : "=A" (prev)
+        : "c" ((u32)(new>>32)), "b" ((u32)new),
+          "m" (*__xg((volatile void *)ptr)), "0" (old)
+        : "memory" );
+    return prev;
+}
+
+#define cmpxchg(ptr,o,n)                                \
+({                                                      \
+    __typeof__(*(ptr)) __prev;                          \
+    switch ( sizeof(*(ptr)) ) {                         \
+    case 8:                                             \
+        __prev = ((__typeof__(*(ptr)))__cmpxchg8b(      \
+            (ptr),                                      \
+            (unsigned long long)(o),                    \
+            (unsigned long long)(n)));                  \
+        break;                                          \
+    default:                                            \
+        __prev = ((__typeof__(*(ptr)))__cmpxchg(        \
+            (ptr),                                      \
+            (unsigned long)(o),                         \
+            (unsigned long)(n),                         \
+            sizeof(*(ptr))));                           \
+        break;                                          \
+    }                                                   \
+    __prev;                                             \
+})
+
+#endif
 
 
 /*
@@ -151,6 +193,23 @@ static always_inline unsigned long __cmpxchg(volatile void *ptr, unsigned long o
         break;                                                          \
     case 4:                                                             \
         __cmpxchg_user(_p,_o,_n,"l","","r");                            \
+        break;                                                          \
+    case 8:                                                             \
+        __asm__ __volatile__ (                                          \
+            "1: " LOCK_PREFIX "cmpxchg8b %4\n"                          \
+            "2:\n"                                                      \
+            ".section .fixup,\"ax\"\n"                                  \
+            "3:     movl $1,%1\n"                                       \
+            "       jmp 2b\n"                                           \
+            ".previous\n"                                               \
+            ".section __ex_table,\"a\"\n"                               \
+            "       .align 4\n"                                         \
+            "       .long 1b,3b\n"                                      \
+            ".previous"                                                 \
+            : "=A" (_o), "=r" (_rc)                                     \
+            : "c" ((u32)((u64)(_n)>>32)), "b" ((u32)(_n)),              \
+              "m" (*__xg((volatile void *)(_p))), "0" (_o), "1" (0)     \
+            : "memory");                                                \
         break;                                                          \
     }                                                                   \
     _rc;                                                                \
@@ -273,5 +332,7 @@ static inline int local_irq_is_enabled(void)
 
 #define BROKEN_ACPI_Sx		0x0001
 #define BROKEN_INIT_AFTER_S1	0x0002
+
+extern int es7000_plat;
 
 #endif

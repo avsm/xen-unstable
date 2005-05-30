@@ -7,11 +7,12 @@ export prefix?=$(shell cd ../../dist/install && pwd)
 
 .PHONY: all compile
 .PHONY: gc-install gc-clean gc-prstine
-.PHONY: vnetd vnet-module install dist clean pristine
+.PHONY: libxutil vnetd vnet-module install dist clean pristine
 
 all: compile
 
-compile: vnetd vnet-module
+compile: libxutil vnetd vnet-module
+#compile: vnet-module
 
 gc.tar.gz:
 	wget http://www.hpl.hp.com/personal/Hans_Boehm/gc/gc_source/$@
@@ -20,10 +21,8 @@ gc: gc.tar.gz
 	tar xfz gc.tar.gz
 	ln -sf gc?.? gc
 
-gc/.configure-makefile:
-	(cd gc && ./configure --prefix=`pwd`/install && touch .configure-makefile)
-
-gc-install: gc gc/.configure-makefile
+gc-install: gc 
+	(cd gc && make test && ./configure --prefix=`pwd`/install)
 	make -C gc
 	make -C gc install
 
@@ -33,6 +32,9 @@ gc-clean:
 gc-pristine:
 	-rm -rf gc?.? gc
 
+libxutil:
+	$(MAKE) -C libxutil
+
 vnetd: gc-install
 	$(MAKE) -C vnetd
 
@@ -40,12 +42,15 @@ vnet-module:
 	$(MAKE) -C vnet-module
 
 install: compile
+	$(MAKE) -C libxutil install
 	$(MAKE) -C vnetd install
 	$(MAKE) -C vnet-module install
 	$(MAKE) -C examples install
 
 clean:
+	-$(MAKE) -C libxutil clean
 	-$(MAKE) -C vnetd clean
 	-$(MAKE) -C vnet-module clean
+	-rm -rf gc?.? gc
 
 pristine: clean gc-pristine

@@ -1,16 +1,25 @@
 
 include $(BASEDIR)/Rules.mk
 
-ifneq ($(debugger),y)
-OBJS := $(subst pdb-linux.o,,$(OBJS))
-OBJS := $(subst pdb-stub.o,,$(OBJS))
-endif
-
 OBJS += $(patsubst %.S,%.o,$(wildcard $(TARGET_SUBARCH)/*.S))
 OBJS += $(patsubst %.c,%.o,$(wildcard $(TARGET_SUBARCH)/*.c))
+OBJS += $(patsubst %.c,%.o,$(wildcard acpi/*.c))
 OBJS += $(patsubst %.c,%.o,$(wildcard mtrr/*.c))
+OBJS += $(patsubst %.c,%.o,$(wildcard genapic/*.c))
+OBJS += $(patsubst %.c,%.o,$(wildcard cpu/*.c))
+
+ifeq ($(TARGET_SUBARCH),x86_64) 
+OBJS := $(subst cpu/centaur.o,,$(OBJS))
+OBJS := $(subst cpu/cyrix.o,,$(OBJS))
+OBJS := $(subst cpu/rise.o,,$(OBJS))
+OBJS := $(subst cpu/transmeta.o,,$(OBJS))
+endif
 
 OBJS := $(subst $(TARGET_SUBARCH)/asm-offsets.o,,$(OBJS))
+
+ifneq ($(crash_debug),y)
+OBJS := $(patsubst cdb%.o,,$(OBJS))
+endif
 
 default: $(TARGET)
 
@@ -24,7 +33,7 @@ $(TARGET)-syms: boot/$(TARGET_SUBARCH).o $(ALL_OBJS) $(TARGET_SUBARCH)/xen.lds
 	$(LD) $(LDFLAGS) -T $(TARGET_SUBARCH)/xen.lds -N \
 	    boot/$(TARGET_SUBARCH).o $(ALL_OBJS) -o $@
 
-asm-offsets.s: $(TARGET_SUBARCH)/asm-offsets.c
+asm-offsets.s: $(TARGET_SUBARCH)/asm-offsets.c $(HDRS)
 	$(CC) $(CFLAGS) -S -o $@ $<
 
 boot/mkelf32: boot/mkelf32.c
@@ -35,6 +44,9 @@ clean:
 	rm -f x86_32/*.o x86_32/*~ x86_32/core
 	rm -f x86_64/*.o x86_64/*~ x86_64/core
 	rm -f mtrr/*.o mtrr/*~ mtrr/core
+	rm -f acpi/*.o acpi/*~ acpi/core
+	rm -f genapic/*.o genapic/*~ genapic/core
+	rm -f cpu/*.o cpu/*~ cpu/core
 
 delete-unfresh-files:
 	# nothing
