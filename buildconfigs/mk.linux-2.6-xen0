@@ -29,13 +29,17 @@ $(LINUX_DIR)/include/linux/autoconf.h: ref-$(OS)-$(LINUX_VER)/.valid-ref
 	CONFIG_VERSION=$$(sed -ne 's/^EXTRAVERSION = //p' $(LINUX_DIR)/Makefile); \
 	[ -r $(DESTDIR)/boot/config-$(LINUX_VER)$$CONFIG_VERSION-$(EXTRAVERSION) ] && \
 	  cp $(DESTDIR)/boot/config-$(LINUX_VER)$$CONFIG_VERSION-$(EXTRAVERSION) $(LINUX_DIR)/.config \
-	  || cp $(LINUX_DIR)/arch/xen/configs/$(EXTRAVERSION)_defconfig \
+	  || cp $(LINUX_DIR)/arch/xen/configs/$(EXTRAVERSION)_defconfig_$(XEN_TARGET_ARCH) \
 		$(LINUX_DIR)/.config
 	# Patch kernel Makefile to set EXTRAVERSION
 	( cd $(LINUX_DIR) ; \
 	  sed -e 's/^EXTRAVERSION.*/&$$(XENGUEST)\nXENGUEST = -$(EXTRAVERSION)/' Makefile >Mk.tmp ; \
 	  rm -f Makefile ; mv Mk.tmp Makefile )
 	$(MAKE) -C $(LINUX_DIR) ARCH=xen oldconfig
+
+config: CONFIGMODE = menuconfig
+config: $(LINUX_DIR)/include/linux/autoconf.h
+	$(MAKE) -C $(LINUX_DIR) ARCH=xen $(CONFIGMODE)
 
 clean::
 	$(MAKE) -C $(LINUX_DIR) ARCH=xen clean

@@ -40,6 +40,7 @@
 #include <linux/init.h>
 #include <linux/bitops.h>
 #include <linux/proc_fs.h>
+#include <linux/ethtool.h>
 #include <net/sock.h>
 #include <net/pkt_sched.h>
 #include <net/arp.h>
@@ -51,6 +52,7 @@
 #include <asm-xen/xen-public/io/netif.h>
 #include <asm-xen/balloon.h>
 #include <asm/page.h>
+#include <asm/uaccess.h>
 
 #ifndef __GFP_NOWARN
 #define __GFP_NOWARN 0
@@ -394,19 +396,13 @@ static void network_alloc_rx_buffers(struct net_device *dev)
 	    = INVALID_P2M_ENTRY;
 
         rx_mcl[i].op = __HYPERVISOR_update_va_mapping;
-        rx_mcl[i].args[0] = (unsigned long)skb->head >> PAGE_SHIFT;
+        rx_mcl[i].args[0] = (unsigned long)skb->head;
         rx_mcl[i].args[1] = 0;
         rx_mcl[i].args[2] = 0;
     }
 
-    /*
-     * We may have allocated buffers which have entries outstanding in the page
-     * update queue -- make sure we flush those first!
-     */
-    flush_page_update_queue();
-
     /* After all PTEs have been zapped we blow away stale TLB entries. */
-    rx_mcl[i-1].args[2] = UVMF_FLUSH_TLB;
+    rx_mcl[i-1].args[2] = UVMF_TLB_FLUSH|UVMF_ALL;
 
     /* Give away a batch of pages. */
     rx_mcl[i].op = __HYPERVISOR_dom_mem_op;
@@ -478,6 +474,7 @@ static int network_start_xmit(struct sk_buff *skb, struct net_device *dev)
     tx->id   = id;
     tx->addr = virt_to_machine(skb->data);
     tx->size = skb->len;
+    tx->csum_blank = (skb->ip_summed == CHECKSUM_HW);
 
     wmb(); /* Ensure that backend will see the request. */
     np->tx->req_prod = i + 1;
@@ -578,6 +575,9 @@ static int netif_poll(struct net_device *dev, int *pbudget)
         skb->len  = rx->status;
         skb->tail = skb->data + skb->len;
 
+        if ( rx->csum_valid )
+            skb->ip_summed = CHECKSUM_UNNECESSARY;
+
         np->stats.rx_packets++;
         np->stats.rx_bytes += rx->status;
 
@@ -586,7 +586,7 @@ static int netif_poll(struct net_device *dev, int *pbudget)
         mmu->val  = __pa(skb->head) >> PAGE_SHIFT;
         mmu++;
         mcl->op = __HYPERVISOR_update_va_mapping;
-        mcl->args[0] = (unsigned long)skb->head >> PAGE_SHIFT;
+        mcl->args[0] = (unsigned long)skb->head;
         mcl->args[1] = (rx->addr & PAGE_MASK) | __PAGE_KERNEL;
         mcl->args[2] = 0;
         mcl++;
@@ -606,6 +606,7 @@ static int netif_poll(struct net_device *dev, int *pbudget)
         mcl->args[0] = (unsigned long)rx_mmu;
         mcl->args[1] = mmu - rx_mmu;
         mcl->args[2] = 0;
+        mcl->args[3] = DOMID_SELF;
         mcl++;
         (void)HYPERVISOR_multicall(rx_mcl, mcl - rx_mcl);
     }
@@ -928,6 +929,11 @@ vif_connect(struct net_private *np, netif_fe_interface_status_t *status)
     vif_show(np);
 }
 
+static struct ethtool_ops network_ethtool_ops =
+{
+    .get_tx_csum = ethtool_op_get_tx_csum,
+    .set_tx_csum = ethtool_op_set_tx_csum,
+};
 
 /** Create a network device.
  * @param handle device handle
@@ -971,7 +977,10 @@ static int create_netdev(int handle, struct net_device **val)
     dev->get_stats       = network_get_stats;
     dev->poll            = netif_poll;
     dev->weight          = 64;
-    
+    dev->features        = NETIF_F_IP_CSUM;
+
+    SET_ETHTOOL_OPS(dev, &network_ethtool_ops);
+
     if ((err = register_netdev(dev)) != 0) {
         printk(KERN_WARNING "%s> register_netdev err=%d\n", __FUNCTION__, err);
         goto exit;
@@ -1122,18 +1131,13 @@ static void netif_ctrlif_rx(ctrl_msg_t *msg, unsigned long id)
 
     switch (msg->subtype) {
     case CMSG_NETIF_FE_INTERFACE_STATUS:
-        if (msg->length != sizeof(netif_fe_interface_status_t))
-            goto error;
         netif_interface_status((netif_fe_interface_status_t *) &msg->msg[0]);
         break;
 
     case CMSG_NETIF_FE_DRIVER_STATUS:
-        if (msg->length != sizeof(netif_fe_driver_status_t))
-            goto error;
         netif_driver_status((netif_fe_driver_status_t *) &msg->msg[0]);
         break;
 
-    error:
     default:
         msg->length = 0;
         break;
