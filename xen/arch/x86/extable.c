@@ -3,6 +3,11 @@
 #include <xen/spinlock.h>
 #include <asm/uaccess.h>
 
+#ifdef PERF_COUNTERS
+#include <xen/sched.h>
+#include <xen/perfc.h>
+#endif
+
 extern struct exception_table_entry __start___ex_table[];
 extern struct exception_table_entry __stop___ex_table[];
 extern struct exception_table_entry __start___pre_ex_table[];
@@ -63,11 +68,15 @@ search_exception_table(unsigned long addr)
 }
 
 unsigned long
-search_pre_exception_table(struct xen_regs *regs)
+search_pre_exception_table(struct cpu_user_regs *regs)
 {
     unsigned long addr = (unsigned long)regs->eip;
     unsigned long fixup = search_one_table(
         __start___pre_ex_table, __stop___pre_ex_table-1, addr);
-    DPRINTK("Pre-exception: %08lx -> %08lx\n", addr, fixup);
+    DPRINTK("Pre-exception: %p -> %p\n", _p(addr), _p(fixup));
+#ifdef PERF_COUNTERS
+    if ( fixup )
+        perfc_incrc(exception_fixed);
+#endif
     return fixup;
 }
