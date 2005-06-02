@@ -6,7 +6,6 @@
 #include <xen/types.h>
 #include <xen/spinlock.h>
 #include <xen/cache.h>
-#include <asm/regs.h>
 #include <xen/smp.h>
 #include <asm/page.h>
 #include <asm/processor.h>
@@ -167,8 +166,6 @@ struct domain_setup_info
     unsigned int xen_elf_image;
 };
 
-#include <asm/uaccess.h> /* for KERNEL_DS */
-
 extern struct domain idle0_domain;
 extern struct vcpu idle0_vcpu;
 
@@ -274,8 +271,6 @@ extern void context_switch(
 /* Called by the scheduler to continue running the current vcpu. */
 extern void continue_running(
     struct vcpu *same);
-
-void domain_init(void);
 
 int idle_cpu(int cpu); /* Is CPU 'cpu' idle right now? */
 
