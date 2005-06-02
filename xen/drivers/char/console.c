@@ -18,6 +18,8 @@
 #include <xen/serial.h>
 #include <xen/keyhandler.h>
 #include <xen/mm.h>
+#include <xen/delay.h>
+#include <asm/current.h>
 #include <asm/uaccess.h>
 #include <asm/debugger.h>
 #include <asm/io.h>

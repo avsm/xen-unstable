@@ -70,12 +70,14 @@
  */
 
 #include <xen/config.h>
+#include <xen/lib.h>
 #include <xen/kernel.h>
 #include <xen/init.h>
 #include <xen/sched.h>
-#include <xen/slab.h>
+#include <xen/smp.h>
 #include <xen/spinlock.h>
 
+#include <asm/current.h>
 #include <asm/msr.h>
 #include <asm/uaccess.h>
 #include <asm/processor.h>
