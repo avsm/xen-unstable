@@ -18,6 +18,7 @@
 #include <asm/system.h>
 #include <asm/ldt.h>
 #include <asm/desc.h>
+#include <asm/mmu_context.h>
 
 #ifdef CONFIG_SMP /* avoids "defined but not used" warnig */
 static void flush_ldt(void *null)
@@ -72,7 +73,6 @@ static int alloc_ldt(mm_context_t *pc, int mincount, int reload)
 	if (oldsize) {
 		make_pages_writable(oldldt, (oldsize * LDT_ENTRY_SIZE) /
 			PAGE_SIZE);
-		flush_page_update_queue();
 		if (oldsize*LDT_ENTRY_SIZE > PAGE_SIZE)
 			vfree(oldldt);
 		else
@@ -89,7 +89,6 @@ static inline int copy_ldt(mm_context_t *new, mm_context_t *old)
 	memcpy(new->ldt, old->ldt, old->size*LDT_ENTRY_SIZE);
 	make_pages_readonly(new->ldt, (new->size * LDT_ENTRY_SIZE) /
 			    PAGE_SIZE);
-	flush_page_update_queue();
 	return 0;
 }
 
@@ -102,13 +101,18 @@ int init_new_context(struct task_struct *tsk, struct mm_struct *mm)
 	struct mm_struct * old_mm;
 	int retval = 0;
 
+	memset(&mm->context, 0, sizeof(mm->context));
 	init_MUTEX(&mm->context.sem);
-	mm->context.size = 0;
 	old_mm = current->mm;
 	if (old_mm && old_mm->context.size > 0) {
 		down(&old_mm->context.sem);
 		retval = copy_ldt(&mm->context, &old_mm->context);
 		up(&old_mm->context.sem);
+	}
+	if (retval == 0) {
+		spin_lock(&mm_unpinned_lock);
+		list_add(&mm->context.unpinned, &mm_unpinned);
+		spin_unlock(&mm_unpinned_lock);
 	}
 	return retval;
 }
@@ -124,12 +128,16 @@ void destroy_context(struct mm_struct *mm)
 		make_pages_writable(mm->context.ldt, 
 				    (mm->context.size * LDT_ENTRY_SIZE) /
 				    PAGE_SIZE);
-		flush_page_update_queue();
 		if (mm->context.size*LDT_ENTRY_SIZE > PAGE_SIZE)
 			vfree(mm->context.ldt);
 		else
 			kfree(mm->context.ldt);
 		mm->context.size = 0;
+	}
+	if (!mm->context.pinned) {
+		spin_lock(&mm_unpinned_lock);
+		list_del(&mm->context.unpinned);
+		spin_unlock(&mm_unpinned_lock);
 	}
 }
 

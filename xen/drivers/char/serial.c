@@ -1,314 +1,198 @@
 /******************************************************************************
  * serial.c
  * 
- * Driver for 16550-series UARTs. This driver is to be kept within Xen as
- * it permits debugging of seriously-toasted machines (e.g., in situations
- * where a device driver within a guest OS would be inaccessible).
+ * Framework for serial device drivers.
  * 
- * Copyright (c) 2003-2004, K A Fraser
+ * Copyright (c) 2003-2005, K A Fraser
  */
 
 #include <xen/config.h>
 #include <xen/init.h>
 #include <xen/irq.h>
 #include <xen/keyhandler.h> 
-#include <asm/pdb.h>
 #include <xen/reboot.h>
 #include <xen/sched.h>
 #include <xen/serial.h>
-#include <asm/io.h>
 
-/* opt_com[12]: Config serial port with a string <baud>,DPS,<io-base>,<irq>. */
-static unsigned char opt_com1[30] = "", opt_com2[30] = "";
-string_param("com1", opt_com1);
-string_param("com2", opt_com2);
-
-/* Register offsets */
-#define RBR             0x00    /* receive buffer       */
-#define THR             0x00    /* transmit holding     */
-#define IER             0x01    /* interrupt enable     */
-#define IIR             0x02    /* interrupt identity   */
-#define FCR             0x02    /* FIFO control         */
-#define LCR             0x03    /* line control         */
-#define MCR             0x04    /* Modem control        */
-#define LSR             0x05    /* line status          */
-#define MSR             0x06    /* Modem status         */
-#define DLL             0x00    /* divisor latch (ls) ( DLAB=1)	*/
-#define DLM             0x01    /* divisor latch (ms) ( DLAB=1)	*/
-
-/* Interrupt Enable Register */
-#define IER_ERDAI       0x01    /* rx data recv'd       */
-#define IER_ETHREI      0x02    /* tx reg. empty        */
-#define IER_ELSI        0x04    /* rx line status       */
-#define IER_EMSI        0x08    /* MODEM status	        */
-
-/* FIFO control register */
-#define FCR_ENABLE      0x01    /* enable FIFO          */
-#define FCR_CLRX        0x02    /* clear Rx FIFO        */
-#define FCR_CLTX        0x04    /* clear Tx FIFO        */
-#define FCR_DMA         0x10    /* enter DMA mode       */
-#define FCR_TRG1        0x00    /* Rx FIFO trig lev 1   */
-#define FCR_TRG4        0x40    /* Rx FIFO trig lev 4   */
-#define FCR_TRG8        0x80    /* Rx FIFO trig lev 8   */
-#define FCR_TRG14       0xc0    /* Rx FIFO trig lev 14  */
-
-/* Line control register */
-#define LCR_DLAB        0x80    /* Divisor Latch Access */
-
-/* Modem Control Register */
-#define MCR_DTR         0x01    /* Data Terminal Ready  */
-#define MCR_RTS         0x02    /* Request to Send      */
-#define MCR_OUT2        0x08    /* OUT2: interrupt mask */
-
-/* Line Status Register */
-#define LSR_DR          0x01    /* Data ready           */
-#define LSR_OE          0x02    /* Overrun              */
-#define LSR_PE          0x04    /* Parity error         */
-#define LSR_FE          0x08    /* Framing error        */
-#define LSR_BI          0x10    /* Break                */
-#define LSR_THRE        0x20    /* Xmit hold reg empty  */
-#define LSR_TEMT        0x40    /* Xmitter empty        */
-#define LSR_ERR         0x80    /* Error                */
-
-/* These parity settings can be ORed directly into the LCR. */
-#define PARITY_NONE     (0<<3)
-#define PARITY_ODD      (1<<3)
-#define PARITY_EVEN     (3<<3)
-#define PARITY_MARK     (5<<3)
-#define PARITY_SPACE    (7<<3)
-
-#define RXBUFSZ 32
-#define MASK_RXBUF_IDX(_i) ((_i)&(RXBUFSZ-1))
-typedef struct {
-    int              baud, data_bits, parity, stop_bits, io_base, irq;
-    serial_rx_fn     rx_lo, rx_hi, rx;
-    spinlock_t       lock;
-    unsigned char    rxbuf[RXBUFSZ];
-    unsigned int     rxbufp, rxbufc;
-    struct irqaction irqaction;
-} uart_t;
-
-static uart_t com[2] = {
-    { 0, 0, 0, 0, 0x3f8, 4,
-      NULL, NULL, NULL,
-      SPIN_LOCK_UNLOCKED },
-    { 0, 0, 0, 0, 0x2f8, 3,
-      NULL, NULL, NULL,
-      SPIN_LOCK_UNLOCKED }
+static struct serial_port com[2] = {
+    { .lock = SPIN_LOCK_UNLOCKED }, 
+    { .lock = SPIN_LOCK_UNLOCKED }
 };
 
-#define UART_ENABLED(_u) ((_u)->baud != 0)
-#define DISABLE_UART(_u) ((_u)->baud = 0)
-
-#ifdef CONFIG_X86
-static inline int arch_serial_putc(uart_t *uart, unsigned char c)
+void serial_rx_interrupt(struct serial_port *port, struct cpu_user_regs *regs)
 {
-    int space;
-    if ( (space = (inb(uart->io_base + LSR) & LSR_THRE)) )
-        outb(c, uart->io_base + THR);
-    return space;
-}
-#endif
+    char c;
+    serial_rx_fn fn = NULL;
+    unsigned long flags;
 
+    spin_lock_irqsave(&port->lock, flags);
 
-/***********************
- * PRIVATE FUNCTIONS
- */
-
-static void uart_rx(uart_t *uart, struct xen_regs *regs)
-{
-    unsigned char c;
-
-    if ( !UART_ENABLED(uart) )
-        return;
-
-    /*
-     * No need for the uart spinlock here. Only the uart's own interrupt
-     * handler will read from the RBR and the handler isn't reentrant.
-     * Calls to serial_getc() will disable this handler before proceeding.
-     */
-    while ( inb(uart->io_base + LSR) & LSR_DR )
+    if ( port->driver->getc(port, &c) )
     {
-        c = inb(uart->io_base + RBR);
-        if ( uart->rx != NULL )
-            uart->rx(c, regs);
-        else if ( (c & 0x80) && (uart->rx_hi != NULL) )
-            uart->rx_hi(c&0x7f, regs);
-        else if ( !(c & 0x80) && (uart->rx_lo != NULL) )
-            uart->rx_lo(c&0x7f, regs);
-        else if ( (uart->rxbufp - uart->rxbufc) != RXBUFSZ )
-            uart->rxbuf[MASK_RXBUF_IDX(uart->rxbufp++)] = c;            
+        if ( port->rx != NULL )
+            fn = port->rx;
+        else if ( (c & 0x80) && (port->rx_hi != NULL) )
+            fn = port->rx_hi;
+        else if ( !(c & 0x80) && (port->rx_lo != NULL) )
+            fn = port->rx_lo;
+        else if ( (port->rxbufp - port->rxbufc) != SERIAL_RXBUFSZ )
+            port->rxbuf[MASK_SERIAL_RXBUF_IDX(port->rxbufp++)] = c;            
+    }
+
+    spin_unlock_irqrestore(&port->lock, flags);
+
+    if ( fn != NULL )
+        (*fn)(c & 0x7f, regs);
+}
+
+void serial_tx_interrupt(struct serial_port *port, struct cpu_user_regs *regs)
+{
+    int i;
+    unsigned long flags;
+
+    spin_lock_irqsave(&port->lock, flags);
+
+    if ( port->driver->tx_empty(port) )
+    {
+        for ( i = 0; i < port->tx_fifo_size; i++ )
+        {
+            if ( port->txbufc == port->txbufp )
+                break;
+            port->driver->putc(
+                port, port->txbuf[MASK_SERIAL_TXBUF_IDX(port->txbufc++)]);
+        }
+    }
+
+    spin_unlock_irqrestore(&port->lock, flags);
+}
+
+static void __serial_putc(struct serial_port *port, char c)
+{
+    int i;
+
+    if ( (port->txbuf != NULL) && !port->sync )
+    {
+        /* Interrupt-driven (asynchronous) transmitter. */
+        if ( (port->txbufp - port->txbufc) == SERIAL_TXBUFSZ )
+        {
+            /* Buffer is full: we spin, but could alternatively drop chars. */
+            while ( !port->driver->tx_empty(port) )
+                cpu_relax();
+            for ( i = 0; i < port->tx_fifo_size; i++ )
+                port->driver->putc(
+                    port, port->txbuf[MASK_SERIAL_TXBUF_IDX(port->txbufc++)]);
+            port->txbuf[MASK_SERIAL_TXBUF_IDX(port->txbufp++)] = c;
+        }
+        else if ( ((port->txbufp - port->txbufc) == 0) &&
+                  port->driver->tx_empty(port) )
+        {
+            /* Buffer and UART FIFO are both empty. */
+            port->driver->putc(port, c);
+        }
+        else
+        {
+            /* Normal case: buffer the character. */
+            port->txbuf[MASK_SERIAL_TXBUF_IDX(port->txbufp++)] = c;
+        }
+    }
+    else if ( port->driver->tx_empty )
+    {
+        /* Synchronous finite-capacity transmitter. */
+        while ( !port->driver->tx_empty(port) )
+            cpu_relax();
+        port->driver->putc(port, c);
+    }
+    else
+    {
+        /* Simple synchronous transmitter. */
+        port->driver->putc(port, c);
     }
 }
 
-static void serial_interrupt(int irq, void *dev_id, struct xen_regs *regs)
+void serial_putc(int handle, char c)
 {
-    uart_rx((uart_t *)dev_id, regs);
-}
-
-static inline void __serial_putc(uart_t *uart, int handle, unsigned char c)
-{
+    struct serial_port *port = &com[handle & SERHND_IDX];
     unsigned long flags;
-    int space;
+
+    if ( (handle == -1) || !port->driver || !port->driver->putc )
+        return;
+
+    spin_lock_irqsave(&port->lock, flags);
 
     if ( (c == '\n') && (handle & SERHND_COOKED) )
-        __serial_putc(uart, handle, '\r');
+        __serial_putc(port, '\r');
 
     if ( handle & SERHND_HI )
         c |= 0x80;
     else if ( handle & SERHND_LO )
         c &= 0x7f;
 
-    do { 
-        spin_lock_irqsave(&uart->lock, flags);
-        space = arch_serial_putc(uart, c);
-        spin_unlock_irqrestore(&uart->lock, flags);
-    }
-    while ( !space );
+    __serial_putc(port, c);
+
+    spin_unlock_irqrestore(&port->lock, flags);
 }
 
-#define PARSE_ERR(_f, _a...)                 \
-    do {                                     \
-        printk( "ERROR: " _f "\n" , ## _a ); \
-        DISABLE_UART(uart);                  \
-        return;                              \
-} while ( 0 )
-        
-static void parse_port_config(char *conf, uart_t *uart)
+void serial_puts(int handle, const char *s)
 {
-    if ( *conf == '\0' )
+    struct serial_port *port = &com[handle & SERHND_IDX];
+    unsigned long flags;
+    char c;
+
+    if ( (handle == -1) || !port->driver || !port->driver->putc )
         return;
 
-    uart->baud = simple_strtol(conf, &conf, 10);
-    if ( (uart->baud < 1200) || (uart->baud > 115200) )
-        PARSE_ERR("Baud rate %d outside supported range.", uart->baud);
+    spin_lock_irqsave(&port->lock, flags);
 
-    if ( *conf != ',' )
-        PARSE_ERR("Missing data/parity/stop specifiers.");
-
-    conf++;
-
-    uart->data_bits = simple_strtol(conf, &conf, 10);
-    if ( (uart->data_bits < 5) || (uart->data_bits > 8) )
-        PARSE_ERR("%d data bits are unsupported.", uart->data_bits);
-
-    switch ( *conf )
+    while ( (c = *s++) != '\0' )
     {
-    case 'n':
-        uart->parity = PARITY_NONE;
-        break;
-    case 'o': 
-        uart->parity =  PARITY_ODD;
-        break;
-    case 'e': 
-        uart->parity =  PARITY_EVEN;
-        break;
-    case 'm': 
-        uart->parity =  PARITY_MARK;
-        break;
-    case 's': 
-        uart->parity =  PARITY_SPACE;
-        break;
+        if ( (c == '\n') && (handle & SERHND_COOKED) )
+            __serial_putc(port, '\r');
 
-    default:
-        PARSE_ERR("Invalid parity specifier '%c'.", *conf);
+        if ( handle & SERHND_HI )
+            c |= 0x80;
+        else if ( handle & SERHND_LO )
+            c &= 0x7f;
+
+        __serial_putc(port, c);
     }
 
-    conf++;
+    spin_unlock_irqrestore(&port->lock, flags);
+}
 
-    uart->stop_bits = simple_strtol(conf, &conf, 10);
-    if ( (uart->stop_bits < 1) || (uart->stop_bits > 2) )
-        PARSE_ERR("%d stop bits are unsupported.", uart->stop_bits);
+char serial_getc(int handle)
+{
+    struct serial_port *port = &com[handle & SERHND_IDX];
+    char c;
+    unsigned long flags;
 
-    if ( *conf == ',' )
-    {
-        conf++;
+    if ( (handle == -1) || !port->driver || !port->driver->getc )
+        return '\0';
 
-        uart->io_base = simple_strtol(conf, &conf, 0);
-        if ( (uart->io_base <= 0x0000) || (uart->io_base > 0xfff0) )
-            PARSE_ERR("I/O port base 0x%x is outside the supported range.",
-                      uart->io_base);
-
-        if ( *conf != ',' )
-            PARSE_ERR("Missing IRQ specifier.");
+    do {        
+        for ( ; ; )
+        {
+            spin_lock_irqsave(&port->lock, flags);
             
-        conf++;
+            if ( port->rxbufp != port->rxbufc )
+            {
+                c = port->rxbuf[MASK_SERIAL_RXBUF_IDX(port->rxbufc++)];
+                break;
+            }
             
-        uart->irq = simple_strtol(conf, &conf, 10);
-        if ( (uart->irq <= 0) || (uart->irq >= 32) )
-            PARSE_ERR("IRQ %d is outside the supported range.", uart->irq);
-    }
+            if ( port->driver->getc(port, &c) )
+                break;
+
+            spin_unlock_irqrestore(&port->lock, flags);
+
+            cpu_relax();
+        }
+    } while ( ((handle & SERHND_LO) &&  (c & 0x80)) ||
+              ((handle & SERHND_HI) && !(c & 0x80)) );
+    
+    return c & 0x7f;
 }
 
-static void uart_config_stage1(uart_t *uart)
-{
-    unsigned char lcr;
-
-    if ( !UART_ENABLED(uart) )
-        return;
-
-    lcr = (uart->data_bits - 5) | ((uart->stop_bits - 1) << 2) | uart->parity;
-
-    /* No interrupts. */
-    outb(0, uart->io_base + IER);
-
-    /* Line control and baud-rate generator. */
-    outb(lcr | LCR_DLAB,    uart->io_base + LCR);
-    outb(115200/uart->baud, uart->io_base + DLL); /* baud lo */
-    outb(0,                 uart->io_base + DLM); /* baud hi */
-    outb(lcr,               uart->io_base + LCR); /* parity, data, stop */
-
-    /* No flow ctrl: DTR and RTS are both wedged high to keep remote happy. */
-    outb(MCR_DTR | MCR_RTS, uart->io_base + MCR);
-
-    /* Enable and clear the FIFOs. Set a large trigger threshold. */
-    outb(FCR_ENABLE | FCR_CLRX | FCR_CLTX | FCR_TRG14, uart->io_base + FCR);
-}
-
-static void uart_config_stage2(uart_t *uart)
-{
-    int rc;
-
-    if ( !UART_ENABLED(uart) )
-        return;
-
-    uart->irqaction.handler = serial_interrupt;
-    uart->irqaction.name    = "serial";
-    uart->irqaction.dev_id  = uart;
-    if ( (rc = setup_irq(uart->irq, &uart->irqaction)) != 0 )
-        printk("ERROR: Failed to allocate serial IRQ %d\n", uart->irq);
-
-    /* For sanity, clear the receive FIFO. */
-    outb(FCR_ENABLE | FCR_CLRX | FCR_TRG14, uart->io_base + FCR);
-
-    /* Master interrupt enable; also keep DTR/RTS asserted. */
-    outb(MCR_OUT2 | MCR_DTR | MCR_RTS, uart->io_base + MCR);
-
-    /* Enable receive interrupts. */
-    outb(IER_ERDAI, uart->io_base + IER);
-}
-
-
-/***********************
- * PUBLIC FUNCTIONS
- */
-
-void serial_init_stage1(void)
-{
-    parse_port_config(opt_com1, &com[0]);
-    parse_port_config(opt_com2, &com[1]);
-
-    uart_config_stage1(&com[0]);
-    uart_config_stage1(&com[1]);
-}
-
-void serial_init_stage2(void)
-{
-    uart_config_stage2(&com[0]);
-    uart_config_stage2(&com[1]);
-}
-
-int parse_serial_handle(char *conf)
+int serial_parse_handle(char *conf)
 {
     int handle;
 
@@ -331,12 +215,6 @@ int parse_serial_handle(char *conf)
         goto fail;
     }
 
-    if ( !UART_ENABLED(&com[handle]) )
-    {
-        printk("ERROR: cannot use unconfigured serial port COM%d\n", handle+1);
-        return -1;
-    }
-
     if ( conf[4] == 'H' )
         handle |= SERHND_HI;
     else if ( conf[4] == 'L' )
@@ -353,134 +231,147 @@ int parse_serial_handle(char *conf)
 
 void serial_set_rx_handler(int handle, serial_rx_fn fn)
 {
-    uart_t *uart = &com[handle & SERHND_IDX];
+    struct serial_port *port = &com[handle & SERHND_IDX];
     unsigned long flags;
 
     if ( handle == -1 )
         return;
 
-    spin_lock_irqsave(&uart->lock, flags);
+    spin_lock_irqsave(&port->lock, flags);
 
-    if ( uart->rx != NULL )
+    if ( port->rx != NULL )
         goto fail;
 
     if ( handle & SERHND_LO )
     {
-        if ( uart->rx_lo != NULL )
+        if ( port->rx_lo != NULL )
             goto fail;
-        uart->rx_lo = fn;        
+        port->rx_lo = fn;        
     }
     else if ( handle & SERHND_HI )
     {
-        if ( uart->rx_hi != NULL )
+        if ( port->rx_hi != NULL )
             goto fail;
-        uart->rx_hi = fn;
+        port->rx_hi = fn;
     }
     else
     {
-        if ( (uart->rx_hi != NULL) || (uart->rx_lo != NULL) )
+        if ( (port->rx_hi != NULL) || (port->rx_lo != NULL) )
             goto fail;
-        uart->rx = fn;
+        port->rx = fn;
     }
 
-    spin_unlock_irqrestore(&uart->lock, flags);
+    spin_unlock_irqrestore(&port->lock, flags);
     return;
 
  fail:
-    spin_unlock_irqrestore(&uart->lock, flags);
+    spin_unlock_irqrestore(&port->lock, flags);
     printk("ERROR: Conflicting receive handlers for COM%d\n", 
            handle & SERHND_IDX);
 }
 
-void serial_putc(int handle, unsigned char c)
-{
-    uart_t *uart = &com[handle & SERHND_IDX];
-
-    if ( handle == -1 )
-        return;
-
-    __serial_putc(uart, handle, c);
-}
-
-void serial_puts(int handle, const unsigned char *s)
-{
-    uart_t *uart = &com[handle & SERHND_IDX];
-
-    if ( handle == -1 )
-        return;
-
-    while ( *s != '\0' )
-        __serial_putc(uart, handle, *s++);
-}
-
-/* Returns TRUE if given character (*pc) matches the serial handle. */
-static int byte_matches(int handle, unsigned char *pc)
-{
-    if ( !(handle & SERHND_HI) )
-    {
-        if ( !(handle & SERHND_LO) || !(*pc & 0x80) )
-            return 1;
-    }
-    else if ( *pc & 0x80 )
-    {
-        *pc &= 0x7f;
-        return 1;
-    }
-    return 0;
-}
-
-unsigned char irq_serial_getc(int handle)
-{
-    uart_t *uart = &com[handle & SERHND_IDX];
-    unsigned char c;
-
-    while ( uart->rxbufp != uart->rxbufc )
-    {
-        c = uart->rxbuf[MASK_RXBUF_IDX(uart->rxbufc++)];
-        if ( byte_matches(handle, &c) )
-            goto out;
-    }
-    
-    /* We now wait for the UART to receive a suitable character. */
-    do {
-        while ( (inb(uart->io_base + LSR) & LSR_DR) == 0 )
-            barrier();
-        c = inb(uart->io_base + RBR);
-    }
-    while ( !byte_matches(handle, &c) );
-    
- out:
-    return c;
-}
-
-unsigned char serial_getc(int handle)
-{
-    uart_t *uart = &com[handle & SERHND_IDX];
-    unsigned char c;
-    unsigned long flags;
-
-    spin_lock_irqsave(&uart->lock, flags);
-
-    while ( uart->rxbufp != uart->rxbufc )
-    {
-        c = uart->rxbuf[MASK_RXBUF_IDX(uart->rxbufc++)];
-        if ( byte_matches(handle, &c) )
-            goto out;
-    }
-    
-    disable_irq(uart->irq);
-
-    c = irq_serial_getc(handle);
-    
-    enable_irq(uart->irq);
- out:
-    spin_unlock_irqrestore(&uart->lock, flags);
-    return c;
-}
-
 void serial_force_unlock(int handle)
 {
-    uart_t *uart = &com[handle & SERHND_IDX];
+    struct serial_port *port = &com[handle & SERHND_IDX];
     if ( handle != -1 )
-        uart->lock = SPIN_LOCK_UNLOCKED;
+        port->lock = SPIN_LOCK_UNLOCKED;
+    serial_start_sync(handle);
 }
+
+void serial_start_sync(int handle)
+{
+    struct serial_port *port = &com[handle & SERHND_IDX];
+    unsigned long flags;
+
+    if ( handle == -1 )
+        return;
+    
+    spin_lock_irqsave(&port->lock, flags);
+
+    if ( port->sync++ == 0 )
+    {
+        while ( (port->txbufp - port->txbufc) != 0 )
+        {
+            while ( !port->driver->tx_empty(port) )
+                cpu_relax();
+            port->driver->putc(
+                port, port->txbuf[MASK_SERIAL_TXBUF_IDX(port->txbufc++)]);
+        }
+    }
+
+    spin_unlock_irqrestore(&port->lock, flags);
+}
+
+void serial_end_sync(int handle)
+{
+    struct serial_port *port = &com[handle & SERHND_IDX];
+    unsigned long flags;
+
+    if ( handle == -1 )
+        return;
+    
+    spin_lock_irqsave(&port->lock, flags);
+
+    port->sync--;
+
+    spin_unlock_irqrestore(&port->lock, flags);
+}
+
+int serial_tx_space(int handle)
+{
+    struct serial_port *port = &com[handle & SERHND_IDX];
+    if ( handle == -1 )
+        return SERIAL_TXBUFSZ;
+    return SERIAL_TXBUFSZ - (port->txbufp - port->txbufc);
+}
+
+void serial_init_preirq(void)
+{
+    int i;
+    for ( i = 0; i < ARRAY_SIZE(com); i++ )
+        if ( com[i].driver && com[i].driver->init_preirq )
+            com[i].driver->init_preirq(&com[i]);
+}
+
+void serial_init_postirq(void)
+{
+    int i;
+    for ( i = 0; i < ARRAY_SIZE(com); i++ )
+        if ( com[i].driver && com[i].driver->init_postirq )
+            com[i].driver->init_postirq(&com[i]);
+}
+
+void serial_endboot(void)
+{
+    int i;
+    for ( i = 0; i < ARRAY_SIZE(com); i++ )
+        if ( com[i].driver && com[i].driver->endboot )
+            com[i].driver->endboot(&com[i]);
+}
+
+void serial_register_uart(int idx, struct uart_driver *driver, void *uart)
+{
+    /* Store UART-specific info. */
+    com[idx].driver = driver;
+    com[idx].uart   = uart;
+
+    /* Default is no transmit FIFO. */
+    com[idx].tx_fifo_size = 1;
+}
+
+void serial_async_transmit(struct serial_port *port)
+{
+    BUG_ON(!port->driver->tx_empty);
+    if ( !port->txbuf )
+        port->txbuf = (char *)alloc_xenheap_pages(get_order(SERIAL_TXBUFSZ));
+}
+
+/*
+ * Local variables:
+ * mode: C
+ * c-set-style: "BSD"
+ * c-basic-offset: 4
+ * tab-width: 4
+ * indent-tabs-mode: nil
+ * End:
+ */

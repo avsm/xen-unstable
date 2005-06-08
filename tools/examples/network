@@ -53,7 +53,7 @@ bridge=${bridge:-xen-br0}
 netdev=${netdev:-eth0}
 antispoof=${antispoof:-yes}
 
-echo "network $OP bridge=$bridge netdev=$netdev antispoof=$antispoof"
+echo "*network $OP bridge=$bridge netdev=$netdev antispoof=$antispoof" >&2
 
 # Usage: transfer_addrs src dst
 # Copy all IP addresses (including aliases) from device $src to device $dst.
@@ -66,12 +66,18 @@ transfer_addrs () {
     fi
     # Address lines start with 'inet' and have the device in them.
     # Replace 'inet' with 'ip addr add' and change the device name $src
-    # to 'dev $src'. Remove netmask as we'll add routes later.
+    # to 'dev $src'.
     ip addr show dev ${src} | egrep '^ *inet ' | sed -e "
 s/inet/ip addr add/
-s@\([0-9]\+\.[0-9]\+\.[0-9]\+\.[0-9]\+\)/[0-9]\+@\1@
+s@\([0-9]\+\.[0-9]\+\.[0-9]\+\.[0-9]\+/[0-9]\+\)@\1@
 s/${src}/dev ${dst}/
 " | sh -e
+    # Remove automatic routes on destionation device
+    ip route list | sed -ne "
+/dev ${dst}\( \|$\)/ {
+  s/^/ip route del /
+  p
+}" | sh -e
 }
 
 # Usage: del_addrs src
@@ -95,16 +101,17 @@ transfer_routes () {
     # List all routes and grep the ones with $src in.
     # Stick 'ip route del' on the front to delete.
     # Change $src to $dst and use 'ip route add' to add.
-    ip route list | grep ${src} | sed -e "
-h
-s/^/ip route del /
-P
-g
-s/${src}/${dst}/
-s/^/ip route add /
-P
-d
-" | sh -e
+    ip route list | sed -ne "
+/dev ${src}\( \|$\)/ {
+  h
+  s/^/ip route del /
+  P
+  g
+  s/${src}/${dst}/
+  s/^/ip route add /
+  P
+  d
+}" | sh -e
 }
 
 # Usage: create_bridge bridge
@@ -233,7 +240,7 @@ case ${OP} in
        ;;
 
     *)
-       echo 'Unknown command: ' ${OP}
-       echo 'Valid commands are: start, stop, status'
+       echo 'Unknown command: ' ${OP} >&2
+       echo 'Valid commands are: start, stop, status' >&2
        exit 1
 esac

@@ -16,31 +16,37 @@
 #include <xen/spinlock.h>
 #include <xen/console.h>
 #include <xen/serial.h>
+#include <xen/softirq.h>
 #include <xen/keyhandler.h>
+#include <xen/mm.h>
+#include <xen/delay.h>
+#include <asm/current.h>
 #include <asm/uaccess.h>
-#include <asm/mm.h>
+#include <asm/debugger.h>
+#include <asm/io.h>
 
-/* opt_console: comma-separated list of console outputs. */
-static unsigned char opt_console[30] = "com1,vga";
+/* console: comma-separated list of console outputs. */
+static char opt_console[30] = OPT_CONSOLE_STR;
 string_param("console", opt_console);
 
-/* opt_conswitch: a character pair controlling console switching. */
+/* conswitch: a character pair controlling console switching. */
 /* Char 1: CTRL+<char1> is used to switch console input between Xen and DOM0 */
 /* Char 2: If this character is 'x', then do not auto-switch to DOM0 when it */
 /*         boots. Any other value, or omitting the char, enables auto-switch */
 static unsigned char opt_conswitch[5] = "a";
 string_param("conswitch", opt_conswitch);
 
+/* sync_console: force synchronous console output (useful for debugging). */
+static int opt_sync_console;
+boolean_param("sync_console", opt_sync_console);
+
 static int xpos, ypos;
 static unsigned char *video;
 
-#define CONSOLE_RING_SIZE 16392
-typedef struct console_ring_st
-{
-    char buf[CONSOLE_RING_SIZE];
-    unsigned int len;
-} console_ring_t;
-static console_ring_t console_ring;
+#define CONRING_SIZE 16384
+#define CONRING_IDX_MASK(i) ((i)&(CONRING_SIZE-1))
+static char conring[CONRING_SIZE];
+static unsigned int conringc, conringp;
 
 static char printk_prefix[16] = "";
 
@@ -48,7 +54,6 @@ static int sercon_handle = -1;
 static int vgacon_enabled = 0;
 
 spinlock_t console_lock = SPIN_LOCK_UNLOCKED;
-
 
 /*
  * *******************************************************
@@ -211,23 +216,33 @@ static void putchar_console(int c)
 
 static void putchar_console_ring(int c)
 {
-    if ( console_ring.len < CONSOLE_RING_SIZE )
-        console_ring.buf[console_ring.len++] = (char)c;
+    conring[CONRING_IDX_MASK(conringp++)] = c;
+    if ( (conringp - conringc) > CONRING_SIZE )
+        conringc = conringp - CONRING_SIZE;
 }
 
-long read_console_ring(unsigned long str, unsigned int count, unsigned cmd)
+long read_console_ring(char **pstr, u32 *pcount, int clear)
 {
-    unsigned int len;
-    
-    len = (console_ring.len < count) ? console_ring.len : count;
-    
-    if ( copy_to_user((char *)str, console_ring.buf, len) )
-        return -EFAULT;
+    char *str = *pstr;
+    u32 count = *pcount;
+    unsigned int p, q;
+    unsigned long flags;
 
-    if ( cmd & CONSOLE_RING_CLEAR )
-        console_ring.len = 0;
-    
-    return len;
+    /* Start of buffer may get overwritten during copy. So copy backwards. */
+    for ( p = conringp, q = count; (p > conringc) && (q > 0); p--, q-- )
+        if ( put_user(conring[CONRING_IDX_MASK(p-1)], (char *)str+q-1) )
+            return -EFAULT;
+
+    if ( clear )
+    {
+        spin_lock_irqsave(&console_lock, flags);
+        conringc = conringp;
+        spin_unlock_irqrestore(&console_lock, flags);
+    }
+
+    *pstr   = str + q;
+    *pcount = count - q;
+    return 0;
 }
 
 
@@ -252,12 +267,14 @@ static void switch_serial_input(void)
     static char *input_str[2] = { "DOM0", "Xen" };
     xen_rx = !xen_rx;
     if ( SWITCH_CODE != 0 )
+    {
         printk("*** Serial input -> %s "
                "(type 'CTRL-%c' three times to switch input to %s).\n",
                input_str[xen_rx], opt_conswitch[0], input_str[!xen_rx]);
+    }
 }
 
-static void __serial_rx(unsigned char c, struct xen_regs *regs)
+static void __serial_rx(char c, struct cpu_user_regs *regs)
 {
     if ( xen_rx )
         return handle_keypress(c, regs);
@@ -266,10 +283,10 @@ static void __serial_rx(unsigned char c, struct xen_regs *regs)
     if ( (serial_rx_prod-serial_rx_cons) != SERIAL_RX_SIZE )
         serial_rx_ring[SERIAL_RX_MASK(serial_rx_prod++)] = c;
     /* Always notify the guest: prevents receive path from getting stuck. */
-    send_guest_virq(dom0, VIRQ_CONSOLE);
+    send_guest_virq(dom0->vcpu[0], VIRQ_CONSOLE);
 }
 
-static void serial_rx(unsigned char c, struct xen_regs *regs)
+static void serial_rx(char c, struct cpu_user_regs *regs)
 {
     static int switch_code_count = 0;
 
@@ -292,31 +309,52 @@ static void serial_rx(unsigned char c, struct xen_regs *regs)
     __serial_rx(c, regs);
 }
 
+long guest_console_write(char *buffer, int count)
+{
+    char kbuf[128];
+    int kcount;
+
+    while ( count > 0 )
+    {
+        while ( serial_tx_space(sercon_handle) < (SERIAL_TXBUFSZ / 2) )
+        {
+            if ( hypercall_preempt_check() )
+                break;
+            cpu_relax();
+        }
+
+        if ( hypercall_preempt_check() )
+            return hypercall3_create_continuation(
+                __HYPERVISOR_console_io, CONSOLEIO_write, count, buffer);
+
+        kcount = min_t(int, count, sizeof(kbuf)-1);
+        if ( copy_from_user(kbuf, buffer, kcount) )
+            return -EFAULT;
+        kbuf[kcount] = '\0';
+
+        serial_puts(sercon_handle, kbuf);
+
+        buffer += kcount;
+        count  -= kcount;
+    }
+
+    return 0;
+}
+
 long do_console_io(int cmd, int count, char *buffer)
 {
-    char *kbuf;
-    long  rc;
+    long rc;
 
 #ifndef VERBOSE
-    /* Only domain-0 may access the emergency console. */
-    if ( current->id != 0 )
+    /* Only domain 0 may access the emergency console. */
+    if ( current->domain->domain_id != 0 )
         return -EPERM;
 #endif
 
     switch ( cmd )
     {
     case CONSOLEIO_write:
-        if ( count > (PAGE_SIZE-1) )
-            count = PAGE_SIZE-1;
-        if ( (kbuf = (char *)alloc_xenheap_page()) == NULL )
-            return -ENOMEM;
-        kbuf[count] = '\0';
-        rc = count;
-        if ( copy_from_user(kbuf, buffer, count) )
-            rc = -EFAULT;
-        else
-            serial_puts(sercon_handle, kbuf);
-        free_xenheap_page((unsigned long)kbuf);
+        rc = guest_console_write(buffer, count);
         break;
     case CONSOLEIO_read:
         rc = 0;
@@ -350,7 +388,9 @@ long do_console_io(int cmd, int count, char *buffer)
 static inline void __putstr(const char *str)
 {
     int c;
+
     serial_puts(sercon_handle, str);
+
     while ( (c = *str++) != '\0' )
     {
         putchar_console(c);
@@ -403,7 +443,7 @@ void set_printk_prefix(const char *prefix)
 
 void init_console(void)
 {
-    unsigned char *p;
+    char *p;
 
     /* Where should console output go? */
     for ( p = opt_console; p != NULL; p = strchr(p, ',') )
@@ -411,7 +451,7 @@ void init_console(void)
         if ( *p == ',' )
             p++;
         if ( strncmp(p, "com", 3) == 0 )
-            sercon_handle = parse_serial_handle(p);
+            sercon_handle = serial_parse_handle(p);
         else if ( strncmp(p, "vga", 3) == 0 )
             vgacon_enabled = 1;
     }
@@ -430,6 +470,12 @@ void init_console(void)
            XEN_COMPILER, XEN_COMPILE_DATE);
     printk(" Latest ChangeSet: %s\n\n", XEN_CHANGESET);
     set_printk_prefix("(XEN) ");
+
+    if ( opt_sync_console )
+    {
+        serial_start_sync(sercon_handle);
+        printk("Console output is synchronous.\n");
+    }
 }
 
 void console_endboot(int disable_vga)
@@ -460,6 +506,16 @@ void console_force_lock(void)
     spin_lock(&console_lock);
 }
 
+void console_start_sync(void)
+{
+    serial_start_sync(sercon_handle);
+}
+
+void console_end_sync(void)
+{
+    serial_end_sync(sercon_handle);
+}
+
 void console_putc(char c)
 {
     serial_putc(sercon_handle, c);
@@ -470,10 +526,123 @@ int console_getc(void)
     return serial_getc(sercon_handle);
 }
 
-int irq_console_getc(void)
+
+/*
+ * **************************************************************
+ * *************** Serial console ring buffer *******************
+ * **************************************************************
+ */
+
+#ifndef NDEBUG
+
+/* Send output direct to console, or buffer it? */
+int debugtrace_send_to_console;
+
+static char        *debugtrace_buf; /* Debug-trace buffer */
+static unsigned int debugtrace_prd; /* Producer index     */
+static unsigned int debugtrace_kilobytes = 128, debugtrace_bytes;
+static unsigned int debugtrace_used;
+static spinlock_t   debugtrace_lock = SPIN_LOCK_UNLOCKED;
+integer_param("debugtrace", debugtrace_kilobytes);
+
+void debugtrace_dump(void)
 {
-    return irq_serial_getc(sercon_handle);
+    unsigned long flags;
+
+    if ( (debugtrace_bytes == 0) || !debugtrace_used )
+        return;
+
+    watchdog_disable();
+
+    spin_lock_irqsave(&debugtrace_lock, flags);
+
+    printk("debugtrace_dump() starting\n");
+
+    /* Print oldest portion of the ring. */
+    ASSERT(debugtrace_buf[debugtrace_bytes - 1] == 0);
+    serial_puts(sercon_handle, &debugtrace_buf[debugtrace_prd]);
+
+    /* Print youngest portion of the ring. */
+    debugtrace_buf[debugtrace_prd] = '\0';
+    serial_puts(sercon_handle, &debugtrace_buf[0]);
+
+    memset(debugtrace_buf, '\0', debugtrace_bytes);
+
+    printk("debugtrace_dump() finished\n");
+
+    spin_unlock_irqrestore(&debugtrace_lock, flags);
+
+    watchdog_enable();
 }
+
+void debugtrace_printk(const char *fmt, ...)
+{
+    static char    buf[1024];
+
+    va_list       args;
+    char         *p;
+    unsigned long flags;
+
+    if ( debugtrace_bytes == 0 )
+        return;
+
+    debugtrace_used = 1;
+
+    spin_lock_irqsave(&debugtrace_lock, flags);
+
+    ASSERT(debugtrace_buf[debugtrace_bytes - 1] == 0);
+
+    va_start(args, fmt);
+    (void)vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+
+    if ( debugtrace_send_to_console )
+    {
+        serial_puts(sercon_handle, buf);
+    }
+    else
+    {
+        for ( p = buf; *p != '\0'; p++ )
+        {
+            debugtrace_buf[debugtrace_prd++] = *p;            
+            /* Always leave a nul byte at the end of the buffer. */
+            if ( debugtrace_prd == (debugtrace_bytes - 1) )
+                debugtrace_prd = 0;
+        }
+    }
+
+    spin_unlock_irqrestore(&debugtrace_lock, flags);
+}
+
+static int __init debugtrace_init(void)
+{
+    int order;
+    unsigned int kbytes, bytes;
+
+    /* Round size down to next power of two. */
+    while ( (kbytes = (debugtrace_kilobytes & (debugtrace_kilobytes-1))) != 0 )
+        debugtrace_kilobytes = kbytes;
+
+    bytes = debugtrace_kilobytes << 10;
+    if ( bytes == 0 )
+        return 0;
+
+    order = get_order(bytes);
+    debugtrace_buf = (char *)alloc_xenheap_pages(order);
+    ASSERT(debugtrace_buf != NULL);
+
+    memset(debugtrace_buf, '\0', bytes);
+
+    debugtrace_bytes = bytes;
+
+    memset(debugtrace_buf, '\0', debugtrace_bytes);
+
+    return 0;
+}
+__initcall(debugtrace_init);
+
+#endif /* !NDEBUG */
+
 
 
 /*
@@ -485,35 +654,42 @@ int irq_console_getc(void)
 void panic(const char *fmt, ...)
 {
     va_list args;
-    char buf[128];
+    char buf[128], cpustr[10];
     unsigned long flags;
     extern void machine_restart(char *);
     
+    debugtrace_dump();
+
     va_start(args, fmt);
     (void)vsnprintf(buf, sizeof(buf), fmt, args);
     va_end(args);
-    
+
+    debugger_trap_immediate();
+
     /* Spit out multiline message in one go. */
     spin_lock_irqsave(&console_lock, flags);
     __putstr("\n****************************************\n");
+    __putstr("Panic on CPU");
+    sprintf(cpustr, "%d", smp_processor_id());
+    __putstr(cpustr);
+    __putstr(":\n");
     __putstr(buf);
-    __putstr("Aieee! CPU");
-    sprintf(buf, "%d", smp_processor_id());
-    __putstr(buf);
-    __putstr(" is toast...\n");
     __putstr("****************************************\n\n");
     __putstr("Reboot in five seconds...\n");
     spin_unlock_irqrestore(&console_lock, flags);
 
-    watchdog_on = 0;
+    watchdog_disable();
     mdelay(5000);
     machine_restart(0);
 }
 
+/*
+ * Local variables:
+ * mode: C
+ * c-set-style: "BSD"
+ * c-basic-offset: 4
+ * tab-width: 4
+ * indent-tabs-mode: nil
+ * End:
+ */
 
-void __out_of_line_bug(int line)
-{
-    printk("kernel BUG in header file at line %d\n", line);
-    BUG();
-    for ( ; ; ) ;
-}

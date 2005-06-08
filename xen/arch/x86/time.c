@@ -1,5 +1,4 @@
-/* -*-  Mode:C; c-basic-offset:4; tab-width:4 -*-
- ****************************************************************************
+/****************************************************************************
  * (C) 2002-2003 - Rolf Neugebauer - Intel Research Cambridge
  * (C) 2002-2003 University of Cambridge
  ****************************************************************************
@@ -38,7 +37,6 @@ unsigned long cpu_khz;  /* Detected as we calibrate the TSC */
 unsigned long ticks_per_usec; /* TSC ticks per microsecond. */
 spinlock_t rtc_lock = SPIN_LOCK_UNLOCKED;
 int timer_ack = 0;
-int do_timer_lists_from_pit = 0;
 unsigned long volatile jiffies;
 
 /* PRIVATE */
@@ -52,7 +50,7 @@ static s_time_t        stime_irq;       /* System time at last 'time update' */
 static unsigned long   wc_sec, wc_usec; /* UTC time at last 'time update'.   */
 static rwlock_t        time_lock = RW_LOCK_UNLOCKED;
 
-static void timer_interrupt(int irq, void *dev_id, struct xen_regs *regs)
+void timer_interrupt(int irq, void *dev_id, struct cpu_user_regs *regs)
 {
     write_lock_irq(&time_lock);
 
@@ -92,7 +90,7 @@ static void timer_interrupt(int irq, void *dev_id, struct xen_regs *regs)
     write_unlock_irq(&time_lock);
 
     /* Rough hack to allow accurate timers to sort-of-work with no APIC. */
-    if ( do_timer_lists_from_pit )
+    if ( !cpu_has_apic )
         raise_softirq(AC_TIMER_SOFTIRQ);
 }
 
@@ -275,19 +273,13 @@ s_time_t get_s_time(void)
     return now; 
 }
 
-
-int update_dom_time(struct domain *d)
+static inline void __update_dom_time(struct vcpu *v)
 {
+    struct domain *d  = v->domain;
     shared_info_t *si = d->shared_info;
-    unsigned long flags;
 
-    if ( d->last_propagated_timestamp == full_tsc_irq )
-        return 0;
+    spin_lock(&d->time_lock);
 
-    read_lock_irqsave(&time_lock, flags);
-
-    d->last_propagated_timestamp = full_tsc_irq;
-    
     si->time_version1++;
     wmb();
 
@@ -300,11 +292,20 @@ int update_dom_time(struct domain *d)
     wmb();
     si->time_version2++;
 
-    read_unlock_irqrestore(&time_lock, flags);
-
-    return 1;
+    spin_unlock(&d->time_lock);
 }
 
+void update_dom_time(struct vcpu *v)
+{
+    unsigned long flags;
+
+    if ( v->domain->shared_info->tsc_timestamp != full_tsc_irq )
+    {
+        read_lock_irqsave(&time_lock, flags);
+        __update_dom_time(v);
+        read_unlock_irqrestore(&time_lock, flags);
+    }
+}
 
 /* Set clock to <secs,usecs> after 00:00:00 UTC, 1 January, 1970. */
 void do_settime(unsigned long secs, unsigned long usecs, u64 system_time_base)
@@ -326,12 +327,11 @@ void do_settime(unsigned long secs, unsigned long usecs, u64 system_time_base)
     wc_sec  = secs;
     wc_usec = _usecs;
 
-    write_unlock_irq(&time_lock);
-
     /* Others will pick up the change at the next tick. */
-    current->last_propagated_timestamp = 0; /* force propagation */
-    (void)update_dom_time(current);
+    __update_dom_time(current);
     send_guest_virq(current, VIRQ_TIMER);
+
+    write_unlock_irq(&time_lock);
 }
 
 
@@ -359,7 +359,6 @@ int __init init_xen_time()
     wc_sec  = get_cmos_time();
 
     printk("Time init:\n");
-    printk(".... System Time: %lldns\n", NOW());
     printk(".... cpu_freq:    %08X:%08X\n", (u32)(cpu_freq>>32),(u32)cpu_freq);
     printk(".... scale:       %08X:%08X\n", (u32)(scale>>32),(u32)scale);
     printk(".... Wall Clock:  %lds %ldus\n", wc_sec, wc_usec);
@@ -386,3 +385,13 @@ void __init time_init(void)
 
     setup_irq(0, &irq0);
 }
+
+/*
+ * Local variables:
+ * mode: C
+ * c-set-style: "BSD"
+ * c-basic-offset: 4
+ * tab-width: 4
+ * indent-tabs-mode: nil
+ * End:
+ */

@@ -10,15 +10,16 @@
 #define __XEN_PUBLIC_EVENT_CHANNEL_H__
 
 /*
- * EVTCHNOP_alloc_unbound: Allocate a fresh local port and prepare
- * it for binding to <dom>.
+ * EVTCHNOP_alloc_unbound: Prepare a local port for binding to <dom>.
+ * <port> may be wildcarded by setting to zero, in which case a fresh port
+ * will be allocated, and the field filled in on return.
  */
 #define EVTCHNOP_alloc_unbound    6
 typedef struct {
     /* IN parameters */
     domid_t dom;                      /*  0 */
     u16     __pad;
-    /* OUT parameters */
+    /* IN/OUT parameters */
     u32     port;                     /*  4 */
 } PACKED evtchn_alloc_unbound_t; /* 8 bytes */
 
@@ -51,9 +52,11 @@ typedef struct {
 } PACKED evtchn_bind_interdomain_t; /* 12 bytes */
 
 /*
- * EVTCHNOP_bind_virq: Bind a local event channel to IRQ <irq>.
+ * EVTCHNOP_bind_virq: Bind a local event channel to IRQ <irq> on calling vcpu.
  * NOTES:
- *  1. A virtual IRQ may be bound to at most one event channel per domain.
+ *  1. A virtual IRQ may be bound to at most one event channel per vcpu.
+ *  2. The allocated event channel is bound to the calling vcpu. The binding
+ *     may not be changed.
  */
 #define EVTCHNOP_bind_virq        1
 typedef struct {
@@ -78,6 +81,20 @@ typedef struct {
     /* OUT parameters. */
     u32 port;                         /*  8 */
 } PACKED evtchn_bind_pirq_t; /* 12 bytes */
+
+/*
+ * EVTCHNOP_bind_ipi: Bind a local event channel to receive events.
+ * NOTES:
+ *  1. The allocated event channel is bound to the calling vcpu. The binding
+ *     may not be changed.
+ */
+#define EVTCHNOP_bind_ipi         7
+typedef struct {
+    /* IN parameters. */
+    u32 ipi_vcpu;                     /*  0 */
+    /* OUT parameters. */
+    u32 port;                         /*  4 */
+} PACKED evtchn_bind_ipi_t; /* 8 bytes */
 
 /*
  * EVTCHNOP_close: Close the communication channel which has an endpoint at
@@ -128,6 +145,7 @@ typedef struct {
 #define EVTCHNSTAT_interdomain  2  /* Channel is connected to remote domain. */
 #define EVTCHNSTAT_pirq         3  /* Channel is bound to a phys IRQ line.   */
 #define EVTCHNSTAT_virq         4  /* Channel is bound to a virtual IRQ line */
+#define EVTCHNSTAT_ipi          5  /* Channel is bound to a virtual IPI line */
     u32     status;                   /*  8 */
     union {                           /* 12 */
         struct {
@@ -140,6 +158,7 @@ typedef struct {
         } PACKED interdomain; /* EVTCHNSTAT_interdomain */
         u32 pirq;      /* EVTCHNSTAT_pirq        */   /* 12 */
         u32 virq;      /* EVTCHNSTAT_virq        */   /* 12 */
+        u32 ipi_vcpu;  /* EVTCHNSTAT_ipi         */   /* 12 */
     } PACKED u;
 } PACKED evtchn_status_t; /* 20 bytes */
 
@@ -151,6 +170,7 @@ typedef struct {
         evtchn_bind_interdomain_t bind_interdomain;
         evtchn_bind_virq_t        bind_virq;
         evtchn_bind_pirq_t        bind_pirq;
+        evtchn_bind_ipi_t         bind_ipi;
         evtchn_close_t            close;
         evtchn_send_t             send;
         evtchn_status_t           status;

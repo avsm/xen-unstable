@@ -11,13 +11,14 @@
 #include <xen/irq.h>
 #include <xen/perfc.h>
 #include <xen/sched.h>
+#include <asm/current.h>
 #include <asm/smpboot.h>
 
 irq_desc_t irq_desc[NR_IRQS];
 
-static void __do_IRQ_guest(int irq);
+static void __do_IRQ_guest(int vector);
 
-void no_action(int cpl, void *dev_id, struct xen_regs *regs) { }
+void no_action(int cpl, void *dev_id, struct cpu_user_regs *regs) { }
 
 static void enable_none(unsigned int irq) { }
 static unsigned int startup_none(unsigned int irq) { return 0; }
@@ -42,11 +43,11 @@ struct hw_interrupt_type no_irq_type = {
 };
 
 atomic_t irq_err_count;
-atomic_t irq_mis_count;
 
 inline void disable_irq_nosync(unsigned int irq)
 {
-    irq_desc_t   *desc = &irq_desc[irq];
+    unsigned int  vector = irq_to_vector(irq);
+    irq_desc_t   *desc = &irq_desc[vector];
     unsigned long flags;
 
     spin_lock_irqsave(&desc->lock, flags);
@@ -60,15 +61,10 @@ inline void disable_irq_nosync(unsigned int irq)
     spin_unlock_irqrestore(&desc->lock, flags);
 }
 
-void disable_irq(unsigned int irq)
-{
-    disable_irq_nosync(irq);
-    do { smp_mb(); } while ( irq_desc[irq].status & IRQ_INPROGRESS );
-}
-
 void enable_irq(unsigned int irq)
 {
-    irq_desc_t   *desc = &irq_desc[irq];
+    unsigned int  vector = irq_to_vector(irq);
+    irq_desc_t   *desc = &irq_desc[vector];
     unsigned long flags;
 
     spin_lock_irqsave(&desc->lock, flags);
@@ -77,24 +73,18 @@ void enable_irq(unsigned int irq)
     {
         desc->status &= ~IRQ_DISABLED;
         if ( (desc->status & (IRQ_PENDING | IRQ_REPLAY)) == IRQ_PENDING )
-        {
             desc->status |= IRQ_REPLAY;
-            hw_resend_irq(desc->handler,irq);
-        }
         desc->handler->enable(irq);
     }
 
     spin_unlock_irqrestore(&desc->lock, flags);
 }
 
-asmlinkage void do_IRQ(struct xen_regs regs)
-{       
-#if defined(__i386__)
-    unsigned int      irq = regs.entry_vector;
-#else
-    unsigned int      irq = 0; /* XXX */
-#endif
-    irq_desc_t       *desc = &irq_desc[irq];
+asmlinkage void do_IRQ(struct cpu_user_regs *regs)
+{
+    unsigned int      vector = regs->entry_vector;
+    unsigned int      irq = vector_to_irq(vector);
+    irq_desc_t       *desc = &irq_desc[vector];
     struct irqaction *action;
 
     perfc_incrc(irqs);
@@ -104,7 +94,7 @@ asmlinkage void do_IRQ(struct xen_regs regs)
 
     if ( likely(desc->status & IRQ_GUEST) )
     {
-        __do_IRQ_guest(irq);
+        __do_IRQ_guest(vector);
         spin_unlock(&desc->lock);
         return;
     }
@@ -125,11 +115,11 @@ asmlinkage void do_IRQ(struct xen_regs regs)
     while ( desc->status & IRQ_PENDING )
     {
         desc->status &= ~IRQ_PENDING;
-        irq_enter(smp_processor_id(), irq);
+        irq_enter(smp_processor_id());
         spin_unlock_irq(&desc->lock);
-        action->handler(irq, action->dev_id, &regs);
+        action->handler(irq, action->dev_id, regs);
         spin_lock_irq(&desc->lock);
-        irq_exit(smp_processor_id(), irq);
+        irq_exit(smp_processor_id());
     }
 
     desc->status &= ~IRQ_INPROGRESS;
@@ -141,7 +131,8 @@ asmlinkage void do_IRQ(struct xen_regs regs)
 
 void free_irq(unsigned int irq)
 {
-    irq_desc_t   *desc = &irq_desc[irq];
+    unsigned int  vector = irq_to_vector(irq);
+    irq_desc_t   *desc = &irq_desc[vector];
     unsigned long flags;
 
     spin_lock_irqsave(&desc->lock,flags);
@@ -152,12 +143,13 @@ void free_irq(unsigned int irq)
     spin_unlock_irqrestore(&desc->lock,flags);
 
     /* Wait to make sure it's not being used on another CPU */
-    do { smp_mb(); } while ( irq_desc[irq].status & IRQ_INPROGRESS );
+    do { smp_mb(); } while ( desc->status & IRQ_INPROGRESS );
 }
 
 int setup_irq(unsigned int irq, struct irqaction *new)
 {
-    irq_desc_t   *desc = &irq_desc[irq];
+    unsigned int  vector = irq_to_vector(irq);
+    irq_desc_t   *desc = &irq_desc[vector];
     unsigned long flags;
  
     spin_lock_irqsave(&desc->lock,flags);
@@ -191,9 +183,10 @@ typedef struct {
     struct domain *guest[IRQ_MAX_GUESTS];
 } irq_guest_action_t;
 
-static void __do_IRQ_guest(int irq)
+static void __do_IRQ_guest(int vector)
 {
-    irq_desc_t         *desc = &irq_desc[irq];
+    unsigned int        irq = vector_to_irq(vector);
+    irq_desc_t         *desc = &irq_desc[vector];
     irq_guest_action_t *action = (irq_guest_action_t *)desc->action;
     struct domain      *d;
     int                 i;
@@ -222,7 +215,7 @@ int pirq_guest_unmask(struct domain *d)
             j = find_first_set_bit(m);
             m &= ~(1 << j);
             pirq = (i << 5) + j;
-            desc = &irq_desc[pirq];
+            desc = &irq_desc[irq_to_vector(pirq)];
             spin_lock_irq(&desc->lock);
             if ( !test_bit(d->pirq_to_evtchn[pirq], &s->evtchn_mask[0]) &&
                  test_and_clear_bit(pirq, &d->pirq_mask) &&
@@ -235,15 +228,21 @@ int pirq_guest_unmask(struct domain *d)
     return 0;
 }
 
-int pirq_guest_bind(struct domain *d, int irq, int will_share)
+int pirq_guest_bind(struct vcpu *v, int irq, int will_share)
 {
-    irq_desc_t         *desc = &irq_desc[irq];
+    unsigned int        vector = irq_to_vector(irq);
+    struct domain      *d = v->domain;
+    irq_desc_t         *desc = &irq_desc[vector];
     irq_guest_action_t *action;
     unsigned long       flags;
     int                 rc = 0;
+    cpumask_t           cpumask = CPU_MASK_NONE;
 
     if ( !IS_CAPABLE_PHYSDEV(d) )
         return -EPERM;
+
+    if ( vector == 0 )
+        return -EBUSY;
 
     spin_lock_irqsave(&desc->lock, flags);
 
@@ -259,7 +258,7 @@ int pirq_guest_bind(struct domain *d, int irq, int will_share)
             goto out;
         }
 
-        action = xmalloc(sizeof(irq_guest_action_t));
+        action = xmalloc(irq_guest_action_t);
         if ( (desc->action = (struct irqaction *)action) == NULL )
         {
             DPRINTK("Cannot bind IRQ %d to guest. Out of memory.\n", irq);
@@ -277,9 +276,9 @@ int pirq_guest_bind(struct domain *d, int irq, int will_share)
         desc->handler->startup(irq);
 
         /* Attempt to bind the interrupt target to the correct CPU. */
+        cpu_set(v->processor, cpumask);
         if ( desc->handler->set_affinity != NULL )
-            desc->handler->set_affinity(
-                irq, apicid_to_phys_cpu_present(d->processor));
+            desc->handler->set_affinity(irq, cpumask);
     }
     else if ( !will_share || !action->shareable )
     {
@@ -296,7 +295,7 @@ int pirq_guest_bind(struct domain *d, int irq, int will_share)
         goto out;
     }
 
-    action->guest[action->nr_guests++] = d;
+    action->guest[action->nr_guests++] = v->domain;
 
  out:
     spin_unlock_irqrestore(&desc->lock, flags);
@@ -305,10 +304,13 @@ int pirq_guest_bind(struct domain *d, int irq, int will_share)
 
 int pirq_guest_unbind(struct domain *d, int irq)
 {
-    irq_desc_t         *desc = &irq_desc[irq];
+    unsigned int        vector = irq_to_vector(irq);
+    irq_desc_t         *desc = &irq_desc[vector];
     irq_guest_action_t *action;
     unsigned long       flags;
     int                 i;
+
+    BUG_ON(vector == 0);
 
     spin_lock_irqsave(&desc->lock, flags);
 
@@ -330,7 +332,7 @@ int pirq_guest_unbind(struct domain *d, int irq)
     else
     {
         i = 0;
-        while ( action->guest[i] != d )
+        while ( action->guest[i] && (action->guest[i] != d) )
             i++;
         memmove(&action->guest[i], &action->guest[i+1], IRQ_MAX_GUESTS-i-1);
         action->nr_guests--;
@@ -338,27 +340,4 @@ int pirq_guest_unbind(struct domain *d, int irq)
 
     spin_unlock_irqrestore(&desc->lock, flags);    
     return 0;
-}
-
-int pirq_guest_bindable(int irq, int will_share)
-{
-    irq_desc_t         *desc = &irq_desc[irq];
-    irq_guest_action_t *action;
-    unsigned long       flags;
-    int                 okay;
-
-    spin_lock_irqsave(&desc->lock, flags);
-
-    action = (irq_guest_action_t *)desc->action;
-
-    /*
-     * To be bindable the IRQ must either be not currently bound (1), or
-     * it must be shareable (2) and not at its share limit (3).
-     */
-    okay = ((!(desc->status & IRQ_GUEST) && (action == NULL)) || /* 1 */
-            (action->shareable && will_share &&                  /* 2 */
-             (action->nr_guests != IRQ_MAX_GUESTS)));            /* 3 */
-
-    spin_unlock_irqrestore(&desc->lock, flags);
-    return okay;
 }

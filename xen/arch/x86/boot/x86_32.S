@@ -1,5 +1,6 @@
 #include <xen/config.h>
 #include <public/xen.h>
+#include <asm/desc.h>
 #include <asm/page.h>
 
 #define  SECONDARY_CPU_FLAG 0xA5A5A5A5
@@ -15,19 +16,19 @@ ENTRY(start)
         /* Magic number indicating a Multiboot header. */
 	.long	0x1BADB002
 	/* Flags to bootloader (see Multiboot spec). */
-	.long	0x00000002
+	.long	0x00000003
 	/* Checksum: must be the negated sum of the first two fields. */
-	.long	-0x1BADB004
+	.long	-0x1BADB005
         
 bad_cpu_msg:
         .asciz "ERR: Not a P6-compatible CPU!"
 not_multiboot_msg:
         .asciz "ERR: Not a Multiboot bootloader!"
 bad_cpu:
-        mov     $SYMBOL_NAME(bad_cpu_msg)-__PAGE_OFFSET,%esi
+        mov     $bad_cpu_msg-__PAGE_OFFSET,%esi
         jmp     print_err
 not_multiboot:
-        mov     $SYMBOL_NAME(not_multiboot_msg)-__PAGE_OFFSET,%esi
+        mov     $not_multiboot_msg-__PAGE_OFFSET,%esi
 print_err:
         mov     $0xB8000,%edi  # VGA framebuffer
 1:      mov     (%esi),%bl
@@ -100,6 +101,22 @@ __start:
         xor     %eax,%eax
         rep     stosb
 
+#ifdef CONFIG_X86_PAE
+        /* Initialize low and high mappings of all memory with 2MB pages */
+        mov     $idle_pg_table_l2-__PAGE_OFFSET,%edi
+        mov     $0xe3,%eax                  /* PRESENT+RW+A+D+2MB */
+1:      mov     %eax,__PAGE_OFFSET>>18(%edi) /* high mapping */
+        stosl                                /* low mapping */
+        add     $4,%edi
+        add     $(1<<L2_PAGETABLE_SHIFT),%eax
+        cmp     $DIRECTMAP_PHYS_END+0xe3,%eax
+        jne     1b
+1:      stosl   /* low mappings cover as much physmem as possible */
+        add     $4,%edi
+        add     $(1<<L2_PAGETABLE_SHIFT),%eax
+        cmp     $__HYPERVISOR_VIRT_START+0xe3,%eax
+        jne     1b
+#else
         /* Initialize low and high mappings of all memory with 4MB pages */
         mov     $idle_pg_table-__PAGE_OFFSET,%edi
         mov     $0xe3,%eax                  /* PRESENT+RW+A+D+4MB */
@@ -112,13 +129,14 @@ __start:
         add     $(1<<L2_PAGETABLE_SHIFT),%eax
         cmp     $__HYPERVISOR_VIRT_START+0xe3,%eax
         jne     1b
+#endif
         
         /* Initialise IDT with simple error defaults. */
         lea     ignore_int,%edx
         mov     $(__HYPERVISOR_CS << 16),%eax
         mov     %dx,%ax            /* selector = 0x0010 = cs */
         mov     $0x8E00,%dx        /* interrupt gate - dpl=0, present */
-        lea     SYMBOL_NAME(idt_table)-__PAGE_OFFSET,%edi
+        lea     idt_table-__PAGE_OFFSET,%edi
         mov     $256,%ecx
 1:      mov     %eax,(%edi)
         mov     %edx,4(%edi)
@@ -163,58 +181,85 @@ ignore_int:
         mov     %eax,%ds
         mov     %eax,%es
         pushl   $int_msg
-        call    SYMBOL_NAME(printf)
+        call    printf
 1:      jmp     1b
 
 /*** STACK LOCATION ***/
         
 ENTRY(stack_start)
-        .long SYMBOL_NAME(cpu0_stack) + 8100 - __PAGE_OFFSET
+        .long cpu0_stack + STACK_SIZE - 200 - __PAGE_OFFSET
         .long __HYPERVISOR_DS
         
 /*** DESCRIPTOR TABLES ***/
 
-.globl SYMBOL_NAME(idt)
-.globl SYMBOL_NAME(gdt)        
+.globl idt
+.globl gdt        
 
         ALIGN
         
         .word   0    
 idt_descr:
-	.word	256*8-1
-SYMBOL_NAME(idt):
-        .long	SYMBOL_NAME(idt_table)
+        .word	256*8-1
+idt:
+        .long	idt_table
 
         .word   0
 gdt_descr:
-	.word	(LAST_RESERVED_GDT_ENTRY*8)+7
-SYMBOL_NAME(gdt):       
-        .long   SYMBOL_NAME(gdt_table)	/* gdt base */
+        .word	LAST_RESERVED_GDT_BYTE
+gdt:
+        .long   gdt_table - FIRST_RESERVED_GDT_BYTE
 
         .word   0
 nopaging_gdt_descr:
-        .word   (LAST_RESERVED_GDT_ENTRY*8)+7
-        .long   SYMBOL_NAME(gdt_table)-__PAGE_OFFSET
+        .word	LAST_RESERVED_GDT_BYTE
+        .long   gdt_table - FIRST_RESERVED_GDT_BYTE - __PAGE_OFFSET
         
-        ALIGN
+        .org 0x1000
 /* NB. Rings != 0 get access up to 0xFC400000. This allows access to the */
 /*     machine->physical mapping table. Ring 0 can access all memory.    */
 ENTRY(gdt_table)
-        .fill FIRST_RESERVED_GDT_ENTRY,8,0
         .quad 0x0000000000000000     /* unused */
-        .quad 0x00cf9a000000ffff     /* 0x0808 ring 0 4.00GB code at 0x0 */
-        .quad 0x00cf92000000ffff     /* 0x0810 ring 0 4.00GB data at 0x0 */
-        .quad 0x00cfba000000c3ff     /* 0x0819 ring 1 3.95GB code at 0x0 */
-        .quad 0x00cfb2000000c3ff     /* 0x0821 ring 1 3.95GB data at 0x0 */
-        .quad 0x00cffa000000c3ff     /* 0x082b ring 3 3.95GB code at 0x0 */
-        .quad 0x00cff2000000c3ff     /* 0x0833 ring 3 3.95GB data at 0x0 */
+        .quad 0x00cf9a000000ffff     /* 0xe008 ring 0 4.00GB code at 0x0 */
+        .quad 0x00cf92000000ffff     /* 0xe010 ring 0 4.00GB data at 0x0 */
+#ifdef CONFIG_X86_PAE
+        .quad 0x00cfba00000067ff
+        .quad 0x00cfb200000067ff
+        .quad 0x00cffa00000067ff
+        .quad 0x00cff200000067ff
+#else
+        .quad 0x00cfba000000c3ff     /* 0xe019 ring 1 3.95GB code at 0x0 */
+        .quad 0x00cfb2000000c3ff     /* 0xe021 ring 1 3.95GB data at 0x0 */
+        .quad 0x00cffa000000c3ff     /* 0xe02b ring 3 3.95GB code at 0x0 */
+        .quad 0x00cff2000000c3ff     /* 0xe033 ring 3 3.95GB data at 0x0 */
+#endif
         .quad 0x0000000000000000     /* unused                           */
         .fill 2*NR_CPUS,8,0          /* space for TSS and LDT per CPU    */
 
-        .org 0x1000
-ENTRY(idle_pg_table) # Initial page directory is 4kB
         .org 0x2000
-ENTRY(cpu0_stack)    # Initial stack is 8kB
-        .org 0x4000
+/* Maximum STACK_ORDER for x86/32 is 1. We must therefore ensure that the */
+/* CPU0 stack is aligned on an even page boundary!                        */
+ENTRY(cpu0_stack)
+        .org 0x2000 + STACK_SIZE
+
+#ifdef CONFIG_X86_PAE
+
+ENTRY(idle_pg_table)
+ENTRY(idle_pg_table_l3)
+        .quad 0x100000 + 0x2000 + STACK_SIZE + 1*PAGE_SIZE + 0x01
+        .quad 0x100000 + 0x2000 + STACK_SIZE + 2*PAGE_SIZE + 0x01
+        .quad 0x100000 + 0x2000 + STACK_SIZE + 3*PAGE_SIZE + 0x01
+        .quad 0x100000 + 0x2000 + STACK_SIZE + 4*PAGE_SIZE + 0x01
+        .org 0x2000 + STACK_SIZE + 1*PAGE_SIZE
+ENTRY(idle_pg_table_l2)
+        .org 0x2000 + STACK_SIZE + 5*PAGE_SIZE
+
+#else /* CONFIG_X86_PAE */
+
+ENTRY(idle_pg_table)
+ENTRY(idle_pg_table_l2) # Initial page directory is 4kB
+        .org 0x2000 + STACK_SIZE + PAGE_SIZE
+
+#endif /* CONFIG_X86_PAE */
+
 ENTRY(stext)
 ENTRY(_stext)
