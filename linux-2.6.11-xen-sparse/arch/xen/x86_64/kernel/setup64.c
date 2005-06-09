@@ -208,7 +208,7 @@ void __init check_efer(void)
 
 void __init cpu_gdt_init(struct desc_ptr *gdt_descr)
 {
-	unsigned long frames[gdt_descr->size >> PAGE_SHIFT];
+	unsigned long frames[16];
 	unsigned long va;
 	int f;
 
@@ -336,9 +336,7 @@ void __init cpu_init (void)
 	CD(0); CD(1); CD(2); CD(3); /* no db4 and db5 */; CD(6); CD(7);
 
 #undef CD
-#if 0
 	fpu_init(); 
-#endif
 
 #ifdef CONFIG_NUMA
 	numa_add_cpu(cpu);

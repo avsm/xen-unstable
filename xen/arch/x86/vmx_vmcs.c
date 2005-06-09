@@ -22,7 +22,7 @@
 #include <xen/mm.h>
 #include <xen/lib.h>
 #include <xen/errno.h>
-
+#include <xen/domain_page.h>
 #include <asm/current.h>
 #include <asm/cpufeature.h>
 #include <asm/processor.h>
@@ -31,7 +31,6 @@
 #include <xen/event.h>
 #include <xen/kernel.h>
 #include <public/io/ioreq.h>
-#include <asm/domain_page.h>
 
 #ifdef CONFIG_VMX
 
@@ -42,8 +41,8 @@ struct vmcs_struct *alloc_vmcs(void)
 
     rdmsr(MSR_IA32_VMX_BASIC_MSR, vmx_msr_low, vmx_msr_high);
     vmcs_size = vmx_msr_high & 0x1fff;
-    vmcs = (struct vmcs_struct *) alloc_xenheap_pages(get_order(vmcs_size)); 
-    memset((char *) vmcs, 0, vmcs_size); /* don't remove this */
+    vmcs = alloc_xenheap_pages(get_order(vmcs_size)); 
+    memset((char *)vmcs, 0, vmcs_size); /* don't remove this */
 
     vmcs->vmcs_revision_id = vmx_msr_low;
     return vmcs;
@@ -54,7 +53,7 @@ void free_vmcs(struct vmcs_struct *vmcs)
     int order;
 
     order = (vmcs_size >> PAGE_SHIFT) - 1;
-    free_xenheap_pages((unsigned long) vmcs, order);
+    free_xenheap_pages(vmcs, order);
 }
 
 static inline int construct_vmcs_controls(void)
@@ -122,8 +121,9 @@ int vmx_setup_platform(struct vcpu *d, struct cpu_user_regs *regs)
     addr = regs->edi;
     offset = (addr & ~PAGE_MASK);
     addr = round_pgdown(addr);
+
     mpfn = phys_to_machine_mapping(addr >> PAGE_SHIFT);
-    p = map_domain_mem(mpfn << PAGE_SHIFT);
+    p = map_domain_page(mpfn);
 
     e820p = (struct e820entry *) ((unsigned long) p + offset); 
 
@@ -131,28 +131,28 @@ int vmx_setup_platform(struct vcpu *d, struct cpu_user_regs *regs)
     print_e820_memory_map(e820p, n);
 #endif
 
-    for (i = 0; i < n; i++) {
-        if (e820p[i].type == E820_SHARED_PAGE) {
+    for ( i = 0; i < n; i++ )
+    {
+        if ( e820p[i].type == E820_SHARED_PAGE )
+        {
             gpfn = (e820p[i].addr >> PAGE_SHIFT);
             break;
         }
     }
 
-    if (gpfn == 0) {
-        printk("No shared Page ?\n");
-        unmap_domain_mem(p);        
+    if ( gpfn == 0 )
+    {
+        unmap_domain_page(p);        
         return -1;
     }   
-    unmap_domain_mem(p);        
 
-    mpfn = phys_to_machine_mapping(gpfn);
-    p = map_domain_mem(mpfn << PAGE_SHIFT);
-    ASSERT(p != NULL);
+    unmap_domain_page(p);        
 
     /* Initialise shared page */
+    mpfn = phys_to_machine_mapping(gpfn);
+    p = map_domain_page(mpfn);
     memset(p, 0, PAGE_SIZE);
-
-    d->arch.arch_vmx.vmx_platform.shared_page_va = (unsigned long) p;
+    d->arch.arch_vmx.vmx_platform.shared_page_va = (unsigned long)p;
 
     return 0;
 }
@@ -445,12 +445,12 @@ int store_vmcs(struct arch_vmx_struct *arch_vmx, u64 phys_ptr)
 
 void vm_launch_fail(unsigned long eflags)
 {
-    BUG();
+    __vmx_bug(guest_cpu_user_regs());
 }
 
 void vm_resume_fail(unsigned long eflags)
 {
-    BUG();
+    __vmx_bug(guest_cpu_user_regs());
 }
 
 #endif /* CONFIG_VMX */

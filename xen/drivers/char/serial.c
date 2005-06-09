@@ -22,38 +22,91 @@ static struct serial_port com[2] = {
 void serial_rx_interrupt(struct serial_port *port, struct cpu_user_regs *regs)
 {
     char c;
-    serial_rx_fn fn;
+    serial_rx_fn fn = NULL;
     unsigned long flags;
 
-    BUG_ON(!port->driver);
-    BUG_ON(!port->driver->getc);
+    spin_lock_irqsave(&port->lock, flags);
 
-    for ( ; ; )
+    if ( port->driver->getc(port, &c) )
     {
-        spin_lock_irqsave(&port->lock, flags);
-
-        if ( !port->driver->getc(port, &c) )
-            break;
-
-        fn = NULL;
         if ( port->rx != NULL )
             fn = port->rx;
         else if ( (c & 0x80) && (port->rx_hi != NULL) )
             fn = port->rx_hi;
         else if ( !(c & 0x80) && (port->rx_lo != NULL) )
             fn = port->rx_lo;
-        else if ( (port->rxbufp - port->rxbufc) != RXBUFSZ )
-            port->rxbuf[MASK_RXBUF_IDX(port->rxbufp++)] = c;            
-
-        spin_unlock_irqrestore(&port->lock, flags);
-
-        if ( fn != NULL )
-            (*fn)(c & 0x7f, regs);
-
-        cpu_relax();
+        else if ( (port->rxbufp - port->rxbufc) != SERIAL_RXBUFSZ )
+            port->rxbuf[MASK_SERIAL_RXBUF_IDX(port->rxbufp++)] = c;            
     }
 
     spin_unlock_irqrestore(&port->lock, flags);
+
+    if ( fn != NULL )
+        (*fn)(c & 0x7f, regs);
+}
+
+void serial_tx_interrupt(struct serial_port *port, struct cpu_user_regs *regs)
+{
+    int i;
+    unsigned long flags;
+
+    spin_lock_irqsave(&port->lock, flags);
+
+    if ( port->driver->tx_empty(port) )
+    {
+        for ( i = 0; i < port->tx_fifo_size; i++ )
+        {
+            if ( port->txbufc == port->txbufp )
+                break;
+            port->driver->putc(
+                port, port->txbuf[MASK_SERIAL_TXBUF_IDX(port->txbufc++)]);
+        }
+    }
+
+    spin_unlock_irqrestore(&port->lock, flags);
+}
+
+static void __serial_putc(struct serial_port *port, char c)
+{
+    int i;
+
+    if ( (port->txbuf != NULL) && !port->sync )
+    {
+        /* Interrupt-driven (asynchronous) transmitter. */
+        if ( (port->txbufp - port->txbufc) == SERIAL_TXBUFSZ )
+        {
+            /* Buffer is full: we spin, but could alternatively drop chars. */
+            while ( !port->driver->tx_empty(port) )
+                cpu_relax();
+            for ( i = 0; i < port->tx_fifo_size; i++ )
+                port->driver->putc(
+                    port, port->txbuf[MASK_SERIAL_TXBUF_IDX(port->txbufc++)]);
+            port->txbuf[MASK_SERIAL_TXBUF_IDX(port->txbufp++)] = c;
+        }
+        else if ( ((port->txbufp - port->txbufc) == 0) &&
+                  port->driver->tx_empty(port) )
+        {
+            /* Buffer and UART FIFO are both empty. */
+            port->driver->putc(port, c);
+        }
+        else
+        {
+            /* Normal case: buffer the character. */
+            port->txbuf[MASK_SERIAL_TXBUF_IDX(port->txbufp++)] = c;
+        }
+    }
+    else if ( port->driver->tx_empty )
+    {
+        /* Synchronous finite-capacity transmitter. */
+        while ( !port->driver->tx_empty(port) )
+            cpu_relax();
+        port->driver->putc(port, c);
+    }
+    else
+    {
+        /* Simple synchronous transmitter. */
+        port->driver->putc(port, c);
+    }
 }
 
 void serial_putc(int handle, char c)
@@ -67,22 +120,43 @@ void serial_putc(int handle, char c)
     spin_lock_irqsave(&port->lock, flags);
 
     if ( (c == '\n') && (handle & SERHND_COOKED) )
-        port->driver->putc(port, '\r');
+        __serial_putc(port, '\r');
 
     if ( handle & SERHND_HI )
         c |= 0x80;
     else if ( handle & SERHND_LO )
         c &= 0x7f;
 
-    port->driver->putc(port, c);
+    __serial_putc(port, c);
 
     spin_unlock_irqrestore(&port->lock, flags);
 }
 
 void serial_puts(int handle, const char *s)
 {
-    while ( *s != '\0' )
-        serial_putc(handle, *s++);
+    struct serial_port *port = &com[handle & SERHND_IDX];
+    unsigned long flags;
+    char c;
+
+    if ( (handle == -1) || !port->driver || !port->driver->putc )
+        return;
+
+    spin_lock_irqsave(&port->lock, flags);
+
+    while ( (c = *s++) != '\0' )
+    {
+        if ( (c == '\n') && (handle & SERHND_COOKED) )
+            __serial_putc(port, '\r');
+
+        if ( handle & SERHND_HI )
+            c |= 0x80;
+        else if ( handle & SERHND_LO )
+            c &= 0x7f;
+
+        __serial_putc(port, c);
+    }
+
+    spin_unlock_irqrestore(&port->lock, flags);
 }
 
 char serial_getc(int handle)
@@ -101,7 +175,7 @@ char serial_getc(int handle)
             
             if ( port->rxbufp != port->rxbufc )
             {
-                c = port->rxbuf[MASK_RXBUF_IDX(port->rxbufc++)];
+                c = port->rxbuf[MASK_SERIAL_RXBUF_IDX(port->rxbufc++)];
                 break;
             }
             
@@ -201,6 +275,54 @@ void serial_force_unlock(int handle)
     struct serial_port *port = &com[handle & SERHND_IDX];
     if ( handle != -1 )
         port->lock = SPIN_LOCK_UNLOCKED;
+    serial_start_sync(handle);
+}
+
+void serial_start_sync(int handle)
+{
+    struct serial_port *port = &com[handle & SERHND_IDX];
+    unsigned long flags;
+
+    if ( handle == -1 )
+        return;
+    
+    spin_lock_irqsave(&port->lock, flags);
+
+    if ( port->sync++ == 0 )
+    {
+        while ( (port->txbufp - port->txbufc) != 0 )
+        {
+            while ( !port->driver->tx_empty(port) )
+                cpu_relax();
+            port->driver->putc(
+                port, port->txbuf[MASK_SERIAL_TXBUF_IDX(port->txbufc++)]);
+        }
+    }
+
+    spin_unlock_irqrestore(&port->lock, flags);
+}
+
+void serial_end_sync(int handle)
+{
+    struct serial_port *port = &com[handle & SERHND_IDX];
+    unsigned long flags;
+
+    if ( handle == -1 )
+        return;
+    
+    spin_lock_irqsave(&port->lock, flags);
+
+    port->sync--;
+
+    spin_unlock_irqrestore(&port->lock, flags);
+}
+
+int serial_tx_space(int handle)
+{
+    struct serial_port *port = &com[handle & SERHND_IDX];
+    if ( handle == -1 )
+        return SERIAL_TXBUFSZ;
+    return SERIAL_TXBUFSZ - (port->txbufp - port->txbufc);
 }
 
 void serial_init_preirq(void)
@@ -229,8 +351,19 @@ void serial_endboot(void)
 
 void serial_register_uart(int idx, struct uart_driver *driver, void *uart)
 {
+    /* Store UART-specific info. */
     com[idx].driver = driver;
     com[idx].uart   = uart;
+
+    /* Default is no transmit FIFO. */
+    com[idx].tx_fifo_size = 1;
+}
+
+void serial_async_transmit(struct serial_port *port)
+{
+    BUG_ON(!port->driver->tx_empty);
+    if ( !port->txbuf )
+        port->txbuf = alloc_xenheap_pages(get_order(SERIAL_TXBUFSZ));
 }
 
 /*

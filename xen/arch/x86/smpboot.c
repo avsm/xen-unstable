@@ -781,7 +781,7 @@ static int __init do_boot_cpu(int apicid)
 	/* So we see what's up   */
 	printk("Booting processor %d/%d eip %lx\n", cpu, apicid, start_eip);
 
-	stack = (void *)alloc_xenheap_pages(STACK_ORDER);
+	stack = alloc_xenheap_pages(STACK_ORDER);
 #if defined(__i386__)
 	stack_start.esp = (void *)__pa(stack);
 #elif defined(__x86_64__)
@@ -1177,12 +1177,6 @@ void __init smp_cpus_done(unsigned int max_cpus)
 #if 0
 void __init smp_intr_init(void)
 {
-	/*
-	 * IRQ0 must be given a fixed assignment and initialized,
-	 * because it's used before the IO-APIC is set up.
-	 */
-	set_intr_gate(FIRST_DEVICE_VECTOR, interrupt[0]);
-
 	/*
 	 * The reschedule interrupt is a CPU-to-CPU reschedule-helper
 	 * IPI, driven by wakeup.

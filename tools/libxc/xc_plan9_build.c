@@ -357,8 +357,8 @@ setup_guest(int xc_handle,
 	start_info->flags = 0;
 	DPRINTF((" control event channel is %d\n", control_evtchn));
 	start_info->domain_controller_evtchn = control_evtchn;
-	strncpy((char *)start_info->cmd_line, cmdline, MAX_CMDLINE);
-	start_info->cmd_line[MAX_CMDLINE - 1] = '\0';
+	strncpy((char *)start_info->cmd_line, cmdline, MAX_GUEST_CMDLINE);
+	start_info->cmd_line[MAX_GUEST_CMDLINE - 1] = '\0';
 	munmap(start_info, PAGE_SIZE);
 
 	DPRINTF(("done setting up start_info\n"));
@@ -434,7 +434,7 @@ xc_plan9_build(int xc_handle,
 
 	DPRINTF(("xc_get_tot_pages returns %ld pages\n", tot_pages));
 	if (mlock(&st_ctxt, sizeof (st_ctxt))) {
-		PERROR("Unable to mlock ctxt");
+		PERROR("xc_plan9_build: ctxt mlock failed");
 		return 1;
 	}
 

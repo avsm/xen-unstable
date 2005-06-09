@@ -14,6 +14,7 @@
 #include <pthread.h>
 #include "blockstore.h"
 #include "block-async.h"
+#include "requests-async.h"
 #include "radix.h"
 #include "vdi.h"
                     
@@ -128,6 +129,9 @@ vdi_t *vdi_create(snap_id_t *parent_snap, char *name)
     return vdi;
 }
 
+/* vdi_get and vdi_put currently act more like alloc/free -- they don't 
+ * do refcount-based allocation.  
+ */
 vdi_t *vdi_get(u64 vdi_id)
 {
     u64 vdi_blk;
@@ -152,26 +156,10 @@ vdi_t *vdi_get(u64 vdi_id)
     return vdi;
 }
 
-u64 vdi_lookup_block(vdi_t *vdi, u64 vdi_block, int *writable)
+void vdi_put(vdi_t *vdi)
 {
-    u64 gblock;
-    
-    gblock = lookup(VDI_HEIGHT, vdi->radix_root, vdi_block);
-    
-    if (writable != NULL) *writable = iswritable(gblock);
-
-    return getid(gblock);
-}
-
-void vdi_update_block(vdi_t *vdi, u64 vdi_block, u64 g_block)
-{
-    u64 id;
-    
-    /* updates are always writable. */
-    id = writable(g_block);
-    
-    vdi->radix_root = update(VDI_HEIGHT, vdi->radix_root, vdi_block, id);
-    writeblock(vdi->block, vdi);
+    free(vdi->radix_lock);
+    freeblock(vdi);
 }
 
 void vdi_snapshot(vdi_t *vdi)

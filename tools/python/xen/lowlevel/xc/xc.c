@@ -14,6 +14,7 @@
 #include <sys/socket.h>
 #include <netdb.h>
 #include <arpa/inet.h>
+
 #include "xc_private.h"
 #include "linux_boot_params.h"
 
@@ -259,25 +260,28 @@ static PyObject *pyxc_linux_build(PyObject *self,
 {
     XcObject *xc = (XcObject *)self;
 
-    u32   dom;
+    u32 dom;
     char *image, *ramdisk = NULL, *cmdline = "";
-    int   control_evtchn, flags = 0, vcpus = 1;
+    int flags = 0, vcpus = 1;
+    int control_evtchn, store_evtchn;
+    unsigned long store_mfn = 0;
 
-    static char *kwd_list[] = { "dom", "control_evtchn", 
-                                "image", "ramdisk", "cmdline", "flags", "vcpus",
-                                NULL };
+    static char *kwd_list[] = { "dom", "control_evtchn", "store_evtchn", 
+                                "image", "ramdisk", "cmdline", "flags",
+				"vcpus", NULL };
 
-    if ( !PyArg_ParseTupleAndKeywords(args, kwds, "iis|ssii", kwd_list, 
-                                      &dom, &control_evtchn, 
-                                      &image, &ramdisk, &cmdline, &flags, &vcpus) )
+    if ( !PyArg_ParseTupleAndKeywords(args, kwds, "iiis|ssii", kwd_list,
+                                      &dom, &control_evtchn, &store_evtchn,
+                                      &image, &ramdisk, &cmdline, &flags,
+                                      &vcpus) )
         return NULL;
 
     if ( xc_linux_build(xc->xc_handle, dom, image,
-                        ramdisk, cmdline, control_evtchn, flags, vcpus) != 0 )
+                        ramdisk, cmdline, control_evtchn, flags, vcpus,
+                        store_evtchn, &store_mfn) != 0 )
         return PyErr_SetFromErrno(xc_error);
     
-    Py_INCREF(zero);
-    return zero;
+    return Py_BuildValue("{s:i}", "store_mfn", store_mfn);
 }
 
 static PyObject *pyxc_plan9_build(PyObject *self,
@@ -494,11 +498,12 @@ static PyObject *pyxc_evtchn_alloc_unbound(PyObject *self,
     XcObject *xc = (XcObject *)self;
 
     u32 dom;
-    int port;
+    int port = 0;
 
-    static char *kwd_list[] = { "dom", NULL };
+    static char *kwd_list[] = { "dom", "port", NULL };
 
-    if ( !PyArg_ParseTupleAndKeywords(args, kwds, "i", kwd_list, &dom) )
+    if ( !PyArg_ParseTupleAndKeywords(args, kwds, "i|i", kwd_list,
+                                      &dom, &port) )
         return NULL;
 
     if ( xc_evtchn_alloc_unbound(xc->xc_handle, dom, &port) != 0 )
@@ -677,7 +682,8 @@ static PyObject *pyxc_readconsolering(PyObject *self,
     XcObject *xc = (XcObject *)self;
 
     unsigned int clear = 0;
-    char         str[32768];
+    char         _str[32768], *str = _str;
+    unsigned int count = 32768;
     int          ret;
 
     static char *kwd_list[] = { "clear", NULL };
@@ -685,11 +691,11 @@ static PyObject *pyxc_readconsolering(PyObject *self,
     if ( !PyArg_ParseTupleAndKeywords(args, kwds, "|i", kwd_list, &clear) )
         return NULL;
 
-    ret = xc_readconsolering(xc->xc_handle, str, sizeof(str), clear);
+    ret = xc_readconsolering(xc->xc_handle, &str, &count, clear);
     if ( ret < 0 )
         return PyErr_SetFromErrno(xc_error);
 
-    return PyString_FromStringAndSize(str, ret);
+    return PyString_FromStringAndSize(str, count);
 }
 
 static PyObject *pyxc_physinfo(PyObject *self,
@@ -832,6 +838,7 @@ static PyMethodDef pyxc_methods[] = {
       0, "\n"
       "Query the xc control interface file descriptor.\n\n"
       "Returns: [int] file descriptor\n" },
+
     { "domain_create", 
       (PyCFunction)pyxc_domain_create, 
       METH_VARARGS | METH_KEYWORDS, "\n"
@@ -842,8 +849,8 @@ static PyMethodDef pyxc_methods[] = {
     { "domain_dumpcore", 
       (PyCFunction)pyxc_domain_dumpcore, 
       METH_VARARGS | METH_KEYWORDS, "\n"
-      "dump core of a domain.\n"
-      " dom [int]: Identifier of domain to be paused.\n\n"
+      "Dump core of a domain.\n"
+      " dom [int]: Identifier of domain to dump core of.\n"
       " corefile [string]: Name of corefile to be created.\n\n"
       "Returns: [int] 0 on success; -1 on error.\n" },
 

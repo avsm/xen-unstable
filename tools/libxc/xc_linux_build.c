@@ -33,43 +33,33 @@
 #define round_pgup(_p)    (((_p)+(PAGE_SIZE-1))&PAGE_MASK)
 #define round_pgdown(_p)  ((_p)&PAGE_MASK)
 
-struct domain_setup_info
+static int probeimageformat(char *image,
+                            unsigned long image_size,
+                            struct load_funcs *load_funcs)
 {
-    unsigned long v_start;
-    unsigned long v_end;
-    unsigned long v_kernstart;
-    unsigned long v_kernend;
-    unsigned long v_kernentry;
+    if ( probe_elf(image, image_size, load_funcs) &&
+         probe_bin(image, image_size, load_funcs) )
+    {
+        ERROR( "Unrecognized image format" );
+        return -EINVAL;
+    }
 
-    unsigned int  load_symtab;
-    unsigned long symtab_addr;
-    unsigned long symtab_len;
-};
-
-static int
-parseelfimage(
-    char *elfbase, unsigned long elfsize, struct domain_setup_info *dsi);
-static int
-loadelfimage(
-    char *elfbase, int xch, u32 dom, unsigned long *parray,
-    struct domain_setup_info *dsi);
-static int
-loadelfsymtab(
-    char *elfbase, int xch, u32 dom, unsigned long *parray,
-    struct domain_setup_info *dsi);
+    return 0;
+}
 
 static int setup_guest(int xc_handle,
-                         u32 dom,
-                         char *image, unsigned long image_size,
-                         gzFile initrd_gfd, unsigned long initrd_len,
-                         unsigned long nr_pages,
-                         unsigned long *pvsi, unsigned long *pvke,
-                         vcpu_guest_context_t *ctxt,
-                         const char *cmdline,
-                         unsigned long shared_info_frame,
-                         unsigned int control_evtchn,
-                         unsigned long flags,
-                         unsigned int vcpus)
+                       u32 dom,
+                       char *image, unsigned long image_size,
+                       gzFile initrd_gfd, unsigned long initrd_len,
+                       unsigned long nr_pages,
+                       unsigned long *pvsi, unsigned long *pvke,
+                       unsigned long *pvss, vcpu_guest_context_t *ctxt,
+                       const char *cmdline,
+                       unsigned long shared_info_frame,
+                       unsigned int control_evtchn,
+                       unsigned long flags,
+                       unsigned int vcpus,
+		       unsigned int store_evtchn, unsigned long *store_mfn)
 {
     l1_pgentry_t *vl1tab=NULL, *vl1e=NULL;
     l2_pgentry_t *vl2tab=NULL, *vl2e=NULL;
@@ -94,6 +84,7 @@ static int setup_guest(int xc_handle,
     unsigned long ppt_alloc;
     unsigned long *physmap, *physmap_e, physmap_pfn;
 
+    struct load_funcs load_funcs;
     struct domain_setup_info dsi;
     unsigned long vinitrd_start;
     unsigned long vinitrd_end;
@@ -101,15 +92,21 @@ static int setup_guest(int xc_handle,
     unsigned long vphysmap_end;
     unsigned long vstartinfo_start;
     unsigned long vstartinfo_end;
+    unsigned long vstoreinfo_start;
+    unsigned long vstoreinfo_end;
     unsigned long vstack_start;
     unsigned long vstack_end;
     unsigned long vpt_start;
     unsigned long vpt_end;
     unsigned long v_end;
 
+    rc = probeimageformat(image, image_size, &load_funcs);
+    if ( rc != 0 )
+        goto error_out;
+
     memset(&dsi, 0, sizeof(struct domain_setup_info));
 
-    rc = parseelfimage(image, image_size, &dsi);
+    rc = (load_funcs.parseimage)(image, image_size, &dsi);
     if ( rc != 0 )
         goto error_out;
 
@@ -136,7 +133,10 @@ static int setup_guest(int xc_handle,
         vpt_end          = vpt_start + (nr_pt_pages * PAGE_SIZE);
         vstartinfo_start = vpt_end;
         vstartinfo_end   = vstartinfo_start + PAGE_SIZE;
-        vstack_start     = vstartinfo_end;
+        /* Place store shared page after startinfo. */
+        vstoreinfo_start = vstartinfo_end;
+        vstoreinfo_end   = vstartinfo_end + PAGE_SIZE;
+        vstack_start     = vstoreinfo_end;
         vstack_end       = vstack_start + PAGE_SIZE;
         v_end            = (vstack_end + (1UL<<22)-1) & ~((1UL<<22)-1);
         if ( (v_end - vstack_end) < (512UL << 10) )
@@ -167,6 +167,7 @@ static int setup_guest(int xc_handle,
            " Phys-Mach map: %p->%p\n"
            " Page tables:   %p->%p\n"
            " Start info:    %p->%p\n"
+           " Store page:    %p->%p\n"
            " Boot stack:    %p->%p\n"
            " TOTAL:         %p->%p\n",
            _p(dsi.v_kernstart), _p(dsi.v_kernend), 
@@ -174,6 +175,7 @@ static int setup_guest(int xc_handle,
            _p(vphysmap_start), _p(vphysmap_end),
            _p(vpt_start), _p(vpt_end),
            _p(vstartinfo_start), _p(vstartinfo_end),
+           _p(vstoreinfo_start), _p(vstoreinfo_end),
            _p(vstack_start), _p(vstack_end),
            _p(dsi.v_start), _p(v_end));
     printf(" ENTRY ADDRESS: %p\n", _p(dsi.v_kernentry));
@@ -198,7 +200,8 @@ static int setup_guest(int xc_handle,
         goto error_out;
     }
 
-    loadelfimage(image, xc_handle, dom, page_array, &dsi);
+    (load_funcs.loadimage)(image, image_size, xc_handle, dom, page_array,
+                           &dsi);
 
     /* Load the initial ramdisk image. */
     if ( initrd_len != 0 )
@@ -382,14 +385,19 @@ static int setup_guest(int xc_handle,
     start_info->nr_pt_frames = nr_pt_pages;
     start_info->mfn_list     = vphysmap_start;
     start_info->domain_controller_evtchn = control_evtchn;
+    start_info->store_page   = vstoreinfo_start;
+    start_info->store_evtchn = store_evtchn;
     if ( initrd_len != 0 )
     {
         start_info->mod_start    = vinitrd_start;
         start_info->mod_len      = initrd_len;
     }
-    strncpy((char *)start_info->cmd_line, cmdline, MAX_CMDLINE);
-    start_info->cmd_line[MAX_CMDLINE-1] = '\0';
+    strncpy((char *)start_info->cmd_line, cmdline, MAX_GUEST_CMDLINE);
+    start_info->cmd_line[MAX_GUEST_CMDLINE-1] = '\0';
     munmap(start_info, PAGE_SIZE);
+
+    /* Tell our caller where we told domain store page was. */
+    *store_mfn = page_array[((vstoreinfo_start-dsi.v_start)>>PAGE_SHIFT)];
 
     /* shared_info page starts its life empty. */
     shared_info = xc_map_foreign_range(
@@ -412,6 +420,7 @@ static int setup_guest(int xc_handle,
     free(page_array);
 
     *pvsi = vstartinfo_start;
+    *pvss = vstack_start;
     *pvke = dsi.v_kernentry;
 
     return 0;
@@ -431,7 +440,9 @@ int xc_linux_build(int xc_handle,
                    const char *cmdline,
                    unsigned int control_evtchn,
                    unsigned long flags,
-                   unsigned int vcpus)
+                   unsigned int vcpus,
+                   unsigned int store_evtchn,
+                   unsigned long *store_mfn)
 {
     dom0_op_t launch_op, op;
     int initrd_fd = -1;
@@ -441,7 +452,7 @@ int xc_linux_build(int xc_handle,
     unsigned long nr_pages;
     char         *image = NULL;
     unsigned long image_size, initrd_size=0;
-    unsigned long vstartinfo_start, vkern_entry;
+    unsigned long vstartinfo_start, vkern_entry, vstack_start;
 
     if ( (nr_pages = xc_get_tot_pages(xc_handle, domid)) < 0 )
     {
@@ -471,7 +482,7 @@ int xc_linux_build(int xc_handle,
 
     if ( mlock(&st_ctxt, sizeof(st_ctxt) ) )
     {   
-        PERROR("Unable to mlock ctxt");
+        PERROR("xc_linux_build: ctxt mlock failed");
         return 1;
     }
 
@@ -498,11 +509,12 @@ int xc_linux_build(int xc_handle,
     }
 
     if ( setup_guest(xc_handle, domid, image, image_size, 
-                       initrd_gfd, initrd_size, nr_pages, 
-                       &vstartinfo_start, &vkern_entry,
-                       ctxt, cmdline,
-                       op.u.getdomaininfo.shared_info_frame,
-                       control_evtchn, flags, vcpus) < 0 )
+                     initrd_gfd, initrd_size, nr_pages, 
+                     &vstartinfo_start, &vkern_entry,
+                     &vstack_start, ctxt, cmdline,
+                     op.u.getdomaininfo.shared_info_frame,
+                     control_evtchn, flags, vcpus,
+                     store_evtchn, store_mfn) < 0 )
     {
         ERROR("Error constructing guest OS");
         goto error_out;
@@ -533,7 +545,7 @@ int xc_linux_build(int xc_handle,
     ctxt->user_regs.ss = FLAT_KERNEL_SS;
     ctxt->user_regs.cs = FLAT_KERNEL_CS;
     ctxt->user_regs.eip = vkern_entry;
-    ctxt->user_regs.esp = vstartinfo_start + 2*PAGE_SIZE;
+    ctxt->user_regs.esp = vstack_start + PAGE_SIZE;
     ctxt->user_regs.esi = vstartinfo_start;
     ctxt->user_regs.eflags = 1 << 9; /* Interrupt Enable */
 
@@ -555,7 +567,7 @@ int xc_linux_build(int xc_handle,
 
     /* Ring 1 stack is the initial stack. */
     ctxt->kernel_ss = FLAT_KERNEL_SS;
-    ctxt->kernel_sp = vstartinfo_start + 2*PAGE_SIZE;
+    ctxt->kernel_sp = vstack_start + PAGE_SIZE;
 
     /* No debugging. */
     memset(ctxt->debugreg, 0, sizeof(ctxt->debugreg));
@@ -592,267 +604,4 @@ int xc_linux_build(int xc_handle,
         free(image);
 
     return -1;
-}
-
-static inline int is_loadable_phdr(Elf_Phdr *phdr)
-{
-    return ((phdr->p_type == PT_LOAD) &&
-            ((phdr->p_flags & (PF_W|PF_X)) != 0));
-}
-
-static int parseelfimage(char *elfbase, 
-                         unsigned long elfsize,
-                         struct domain_setup_info *dsi)
-{
-    Elf_Ehdr *ehdr = (Elf_Ehdr *)elfbase;
-    Elf_Phdr *phdr;
-    Elf_Shdr *shdr;
-    unsigned long kernstart = ~0UL, kernend=0UL;
-    char *shstrtab, *guestinfo=NULL, *p;
-    int h;
-
-    if ( !IS_ELF(*ehdr) )
-    {
-        ERROR("Kernel image does not have an ELF header.");
-        return -EINVAL;
-    }
-
-    if ( (ehdr->e_phoff + (ehdr->e_phnum * ehdr->e_phentsize)) > elfsize )
-    {
-        ERROR("ELF program headers extend beyond end of image.");
-        return -EINVAL;
-    }
-
-    if ( (ehdr->e_shoff + (ehdr->e_shnum * ehdr->e_shentsize)) > elfsize )
-    {
-        ERROR("ELF section headers extend beyond end of image.");
-        return -EINVAL;
-    }
-
-    /* Find the section-header strings table. */
-    if ( ehdr->e_shstrndx == SHN_UNDEF )
-    {
-        ERROR("ELF image has no section-header strings table (shstrtab).");
-        return -EINVAL;
-    }
-    shdr = (Elf_Shdr *)(elfbase + ehdr->e_shoff + 
-                        (ehdr->e_shstrndx*ehdr->e_shentsize));
-    shstrtab = elfbase + shdr->sh_offset;
-    
-    /* Find the special '__xen_guest' section and check its contents. */
-    for ( h = 0; h < ehdr->e_shnum; h++ )
-    {
-        shdr = (Elf_Shdr *)(elfbase + ehdr->e_shoff + (h*ehdr->e_shentsize));
-        if ( strcmp(&shstrtab[shdr->sh_name], "__xen_guest") != 0 )
-            continue;
-
-        guestinfo = elfbase + shdr->sh_offset;
-
-        if ( (strstr(guestinfo, "LOADER=generic") == NULL) &&
-             (strstr(guestinfo, "GUEST_OS=linux") == NULL) )
-        {
-            ERROR("Will only load images built for the generic loader "
-                  "or Linux images");
-            ERROR("Actually saw: '%s'", guestinfo);
-            return -EINVAL;
-        }
-
-        if ( (strstr(guestinfo, "XEN_VER=3.0") == NULL) )
-        {
-            ERROR("Will only load images built for Xen v3.0");
-            ERROR("Actually saw: '%s'", guestinfo);
-            return -EINVAL;
-        }
-
-        break;
-    }
-    if ( guestinfo == NULL )
-    {
-        ERROR("Not a Xen-ELF image: '__xen_guest' section not found.");
-        return -EINVAL;
-    }
-
-    for ( h = 0; h < ehdr->e_phnum; h++ ) 
-    {
-        phdr = (Elf_Phdr *)(elfbase + ehdr->e_phoff + (h*ehdr->e_phentsize));
-        if ( !is_loadable_phdr(phdr) )
-            continue;
-        if ( phdr->p_paddr < kernstart )
-            kernstart = phdr->p_paddr;
-        if ( (phdr->p_paddr + phdr->p_memsz) > kernend )
-            kernend = phdr->p_paddr + phdr->p_memsz;
-    }
-
-    if ( (kernstart > kernend) || 
-         (ehdr->e_entry < kernstart) || 
-         (ehdr->e_entry > kernend) )
-    {
-        ERROR("Malformed ELF image.");
-        return -EINVAL;
-    }
-
-    dsi->v_start = kernstart;
-    if ( (p = strstr(guestinfo, "VIRT_BASE=")) != NULL )
-        dsi->v_start = strtoul(p+10, &p, 0);
-
-    if ( (p = strstr(guestinfo, "BSD_SYMTAB")) != NULL )
-        dsi->load_symtab = 1;
-
-    dsi->v_kernstart = kernstart;
-    dsi->v_kernend   = kernend;
-    dsi->v_kernentry = ehdr->e_entry;
-    dsi->v_end       = dsi->v_kernend;
-
-    loadelfsymtab(elfbase, 0, 0, NULL, dsi);
-
-    return 0;
-}
-
-static int
-loadelfimage(
-    char *elfbase, int xch, u32 dom, unsigned long *parray,
-    struct domain_setup_info *dsi)
-{
-    Elf_Ehdr *ehdr = (Elf_Ehdr *)elfbase;
-    Elf_Phdr *phdr;
-    int h;
-
-    char         *va;
-    unsigned long pa, done, chunksz;
-
-    for ( h = 0; h < ehdr->e_phnum; h++ ) 
-    {
-        phdr = (Elf_Phdr *)(elfbase + ehdr->e_phoff + (h*ehdr->e_phentsize));
-        if ( !is_loadable_phdr(phdr) )
-            continue;
-        
-        for ( done = 0; done < phdr->p_filesz; done += chunksz )
-        {
-            pa = (phdr->p_paddr + done) - dsi->v_start;
-            va = xc_map_foreign_range(
-                xch, dom, PAGE_SIZE, PROT_WRITE, parray[pa>>PAGE_SHIFT]);
-            chunksz = phdr->p_filesz - done;
-            if ( chunksz > (PAGE_SIZE - (pa & (PAGE_SIZE-1))) )
-                chunksz = PAGE_SIZE - (pa & (PAGE_SIZE-1));
-            memcpy(va + (pa & (PAGE_SIZE-1)),
-                   elfbase + phdr->p_offset + done, chunksz);
-            munmap(va, PAGE_SIZE);
-        }
-
-        for ( ; done < phdr->p_memsz; done += chunksz )
-        {
-            pa = (phdr->p_paddr + done) - dsi->v_start;
-            va = xc_map_foreign_range(
-                xch, dom, PAGE_SIZE, PROT_WRITE, parray[pa>>PAGE_SHIFT]);
-            chunksz = phdr->p_memsz - done;
-            if ( chunksz > (PAGE_SIZE - (pa & (PAGE_SIZE-1))) )
-                chunksz = PAGE_SIZE - (pa & (PAGE_SIZE-1));
-            memset(va + (pa & (PAGE_SIZE-1)), 0, chunksz);
-            munmap(va, PAGE_SIZE);
-        }
-    }
-
-    loadelfsymtab(elfbase, xch, dom, parray, dsi);
-
-    return 0;
-}
-
-#define ELFROUND (ELFSIZE / 8)
-
-static int
-loadelfsymtab(
-    char *elfbase, int xch, u32 dom, unsigned long *parray,
-    struct domain_setup_info *dsi)
-{
-    Elf_Ehdr *ehdr = (Elf_Ehdr *)elfbase, *sym_ehdr;
-    Elf_Shdr *shdr;
-    unsigned long maxva, symva;
-    char *p;
-    int h, i;
-
-    if ( !dsi->load_symtab )
-        return 0;
-
-    p = malloc(sizeof(int) + sizeof(Elf_Ehdr) +
-               ehdr->e_shnum * sizeof(Elf_Shdr));
-    if (p == NULL)
-        return 0;
-
-    maxva = (dsi->v_kernend + ELFROUND - 1) & ~(ELFROUND - 1);
-    symva = maxva;
-    maxva += sizeof(int);
-    dsi->symtab_addr = maxva;
-    dsi->symtab_len = 0;
-    maxva += sizeof(Elf_Ehdr) + ehdr->e_shnum * sizeof(Elf_Shdr);
-    maxva = (maxva + ELFROUND - 1) & ~(ELFROUND - 1);
-
-    shdr = (Elf_Shdr *)(p + sizeof(int) + sizeof(Elf_Ehdr));
-    memcpy(shdr, elfbase + ehdr->e_shoff, ehdr->e_shnum * sizeof(Elf_Shdr));
-
-    for ( h = 0; h < ehdr->e_shnum; h++ ) 
-    {
-        if ( shdr[h].sh_type == SHT_STRTAB )
-        {
-            /* Look for a strtab @i linked to symtab @h. */
-            for ( i = 0; i < ehdr->e_shnum; i++ )
-                if ( (shdr[i].sh_type == SHT_SYMTAB) &&
-                     (shdr[i].sh_link == h) )
-                    break;
-            /* Skip symtab @h if we found no corresponding strtab @i. */
-            if ( i == ehdr->e_shnum )
-            {
-                shdr[h].sh_offset = 0;
-                continue;
-            }
-        }
-
-        if ( (shdr[h].sh_type == SHT_STRTAB) ||
-             (shdr[h].sh_type == SHT_SYMTAB) )
-        {
-            if ( parray != NULL )
-                xc_map_memcpy(maxva, elfbase + shdr[h].sh_offset, shdr[h].sh_size,
-                           xch, dom, parray, dsi->v_start);
-
-            /* Mangled to be based on ELF header location. */
-            shdr[h].sh_offset = maxva - dsi->symtab_addr;
-
-            dsi->symtab_len += shdr[h].sh_size;
-            maxva += shdr[h].sh_size;
-            maxva = (maxva + ELFROUND - 1) & ~(ELFROUND - 1);
-        }
-
-        shdr[h].sh_name = 0;  /* Name is NULL. */
-    }
-
-    if ( dsi->symtab_len == 0 )
-    {
-        dsi->symtab_addr = 0;
-        goto out;
-    }
-
-    if ( parray != NULL )
-    {
-        *(int *)p = maxva - dsi->symtab_addr;
-        sym_ehdr = (Elf_Ehdr *)(p + sizeof(int));
-        memcpy(sym_ehdr, ehdr, sizeof(Elf_Ehdr));
-        sym_ehdr->e_phoff = 0;
-        sym_ehdr->e_shoff = sizeof(Elf_Ehdr);
-        sym_ehdr->e_phentsize = 0;
-        sym_ehdr->e_phnum = 0;
-        sym_ehdr->e_shstrndx = SHN_UNDEF;
-
-        /* Copy total length, crafted ELF header and section header table */
-        xc_map_memcpy(symva, p, sizeof(int) + sizeof(Elf_Ehdr) +
-                   ehdr->e_shnum * sizeof(Elf_Shdr), xch, dom, parray,
-                   dsi->v_start);
-    }
-
-    dsi->symtab_len = maxva - dsi->symtab_addr;
-    dsi->v_end = round_pgup(maxva);
-
- out:
-    if ( p != NULL )
-        free(p);
-
-    return 0;
 }
