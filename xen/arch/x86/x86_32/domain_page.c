@@ -15,30 +15,19 @@
 #include <xen/sched.h>
 #include <xen/mm.h>
 #include <xen/perfc.h>
+#include <xen/domain_page.h>
 #include <asm/current.h>
-#include <asm/domain_page.h>
 #include <asm/flushtlb.h>
 #include <asm/hardirq.h>
+
+#define MAPCACHE_ORDER    10
+#define MAPCACHE_ENTRIES  (1 << MAPCACHE_ORDER)
 
 l1_pgentry_t *mapcache;
 static unsigned int map_idx, epoch, shadow_epoch[NR_CPUS];
 static spinlock_t map_lock = SPIN_LOCK_UNLOCKED;
 
-/* Use a spare PTE bit to mark entries ready for recycling. */
-#define READY_FOR_TLB_FLUSH (1<<10)
-
-static void flush_all_ready_maps(void)
-{
-    l1_pgentry_t *cache = mapcache;
-    unsigned int i;
-
-    for ( i = 0; i < MAPCACHE_ENTRIES; i++ )
-        if ( (l1e_get_flags(cache[i]) & READY_FOR_TLB_FLUSH) )
-            cache[i] = l1e_empty();
-}
-
-
-void *map_domain_mem(unsigned long pa)
+void *map_domain_page(unsigned long pfn)
 {
     unsigned long va;
     unsigned int idx, cpu = smp_processor_id();
@@ -48,7 +37,7 @@ void *map_domain_mem(unsigned long pa)
 #endif
 
     ASSERT(!in_irq());
-    perfc_incrc(map_domain_mem_count);
+    perfc_incrc(map_domain_page_count);
 
     spin_lock(&map_lock);
 
@@ -65,7 +54,6 @@ void *map_domain_mem(unsigned long pa)
         if ( unlikely(idx == 0) )
         {
             ASSERT(flush_count++ == 0);
-            flush_all_ready_maps();
             perfc_incrc(domain_page_tlb_flush);
             local_flush_tlb();
             shadow_epoch[cpu] = ++epoch;
@@ -73,19 +61,19 @@ void *map_domain_mem(unsigned long pa)
     }
     while ( l1e_get_flags(cache[idx]) & _PAGE_PRESENT );
 
-    cache[idx] = l1e_from_paddr(pa & PAGE_MASK, __PAGE_HYPERVISOR);
+    cache[idx] = l1e_from_pfn(pfn, __PAGE_HYPERVISOR);
 
     spin_unlock(&map_lock);
 
-    va = MAPCACHE_VIRT_START + (idx << PAGE_SHIFT) + (pa & ~PAGE_MASK);
+    va = MAPCACHE_VIRT_START + (idx << PAGE_SHIFT);
     return (void *)va;
 }
 
-void unmap_domain_mem(void *va)
+void unmap_domain_page(void *va)
 {
     unsigned int idx;
     ASSERT((void *)MAPCACHE_VIRT_START <= va);
     ASSERT(va < (void *)MAPCACHE_VIRT_END);
     idx = ((unsigned long)va - MAPCACHE_VIRT_START) >> PAGE_SHIFT;
-    l1e_add_flags(mapcache[idx], READY_FOR_TLB_FLUSH);
+    mapcache[idx] = l1e_empty();
 }

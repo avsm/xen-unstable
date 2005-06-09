@@ -18,6 +18,8 @@
 #define	CONFIG_IA64_PAGE_SIZE_16KB	// 4KB doesn't work?!?
 #define	CONFIG_IA64_GRANULE_16MB
 
+#define CONFIG_EFI_PCDP
+
 #ifndef __ASSEMBLY__
 
 // can't find where this typedef was before?!?
@@ -223,7 +225,6 @@ struct screen_info { };
 #define FORCE_CRASH()	asm("break 0;;");
 
 // these declarations got moved at some point, find a better place for them
-extern int opt_noht;
 extern int ht_per_core;
 
 // needed for include/xen/smp.h

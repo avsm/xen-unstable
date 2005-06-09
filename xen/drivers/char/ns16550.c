@@ -16,7 +16,7 @@
 #include <asm/io.h>
 
 /* Config serial port with a string <baud>,DPS,<io-base>,<irq>. */
-static char opt_com1[30] = "", opt_com2[30] = "";
+char opt_com1[30] = "", opt_com2[30] = "";
 string_param("com1", opt_com1);
 string_param("com2", opt_com2);
 
@@ -49,7 +49,15 @@ static struct ns16550 {
 #define IER_ELSI        0x04    /* rx line status       */
 #define IER_EMSI        0x08    /* MODEM status         */
 
-/* FIFO control register */
+/* Interrupt Identification Register */
+#define IIR_NOINT       0x01    /* no interrupt pending */
+#define IIR_IMASK       0x06    /* interrupt identity:  */
+#define IIR_LSI         0x06    /*  - rx line status    */
+#define IIR_RDAI        0x04    /*  - rx data recv'd    */
+#define IIR_THREI       0x02    /*  - tx reg. empty     */
+#define IIR_MSI         0x00    /*  - MODEM status      */
+
+/* FIFO Control Register */
 #define FCR_ENABLE      0x01    /* enable FIFO          */
 #define FCR_CLRX        0x02    /* clear Rx FIFO        */
 #define FCR_CLTX        0x04    /* clear Tx FIFO        */
@@ -59,7 +67,7 @@ static struct ns16550 {
 #define FCR_TRG8        0x80    /* Rx FIFO trig lev 8   */
 #define FCR_TRG14       0xc0    /* Rx FIFO trig lev 14  */
 
-/* Line control register */
+/* Line Control Register */
 #define LCR_DLAB        0x80    /* Divisor Latch Access */
 
 /* Modem Control Register */
@@ -101,16 +109,25 @@ static void ns_write_reg(struct ns16550 *uart, int reg, char c)
 static void ns16550_interrupt(
     int irq, void *dev_id, struct cpu_user_regs *regs)
 {
-    serial_rx_interrupt(dev_id, regs);
+    struct serial_port *port = dev_id;
+    struct ns16550 *uart = port->uart;
+
+    while ( !(ns_read_reg(uart, IIR) & IIR_NOINT) )
+    {
+        serial_tx_interrupt(port, regs);
+        serial_rx_interrupt(port, regs);
+    }
+}
+
+static int ns16550_tx_empty(struct serial_port *port)
+{
+    struct ns16550 *uart = port->uart;
+    return !!(ns_read_reg(uart, LSR) & LSR_THRE);
 }
 
 static void ns16550_putc(struct serial_port *port, char c)
 {
     struct ns16550 *uart = port->uart;
-
-    while ( !(ns_read_reg(uart, LSR) & LSR_THRE) )
-        cpu_relax();
-
     ns_write_reg(uart, THR, c);
 }
 
@@ -150,6 +167,10 @@ static void ns16550_init_preirq(struct serial_port *port)
 
     /* Enable and clear the FIFOs. Set a large trigger threshold. */
     ns_write_reg(uart, FCR, FCR_ENABLE | FCR_CLRX | FCR_CLTX | FCR_TRG14);
+
+    /* Check this really is a 16550+. Otherwise we have no FIFOs. */
+    if ( (ns_read_reg(uart, IIR) & 0xc0) == 0xc0 )
+        port->tx_fifo_size = 16;
 }
 
 static void ns16550_init_postirq(struct serial_port *port)
@@ -157,20 +178,19 @@ static void ns16550_init_postirq(struct serial_port *port)
     struct ns16550 *uart = port->uart;
     int rc;
 
+    serial_async_transmit(port);
+
     uart->irqaction.handler = ns16550_interrupt;
     uart->irqaction.name    = "ns16550";
     uart->irqaction.dev_id  = port;
     if ( (rc = setup_irq(uart->irq, &uart->irqaction)) != 0 )
         printk("ERROR: Failed to allocate na16550 IRQ %d\n", uart->irq);
 
-    /* For sanity, clear the receive FIFO. */
-    ns_write_reg(uart, FCR, FCR_ENABLE | FCR_CLRX | FCR_TRG14);
-
     /* Master interrupt enable; also keep DTR/RTS asserted. */
     ns_write_reg(uart, MCR, MCR_OUT2 | MCR_DTR | MCR_RTS);
 
-    /* Enable receive interrupts. */
-    ns_write_reg(uart, IER, IER_ERDAI);
+    /* Enable receive and transmit interrupts. */
+    ns_write_reg(uart, IER, IER_ERDAI | IER_ETHREI);
 }
 
 #ifdef CONFIG_X86
@@ -188,6 +208,7 @@ static struct uart_driver ns16550_driver = {
     .init_preirq  = ns16550_init_preirq,
     .init_postirq = ns16550_init_postirq,
     .endboot      = ns16550_endboot,
+    .tx_empty     = ns16550_tx_empty,
     .putc         = ns16550_putc,
     .getc         = ns16550_getc
 };

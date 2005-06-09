@@ -1692,9 +1692,6 @@ editing \path{grub.conf}.
 \item [watchdog ] 
  Enable NMI watchdog which can report certain failures. 
 
-\item [noht ] 
- Disable Hyperthreading. 
-
 \item [badpage=$<$page number$>$,$<$page number$>$, \ldots ] 
  Specify a list of pages not to be allocated for use 
  because they contain bad bytes. For example, if your
@@ -1728,6 +1725,13 @@ editing \path{grub.conf}.
  debugger). Sharing is controlled by MSB of each
  transmitted/received character.
  [NB. Default for this option is `com1,vga'] 
+
+\item [sync\_console ]
+ Force synchronous console output. This is useful if you system fails
+ unexpectedly before it has sent all available output to the
+ console. In most cases Xen will automatically enter synchronous mode
+ when an exceptional event occurs, but this option provides a manual
+ fallback.
 
 \item [conswitch=$<$switch-char$><$auto-switch-char$>$ ] 
  Specify how to switch serial-console input between
