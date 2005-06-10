@@ -19,6 +19,7 @@
 #define	CONFIG_IA64_GRANULE_16MB
 
 #define CONFIG_EFI_PCDP
+#define CONFIG_SERIAL_SGI_L1_CONSOLE
 
 #ifndef __ASSEMBLY__
 
@@ -26,6 +27,8 @@
 // needed by include/asm-ia64/processor.h (and other places)
 typedef int pid_t;
 
+// now needed for xen/include/mm.h
+typedef unsigned long physaddr_t;
 // from include/linux/kernel.h
 #define ALIGN(x,a) (((x)+(a)-1)&~((a)-1))
 
