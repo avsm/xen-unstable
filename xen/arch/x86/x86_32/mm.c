@@ -22,11 +22,13 @@
 #include <xen/lib.h>
 #include <xen/init.h>
 #include <xen/mm.h>
+#include <xen/sched.h>
 #include <asm/current.h>
 #include <asm/page.h>
 #include <asm/flushtlb.h>
 #include <asm/fixmap.h>
-#include <asm/domain_page.h>
+
+extern l1_pgentry_t *mapcache;
 
 unsigned int PAGE_HYPERVISOR         = __PAGE_HYPERVISOR;
 unsigned int PAGE_HYPERVISOR_NOCACHE = __PAGE_HYPERVISOR_NOCACHE;
@@ -41,7 +43,7 @@ struct pfn_info *alloc_xen_pagetable(void)
 
     if ( !early_boot )
     {
-        void *v = (void *)alloc_xenheap_page();
+        void *v = alloc_xenheap_page();
         return ((v == NULL) ? NULL : virt_to_page(v));
     }
 
@@ -52,7 +54,7 @@ struct pfn_info *alloc_xen_pagetable(void)
 
 void free_xen_pagetable(struct pfn_info *pg)
 {
-    free_xenheap_page((unsigned long)page_to_virt(pg));
+    free_xenheap_page(page_to_virt(pg));
 }
 
 l2_pgentry_t *virt_to_xen_l2e(unsigned long v)
@@ -111,7 +113,7 @@ void __init paging_init(void)
     /* Create page tables for ioremap(). */
     for ( i = 0; i < (IOREMAP_MBYTES >> (L2_PAGETABLE_SHIFT - 20)); i++ )
     {
-        ioremap_pt = (void *)alloc_xenheap_page();
+        ioremap_pt = alloc_xenheap_page();
         clear_page(ioremap_pt);
         idle_pg_table_l2[l2_linear_offset(IOREMAP_VIRT_START) + i] =
             l2e_from_page(virt_to_page(ioremap_pt), __PAGE_HYPERVISOR);
@@ -119,7 +121,7 @@ void __init paging_init(void)
 
     /* Set up mapping cache for domain pages. */
     mapcache_order = get_order(MAPCACHE_MBYTES << (20 - PAGETABLE_ORDER));
-    mapcache = (l1_pgentry_t *)alloc_xenheap_pages(mapcache_order);
+    mapcache = alloc_xenheap_pages(mapcache_order);
     memset(mapcache, 0, PAGE_SIZE << mapcache_order);
     for ( i = 0; i < (MAPCACHE_MBYTES >> (L2_PAGETABLE_SHIFT - 20)); i++ )
         idle_pg_table_l2[l2_linear_offset(MAPCACHE_VIRT_START) + i] =

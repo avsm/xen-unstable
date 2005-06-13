@@ -42,10 +42,10 @@ static void load_cpu_user_regs(struct cpu_user_regs *regs)
      * Write the guest register value into VMCS
      */
     __vmwrite(GUEST_SS_SELECTOR, regs->ss);
-    __vmwrite(GUEST_ESP, regs->esp);
-    __vmwrite(GUEST_EFLAGS, regs->eflags);
+    __vmwrite(GUEST_RSP, regs->esp);
+    __vmwrite(GUEST_RFLAGS, regs->eflags);
     __vmwrite(GUEST_CS_SELECTOR, regs->cs);
-    __vmwrite(GUEST_EIP, regs->eip);
+    __vmwrite(GUEST_RIP, regs->eip);
 }
 
 static void set_reg_value (int size, int index, int seg, struct cpu_user_regs *regs, long value)
@@ -283,7 +283,7 @@ int vmx_clear_pending_io_event(struct vcpu *v)
 
     /* Note: VMX domains may need upcalls as well */
     if (!v->vcpu_info->evtchn_pending_sel) 
-        v->vcpu_info->evtchn_upcall_pending = 0;
+        clear_bit(0, &v->vcpu_info->evtchn_upcall_pending);
 
     /* clear the pending bit for IOPACKET_PORT */
     return test_and_clear_bit(IOPACKET_PORT, 
@@ -311,10 +311,16 @@ void vmx_wait_io()
     extern void do_block();
 
     do {
-        do_block();
+        if(!test_bit(IOPACKET_PORT, 
+            &current->domain->shared_info->evtchn_pending[0]))
+            do_block();
         vmx_check_events(current);
         if (!test_bit(ARCH_VMX_IO_WAIT, &current->arch.arch_vmx.flags))
             break;
+        /* Events other than IOPACKET_PORT might have woken us up. In that
+           case, safely go back to sleep. */
+        clear_bit(IOPACKET_PORT>>5, &current->vcpu_info->evtchn_pending_sel);
+        clear_bit(0, &current->vcpu_info->evtchn_upcall_pending);
     } while(1);
 }
 
@@ -433,7 +439,7 @@ void vmx_intr_assist(struct vcpu *d)
         return;
     }
 
-    __vmread(GUEST_EFLAGS, &eflags);
+    __vmread(GUEST_RFLAGS, &eflags);
     if (irq_masked(eflags)) {
         VMX_DBG_LOG(DBG_LEVEL_1, "guesting pending: %x, eflags: %lx",
                     highest_vector, eflags);
@@ -473,7 +479,7 @@ void vmx_do_resume(struct vcpu *d)
         __vmwrite(GUEST_CR3, pagetable_get_paddr(d->domain->arch.phys_table));
 
     __vmwrite(HOST_CR3, pagetable_get_paddr(d->arch.monitor_table));
-    __vmwrite(HOST_ESP, (unsigned long)get_stack_bottom());
+    __vmwrite(HOST_RSP, (unsigned long)get_stack_bottom());
 
     if (event_pending(d)) {
         vmx_check_events(d);

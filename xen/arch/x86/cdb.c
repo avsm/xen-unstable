@@ -14,6 +14,7 @@
 #include <asm/debugger.h>
 #include <xen/init.h>
 #include <xen/smp.h>
+#include <xen/console.h>
 #include <asm/apic.h>
 
 /* Printk isn't particularly safe just after we've trapped to the
@@ -358,6 +359,7 @@ __trap_to_cdb(struct cpu_user_regs *regs)
 	local_irq_save(flags);
 
 	watchdog_disable();
+	console_start_sync();
 
 	/* Shouldn't really do this, but otherwise we stop for no
 	   obvious reason, which is Bad */
@@ -383,9 +385,13 @@ __trap_to_cdb(struct cpu_user_regs *regs)
 			ASSERT(!local_irq_is_enabled());
 		}
 	}
+
+	console_end_sync();
 	watchdog_enable();
 	atomic_inc(&xendbg_running);
+
 	local_irq_restore(flags);
+
 	return 0;
 }
 

@@ -11,13 +11,13 @@
 #include <xen/serial.h>
 #include <xen/trace.h>
 #include <xen/multiboot.h>
+#include <xen/domain_page.h>
 #include <asm/bitops.h>
 #include <asm/smp.h>
 #include <asm/processor.h>
 #include <asm/mpspec.h>
 #include <asm/apic.h>
 #include <asm/desc.h>
-#include <asm/domain_page.h>
 #include <asm/shadow.h>
 #include <asm/e820.h>
 
@@ -32,10 +32,6 @@ static unsigned int opt_xenheap_megabytes = XENHEAP_DEFAULT_MB;
 #if defined(CONFIG_X86_64)
 integer_param("xenheap_megabytes", opt_xenheap_megabytes);
 #endif
-
-/* opt_noht: If true, Hyperthreading is ignored. */
-int opt_noht = 0;
-boolean_param("noht", opt_noht);
 
 /* opt_nosmp: If true, secondary processors are ignored. */
 static int opt_nosmp = 0;
@@ -409,7 +405,7 @@ void __init __start_xen(multiboot_info_t *mbi)
     cmdline = (char *)(mod[0].string ? __va(mod[0].string) : NULL);
     if ( cmdline != NULL )
     {
-        static char dom0_cmdline[256];
+        static char dom0_cmdline[MAX_GUEST_CMDLINE];
 
         /* Skip past the image name. */
         while ( *cmdline == ' ' ) cmdline++;

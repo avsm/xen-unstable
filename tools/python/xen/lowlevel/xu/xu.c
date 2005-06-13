@@ -908,7 +908,6 @@ static PyObject *xu_message_new(PyObject *self, PyObject *args)
         break;
     case TYPE(CMSG_MEM_REQUEST, CMSG_MEM_REQUEST_SET):
         P2C(mem_request_t, target, u32);
-        P2C(mem_request_t, status, u32);
         break;
     case TYPE(CMSG_USBIF_FE, CMSG_USBIF_FE_INTERFACE_STATUS_CHANGED):
         P2C(usbif_fe_interface_status_changed_t, status, u32);
@@ -1370,7 +1369,8 @@ static PyObject *xu_port_new(PyObject *self, PyObject *args, PyObject *kwds)
 
  fail1:
     PyObject_Del((PyObject *)xup);
-    return NULL;    
+    PyErr_SetString(PyExc_ValueError, "cannot create port");
+    return NULL;
 }
 
 static PyObject *xu_port_getattr(PyObject *obj, char *name)

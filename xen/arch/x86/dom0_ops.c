@@ -13,7 +13,7 @@
 #include <public/dom0_ops.h>
 #include <xen/sched.h>
 #include <xen/event.h>
-#include <asm/domain_page.h>
+#include <xen/domain_page.h>
 #include <asm/msr.h>
 #include <xen/trace.h>
 #include <xen/console.h>
@@ -155,7 +155,10 @@ long arch_do_dom0_op(dom0_op_t *op, dom0_op_t *u_dom0_op)
         {
             if ( (d->arch.iobmp_mask = xmalloc_array(
                 u8, IOBMP_BYTES)) == NULL )
+            {
+                put_domain(d);
                 break;
+            }
             memset(d->arch.iobmp_mask, 0xFF, IOBMP_BYTES);
         }
 
@@ -256,7 +259,7 @@ long arch_do_dom0_op(dom0_op_t *op, dom0_op_t *u_dom0_op)
             break;
         }
 
-        l_arr = (unsigned long *)alloc_xenheap_page();
+        l_arr = alloc_xenheap_page();
  
         ret = 0;
         for( n = 0; n < num; )
@@ -321,7 +324,7 @@ long arch_do_dom0_op(dom0_op_t *op, dom0_op_t *u_dom0_op)
             n += j;
         }
 
-        free_xenheap_page((unsigned long)l_arr);
+        free_xenheap_page(l_arr);
 
         put_domain(d);
     }

@@ -21,7 +21,7 @@
 #include <xen/types.h>
 #include <xen/mm.h>
 #include <asm/shadow.h>
-#include <asm/domain_page.h>
+#include <xen/domain_page.h>
 #include <asm/page.h> 
 #include <xen/event.h> 
 #include <xen/trace.h>
@@ -52,12 +52,12 @@ static long get_reg_value(int size, int index, int seg, struct cpu_user_regs *re
 void store_cpu_user_regs(struct cpu_user_regs *regs)
 {
     __vmread(GUEST_SS_SELECTOR, &regs->ss);
-    __vmread(GUEST_ESP, &regs->esp);
-    __vmread(GUEST_EFLAGS, &regs->eflags);
+    __vmread(GUEST_RSP, &regs->esp);
+    __vmread(GUEST_RFLAGS, &regs->eflags);
     __vmread(GUEST_CS_SELECTOR, &regs->cs);
     __vmread(GUEST_DS_SELECTOR, &regs->ds);
     __vmread(GUEST_ES_SELECTOR, &regs->es);
-    __vmread(GUEST_EIP, &regs->eip);
+    __vmread(GUEST_RIP, &regs->eip);
 }
 
 static long get_reg_value(int size, int index, int seg, struct cpu_user_regs *regs)
@@ -238,7 +238,7 @@ static int vmx_decode(const unsigned char *inst, struct instruction *thread_inst
     unsigned long eflags;
     int index, vm86 = 0;
 
-    __vmread(GUEST_EFLAGS, &eflags);
+    __vmread(GUEST_RFLAGS, &eflags);
     if (eflags & X86_EFLAGS_VM)
 	vm86 = 1;
 
@@ -411,43 +411,41 @@ int inst_copy_from_guest(unsigned char *buf, unsigned long guest_eip,
 {
     l1_pgentry_t gpte;
     unsigned long mfn;
-    unsigned long ma;
-    unsigned char * inst_start;
+    unsigned char *inst_start;
     int remaining = 0;
         
-    if (inst_len > MAX_INST_LEN || inst_len <= 0) {
+    if ( (inst_len > MAX_INST_LEN) || (inst_len <= 0) )
         return 0;
-    }
 
-    if (vmx_paging_enabled(current)) {
+    if ( vmx_paging_enabled(current) )
+    {
         gpte = gva_to_gpte(guest_eip);
         mfn = phys_to_machine_mapping(l1e_get_pfn(gpte));
         /* Does this cross a page boundary ? */
-        if ((guest_eip & PAGE_MASK) != ((guest_eip + inst_len) & PAGE_MASK)) {
+        if ( (guest_eip & PAGE_MASK) != ((guest_eip + inst_len) & PAGE_MASK) )
+        {
             remaining = (guest_eip + inst_len) & ~PAGE_MASK;
             inst_len -= remaining;
         }
-
-    } else {
+    }
+    else
+    {
         mfn = phys_to_machine_mapping(guest_eip >> PAGE_SHIFT);
     }
-    ma = (mfn << PAGE_SHIFT) | (guest_eip & (PAGE_SIZE - 1));
-    inst_start = (unsigned char *)map_domain_mem(ma);
-                
-    memcpy((char *)buf, inst_start, inst_len);
-    unmap_domain_mem(inst_start);
 
-    if (remaining) {
+    inst_start = map_domain_page(mfn);
+    memcpy((char *)buf, inst_start + (guest_eip & ~PAGE_MASK), inst_len);
+    unmap_domain_page(inst_start);
+
+    if ( remaining )
+    {
         gpte = gva_to_gpte(guest_eip+inst_len+remaining);
         mfn = phys_to_machine_mapping(l1e_get_pfn(gpte));
-
-        ma = (mfn << PAGE_SHIFT);
-        inst_start = (unsigned char *)map_domain_mem(ma);
-                
+        inst_start = map_domain_page(mfn);
         memcpy((char *)buf+inst_len, inst_start, remaining);
-        unmap_domain_mem(inst_start);
-
+        unmap_domain_page(inst_start);
     }
+
     return inst_len+remaining;
 }
 
@@ -553,10 +551,10 @@ void handle_mmio(unsigned long va, unsigned long gpa)
     mpci_p = &current->arch.arch_vmx.vmx_platform.mpci;
     inst_decoder_regs = mpci_p->inst_decoder_regs;
 
-    __vmread(GUEST_EIP, &eip);
+    __vmread(GUEST_RIP, &eip);
     __vmread(INSTRUCTION_LEN, &inst_len);
 
-    __vmread(GUEST_EFLAGS, &eflags);
+    __vmread(GUEST_RFLAGS, &eflags);
     vm86 = eflags & X86_EFLAGS_VM;
 
     if (vm86) {
@@ -585,7 +583,7 @@ void handle_mmio(unsigned long va, unsigned long gpa)
     if (vmx_decode(check_prefix(inst, &mmio_inst), &mmio_inst) == DECODE_failure)
         domain_crash_synchronous();
 
-    __vmwrite(GUEST_EIP, eip + inst_len);
+    __vmwrite(GUEST_RIP, eip + inst_len);
     store_cpu_user_regs(inst_decoder_regs);
 
     // Only handle "mov" and "movs" instructions!

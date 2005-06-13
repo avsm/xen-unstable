@@ -15,9 +15,9 @@
 #include <xen/time.h>
 #include <xen/console.h>
 #include <xen/softirq.h>
-#include <public/dom0_ops.h>
-#include <asm/domain_page.h>
+#include <xen/domain_page.h>
 #include <asm/debugger.h>
+#include <public/dom0_ops.h>
 
 /* Both these structures are protected by the domlist_lock. */
 rwlock_t domlist_lock = RW_LOCK_UNLOCKED;
@@ -122,18 +122,9 @@ void domain_kill(struct domain *d)
 
 void domain_crash(void)
 {
-    struct domain *d = current->domain;
-
-    if ( d->domain_id == 0 )
-    {
-        show_registers(guest_cpu_user_regs());
-        panic("Domain 0 crashed!\n");
-    }
-
-#ifndef NDEBUG
+    printk("Domain %d (vcpu#%d) crashed on cpu#%d:\n",
+           current->domain->domain_id, current->vcpu_id, smp_processor_id());
     show_registers(guest_cpu_user_regs());
-#endif
-
     domain_shutdown(SHUTDOWN_crash);
 }
 
@@ -224,6 +215,26 @@ void domain_shutdown(u8 reason)
 }
 
 
+void domain_pause_for_debugger(void)
+{
+    struct domain *d = current->domain;
+    struct vcpu *v;
+
+    /*
+     * NOTE: This does not synchronously pause the domain. The debugger
+     * must issue a PAUSEDOMAIN command to ensure that all execution
+     * has ceased and guest state is committed to memory.
+     */
+    for_each_vcpu ( d, v )
+    {
+        set_bit(_VCPUF_ctrl_pause, &v->vcpu_flags);
+        domain_sleep_nosync(v);
+    }
+
+    send_guest_virq(dom0->vcpu[0], VIRQ_DEBUGGER);
+}
+
+
 /* Release resources belonging to task @p. */
 void domain_destruct(struct domain *d)
 {
@@ -255,7 +266,7 @@ void domain_destruct(struct domain *d)
     grant_table_destroy(d);
 
     free_perdomain_pt(d);
-    free_xenheap_page((unsigned long)d->shared_info);
+    free_xenheap_page(d->shared_info);
 
     free_domain_struct(d);
 

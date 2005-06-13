@@ -16,6 +16,7 @@
 #include <xen/spinlock.h>
 #include <xen/console.h>
 #include <xen/serial.h>
+#include <xen/softirq.h>
 #include <xen/keyhandler.h>
 #include <xen/mm.h>
 #include <xen/delay.h>
@@ -24,27 +25,28 @@
 #include <asm/debugger.h>
 #include <asm/io.h>
 
-/* opt_console: comma-separated list of console outputs. */
+/* console: comma-separated list of console outputs. */
 static char opt_console[30] = OPT_CONSOLE_STR;
 string_param("console", opt_console);
 
-/* opt_conswitch: a character pair controlling console switching. */
+/* conswitch: a character pair controlling console switching. */
 /* Char 1: CTRL+<char1> is used to switch console input between Xen and DOM0 */
 /* Char 2: If this character is 'x', then do not auto-switch to DOM0 when it */
 /*         boots. Any other value, or omitting the char, enables auto-switch */
 static unsigned char opt_conswitch[5] = "a";
 string_param("conswitch", opt_conswitch);
 
+/* sync_console: force synchronous console output (useful for debugging). */
+static int opt_sync_console;
+boolean_param("sync_console", opt_sync_console);
+
 static int xpos, ypos;
 static unsigned char *video;
 
-#define CONSOLE_RING_SIZE 16392
-typedef struct console_ring_st
-{
-    char buf[CONSOLE_RING_SIZE];
-    unsigned int len;
-} console_ring_t;
-static console_ring_t console_ring;
+#define CONRING_SIZE 16384
+#define CONRING_IDX_MASK(i) ((i)&(CONRING_SIZE-1))
+static char conring[CONRING_SIZE];
+static unsigned int conringc, conringp;
 
 static char printk_prefix[16] = "";
 
@@ -214,23 +216,33 @@ static void putchar_console(int c)
 
 static void putchar_console_ring(int c)
 {
-    if ( console_ring.len < CONSOLE_RING_SIZE )
-        console_ring.buf[console_ring.len++] = (char)c;
+    conring[CONRING_IDX_MASK(conringp++)] = c;
+    if ( (conringp - conringc) > CONRING_SIZE )
+        conringc = conringp - CONRING_SIZE;
 }
 
-long read_console_ring(unsigned long str, unsigned int count, unsigned cmd)
+long read_console_ring(char **pstr, u32 *pcount, int clear)
 {
-    unsigned int len;
-    
-    len = (console_ring.len < count) ? console_ring.len : count;
-    
-    if ( copy_to_user((char *)str, console_ring.buf, len) )
-        return -EFAULT;
+    char *str = *pstr;
+    u32 count = *pcount;
+    unsigned int p, q;
+    unsigned long flags;
 
-    if ( cmd & CONSOLE_RING_CLEAR )
-        console_ring.len = 0;
-    
-    return len;
+    /* Start of buffer may get overwritten during copy. So copy backwards. */
+    for ( p = conringp, q = count; (p > conringc) && (q > 0); p--, q-- )
+        if ( put_user(conring[CONRING_IDX_MASK(p-1)], (char *)str+q-1) )
+            return -EFAULT;
+
+    if ( clear )
+    {
+        spin_lock_irqsave(&console_lock, flags);
+        conringc = conringp;
+        spin_unlock_irqrestore(&console_lock, flags);
+    }
+
+    *pstr   = str + q;
+    *pcount = count - q;
+    return 0;
 }
 
 
@@ -297,13 +309,44 @@ static void serial_rx(char c, struct cpu_user_regs *regs)
     __serial_rx(c, regs);
 }
 
+long guest_console_write(char *buffer, int count)
+{
+    char kbuf[128];
+    int kcount;
+
+    while ( count > 0 )
+    {
+        while ( serial_tx_space(sercon_handle) < (SERIAL_TXBUFSZ / 2) )
+        {
+            if ( hypercall_preempt_check() )
+                break;
+            cpu_relax();
+        }
+
+        if ( hypercall_preempt_check() )
+            return hypercall3_create_continuation(
+                __HYPERVISOR_console_io, CONSOLEIO_write, count, buffer);
+
+        kcount = min_t(int, count, sizeof(kbuf)-1);
+        if ( copy_from_user(kbuf, buffer, kcount) )
+            return -EFAULT;
+        kbuf[kcount] = '\0';
+
+        serial_puts(sercon_handle, kbuf);
+
+        buffer += kcount;
+        count  -= kcount;
+    }
+
+    return 0;
+}
+
 long do_console_io(int cmd, int count, char *buffer)
 {
-    char *kbuf;
-    long  rc;
+    long rc;
 
 #ifndef VERBOSE
-    /* Only domain-0 may access the emergency console. */
+    /* Only domain 0 may access the emergency console. */
     if ( current->domain->domain_id != 0 )
         return -EPERM;
 #endif
@@ -311,17 +354,7 @@ long do_console_io(int cmd, int count, char *buffer)
     switch ( cmd )
     {
     case CONSOLEIO_write:
-        if ( count > (PAGE_SIZE-1) )
-            count = PAGE_SIZE-1;
-        if ( (kbuf = (char *)alloc_xenheap_page()) == NULL )
-            return -ENOMEM;
-        kbuf[count] = '\0';
-        rc = count;
-        if ( copy_from_user(kbuf, buffer, count) )
-            rc = -EFAULT;
-        else
-            serial_puts(sercon_handle, kbuf);
-        free_xenheap_page((unsigned long)kbuf);
+        rc = guest_console_write(buffer, count);
         break;
     case CONSOLEIO_read:
         rc = 0;
@@ -437,6 +470,12 @@ void init_console(void)
            XEN_COMPILER, XEN_COMPILE_DATE);
     printk(" Latest ChangeSet: %s\n\n", XEN_CHANGESET);
     set_printk_prefix("(XEN) ");
+
+    if ( opt_sync_console )
+    {
+        serial_start_sync(sercon_handle);
+        printk("Console output is synchronous.\n");
+    }
 }
 
 void console_endboot(int disable_vga)
@@ -465,6 +504,16 @@ void console_force_unlock(void)
 void console_force_lock(void)
 {
     spin_lock(&console_lock);
+}
+
+void console_start_sync(void)
+{
+    serial_start_sync(sercon_handle);
+}
+
+void console_end_sync(void)
+{
+    serial_end_sync(sercon_handle);
 }
 
 void console_putc(char c)
@@ -579,7 +628,7 @@ static int __init debugtrace_init(void)
         return 0;
 
     order = get_order(bytes);
-    debugtrace_buf = (char *)alloc_xenheap_pages(order);
+    debugtrace_buf = alloc_xenheap_pages(order);
     ASSERT(debugtrace_buf != NULL);
 
     memset(debugtrace_buf, '\0', bytes);

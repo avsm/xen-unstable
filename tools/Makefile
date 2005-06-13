@@ -3,13 +3,16 @@ include $(XEN_ROOT)/tools/Rules.mk
 
 SUBDIRS :=
 SUBDIRS += libxc
+SUBDIRS += xenstore
 SUBDIRS += misc
 SUBDIRS += examples
 SUBDIRS += xentrace
 SUBDIRS += python
 SUBDIRS += xcs
 SUBDIRS += xcutils
+SUBDIRS += xenstore
 SUBDIRS += pygrub
+SUBDIRS += firmware
 
 .PHONY: all install clean check check_clean ioemu eioemuinstall ioemuclean
 

@@ -10,15 +10,15 @@
 #include <xen/types.h>
 #include <xen/lib.h>
 #include <xen/mm.h>
-#include <public/dom0_ops.h>
 #include <xen/sched.h>
 #include <xen/domain.h>
 #include <xen/event.h>
-#include <asm/domain_page.h>
+#include <xen/domain_page.h>
 #include <xen/trace.h>
 #include <xen/console.h>
-#include <public/sched_ctl.h>
 #include <asm/current.h>
+#include <public/dom0_ops.h>
+#include <public/sched_ctl.h>
 
 extern long arch_do_dom0_op(dom0_op_t *op, dom0_op_t *u_dom0_op);
 extern void arch_getdomaininfo_ctxt(
@@ -449,9 +449,11 @@ long do_dom0_op(dom0_op_t *u_dom0_op)
     
     case DOM0_READCONSOLE:
     {
-        ret = read_console_ring(op->u.readconsole.str, 
-                                op->u.readconsole.count,
-                                op->u.readconsole.cmd); 
+        ret = read_console_ring(
+            &op->u.readconsole.buffer, 
+            &op->u.readconsole.count,
+            op->u.readconsole.clear); 
+        copy_to_user(u_dom0_op, op, sizeof(*op));
     }
     break;
 

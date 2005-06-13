@@ -4,12 +4,13 @@ include $(BASEDIR)/Rules.mk
 
 OBJS = xensetup.o setup.o time.o irq.o ia64_ksyms.o process.o smp.o \
 	xenmisc.o pdb-stub.o acpi.o hypercall.o \
-	machvec.o dom0_ops.o domain.o \
+	machvec.o dom0_ops.o domain.o hpsimserial.o pcdp.o \
 	idle0_task.o pal.o hpsim.o efi.o efi_stub.o ivt.o mm_contig.o \
 	xenmem.o sal.o cmdline.o mm_init.o tlb.o smpboot.o \
 	extable.o linuxextable.o xenirq.o xentime.o \
 	regionreg.o entry.o unaligned.o privop.o vcpu.o \
-	irq_ia64.o irq_lsapic.o vhpt.o xenasm.o hyperprivop.o dom_fw.o
+	irq_ia64.o irq_lsapic.o vhpt.o xenasm.o hyperprivop.o dom_fw.o \
+	sn_console.o
 
 ifeq ($(CONFIG_VTI),y)
 OBJS += vmx_init.o vmx_virt.o vmx_vcpu.o vmx_process.o vmx_vsa.o vmx_ivt.o \

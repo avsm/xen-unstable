@@ -155,7 +155,7 @@ struct domain_setup_info
     unsigned long symtab_addr;
     unsigned long symtab_len;
     /* Indicate whether it's xen specific image */
-    unsigned int xen_elf_image;
+    char *xen_section_string;
 };
 
 extern struct domain idle0_domain;
@@ -217,6 +217,7 @@ struct domain *find_domain_by_id(domid_t dom);
 extern void domain_destruct(struct domain *d);
 extern void domain_kill(struct domain *d);
 extern void domain_shutdown(u8 reason);
+extern void domain_pause_for_debugger(void);
 
 /*
  * Mark current domain as crashed. This function returns: the domain is not

@@ -88,17 +88,14 @@ void blkif_create(blkif_be_create_t *create)
     blkif->domid  = domid;
     blkif->handle = handle;
     blkif->status = DISCONNECTED;
-/*
-    spin_lock_init(&blkif->vbd_lock);
-    spin_lock_init(&blkif->blk_ring_lock);
-    atomic_set(&blkif->refcnt, 0);
-*/
+
     pblkif = &blkif_hash[BLKIF_HASH(domid, handle)];
     while ( *pblkif != NULL )
     {
         if ( ((*pblkif)->domid == domid) && ((*pblkif)->handle == handle) )
         {
-            DPRINTF("Could not create blkif: already exists\n");
+            DPRINTF("Could not create blkif: already exists (%d,%d)\n",
+                domid, handle);
             create->status = BLKIF_BE_STATUS_INTERFACE_EXISTS;
             free(blkif);
             return;
@@ -142,7 +139,6 @@ void blkif_destroy(blkif_be_destroy_t *destroy)
 
  destroy:
     *pblkif = blkif->hash_next;
-    /* destroy_all_vbds(blkif); */
     free(blkif);
     destroy->status = BLKIF_BE_STATUS_OKAY;
 }
@@ -184,8 +180,36 @@ void vbd_create(blkif_be_vbd_create_t *create)
         vdip = &(*vdip)->next;
     *vdip = vdi;
     
-    DPRINTF("vbd_grow: happy return!\n"); 
+    DPRINTF("blkif_create succeeded\n"); 
     create->status = BLKIF_BE_STATUS_OKAY;
+}
+
+void vbd_destroy(blkif_be_vbd_destroy_t *destroy)
+{
+    blkif_t            *blkif;
+    vdi_t              *vdi, **vdip;
+    blkif_vdev_t        vdevice = destroy->vdevice;
+    
+    blkif = blkif_find_by_handle(destroy->domid, destroy->blkif_handle);
+    if ( blkif == NULL )
+    {
+        DPRINTF("vbd_destroy attempted for non-existent blkif (%u,%u)\n", 
+                destroy->domid, destroy->blkif_handle); 
+        destroy->status = BLKIF_BE_STATUS_INTERFACE_NOT_FOUND;
+        return;
+    }
+
+    vdip = &blkif->vdi_hash[VDI_HASH(vdevice)];
+    while ((*vdip != NULL) && ((*vdip)->vdevice != vdevice))
+        vdip = &(*vdip)->next;
+
+    if (*vdip != NULL) 
+    {
+        vdi = *vdip;
+        *vdip = vdi->next;
+        vdi_put(vdi);
+    }
+        
 }
 
 int parallax_control(control_msg_t *msg)
@@ -220,6 +244,20 @@ int parallax_control(control_msg_t *msg)
             goto parse_error;
         vbd_create((blkif_be_vbd_create_t *)msg->msg);
         break;
+        
+    case CMSG_BLKIF_BE_VBD_DESTROY:
+        if ( msg->length != sizeof(blkif_be_vbd_destroy_t) )
+            goto parse_error;
+        vbd_destroy((blkif_be_vbd_destroy_t *)msg->msg);
+        break;
+
+    case CMSG_BLKIF_BE_CONNECT:
+    case CMSG_BLKIF_BE_DISCONNECT:
+        /* we don't manage the device channel, the tap does. */
+        break;
+
+    default:
+        goto parse_error;
     }
     return 0;
 parse_error:
@@ -290,33 +328,33 @@ typedef struct {
 pending_t pending_list[MAX_REQUESTS];
 
 struct cb_param {
-	pending_t *pent;
-	int       segment;
-	u64       sector; 
-	u64       vblock; /* for debug printing -- can be removed. */
+    pending_t *pent;
+    int       segment;
+    u64       sector; 
+    u64       vblock; /* for debug printing -- can be removed. */
 };
 
 static void read_cb(struct io_ret r, void *in_param)
 {
-	struct cb_param *param = (struct cb_param *)in_param;
-	pending_t *p = param->pent;
-	int segment = param->segment;
-	blkif_request_t *req = p->req;
+    struct cb_param *param = (struct cb_param *)in_param;
+    pending_t *p = param->pent;
+    int segment = param->segment;
+    blkif_request_t *req = p->req;
     unsigned long size, offset, start;
-	char *dpage, *spage;
+    char *dpage, *spage;
 	
-	spage  = IO_BLOCK(r);
-	if (spage == NULL) { p->error++; goto finish; }
-	dpage  = (char *)MMAP_VADDR(ID_TO_IDX(req->id), segment);
+    spage  = IO_BLOCK(r);
+    if (spage == NULL) { p->error++; goto finish; }
+    dpage  = (char *)MMAP_VADDR(ID_TO_IDX(req->id), segment);
     
     /* Calculate read size and offset within the read block. */
 
     offset = (param->sector << SECTOR_SHIFT) % BLOCK_SIZE;
     size = ( blkif_last_sect (req->frame_and_sects[segment]) -
              blkif_first_sect(req->frame_and_sects[segment]) + 1
-           ) << SECTOR_SHIFT;
+        ) << SECTOR_SHIFT;
     start = blkif_first_sect(req->frame_and_sects[segment]) 
-            << SECTOR_SHIFT;
+        << SECTOR_SHIFT;
 
     DPRINTF("ParallaxRead: sect: %lld (%ld,%ld),  "
             "vblock %llx, "
@@ -333,23 +371,23 @@ static void read_cb(struct io_ret r, void *in_param)
     pthread_mutex_lock(&p->mutex);
     p->count--;
     
-	if (p->count == 0) {
+    if (p->count == 0) {
     	blkif_response_t *rsp;
     	
         rsp = (blkif_response_t *)req;
         rsp->id = req->id;
         rsp->operation = BLKIF_OP_READ;
     	if (p->error == 0) {
-	        rsp->status = BLKIF_RSP_OKAY;
+            rsp->status = BLKIF_RSP_OKAY;
     	} else {
-    		rsp->status = BLKIF_RSP_ERROR;
+            rsp->status = BLKIF_RSP_ERROR;
     	}
         blktap_inject_response(rsp);       
     }
     
     pthread_mutex_unlock(&p->mutex);
 	
-	free(param); /* TODO: replace with cached alloc/dealloc */
+    free(param); /* TODO: replace with cached alloc/dealloc */
 }	
 
 int parallax_read(blkif_request_t *req, blkif_t *blkif)
@@ -376,21 +414,20 @@ int parallax_read(blkif_request_t *req, blkif_t *blkif)
         pthread_t tid;
         int ret;
         struct cb_param *p;
-
-	    /* Round the requested segment to a block address. */
-	    sector  = req->sector_number + (8*i);
-	    vblock = (sector << SECTOR_SHIFT) >> BLOCK_SHIFT;
-
-		/* TODO: Replace this call to malloc with a cached allocation */
-		p = (struct cb_param *)malloc(sizeof(struct cb_param));
-		p->pent = pent;
-		p->sector = sector; 
-		p->segment = i;     
-		p->vblock = vblock; /* dbg */
-		
-	    /* Get that block from the store. */
-	    async_read(vdi, vblock, read_cb, (void *)p);
-
+        
+        /* Round the requested segment to a block address. */
+        sector  = req->sector_number + (8*i);
+        vblock = (sector << SECTOR_SHIFT) >> BLOCK_SHIFT;
+        
+        /* TODO: Replace this call to malloc with a cached allocation */
+        p = (struct cb_param *)malloc(sizeof(struct cb_param));
+        p->pent = pent;
+        p->sector = sector; 
+        p->segment = i;     
+        p->vblock = vblock; /* dbg */
+        
+        /* Get that block from the store. */
+        vdi_read(vdi, vblock, read_cb, (void *)p);    
     }
     
     return BLKTAP_STOLEN;
@@ -406,33 +443,33 @@ err:
 
 static void write_cb(struct io_ret r, void *in_param)
 {
-	struct cb_param *param = (struct cb_param *)in_param;
-	pending_t *p = param->pent;
-	blkif_request_t *req = p->req;
-
-	/* catch errors from the block code. */
-	if (IO_INT(r) < 0) p->error++;
-	
+    struct cb_param *param = (struct cb_param *)in_param;
+    pending_t *p = param->pent;
+    blkif_request_t *req = p->req;
+    
+    /* catch errors from the block code. */
+    if (IO_INT(r) < 0) p->error++;
+    
     pthread_mutex_lock(&p->mutex);
     p->count--;
     
-	if (p->count == 0) {
+    if (p->count == 0) {
     	blkif_response_t *rsp;
     	
         rsp = (blkif_response_t *)req;
         rsp->id = req->id;
         rsp->operation = BLKIF_OP_WRITE;
     	if (p->error == 0) {
-	        rsp->status = BLKIF_RSP_OKAY;
+            rsp->status = BLKIF_RSP_OKAY;
     	} else {
-    		rsp->status = BLKIF_RSP_ERROR;
+            rsp->status = BLKIF_RSP_ERROR;
     	}
         blktap_inject_response(rsp);       
     }
     
     pthread_mutex_unlock(&p->mutex);
 	
-	free(param); /* TODO: replace with cached alloc/dealloc */
+    free(param); /* TODO: replace with cached alloc/dealloc */
 }
 
 int parallax_write(blkif_request_t *req, blkif_t *blkif)
@@ -458,7 +495,7 @@ int parallax_write(blkif_request_t *req, blkif_t *blkif)
     
     for (i = 0; i < req->nr_segments; i++) {
         struct cb_param *p;
-            
+        
         spage  = (char *)MMAP_VADDR(ID_TO_IDX(req->id), i);
         
         /* Round the requested segment to a block address. */
@@ -471,7 +508,7 @@ int parallax_write(blkif_request_t *req, blkif_t *blkif)
         offset = (sector << SECTOR_SHIFT) % BLOCK_SIZE;
         size = ( blkif_last_sect (req->frame_and_sects[i]) -
                  blkif_first_sect(req->frame_and_sects[i]) + 1
-               ) << SECTOR_SHIFT;
+            ) << SECTOR_SHIFT;
         start = blkif_first_sect(req->frame_and_sects[i]) << SECTOR_SHIFT;
 
         DPRINTF("ParallaxWrite: sect: %lld (%ld,%ld),  "
@@ -480,7 +517,7 @@ int parallax_write(blkif_request_t *req, blkif_t *blkif)
                 sector, blkif_first_sect(req->frame_and_sects[i]),
                 blkif_last_sect (req->frame_and_sects[i]),
                 vblock, gblock, size); 
-        
+      
         /* XXX: For now we just freak out if they try to write a   */
         /* non block-sized, block-aligned page.                    */
         
@@ -489,15 +526,15 @@ int parallax_write(blkif_request_t *req, blkif_t *blkif)
             goto err;
         }
         
- 		/* TODO: Replace this call to malloc with a cached allocation */
-		p = (struct cb_param *)malloc(sizeof(struct cb_param));
-		p->pent = pent;
-		p->sector = sector; 
-		p->segment = i;     
-		p->vblock = vblock; /* dbg */
-		
+        /* TODO: Replace this call to malloc with a cached allocation */
+        p = (struct cb_param *)malloc(sizeof(struct cb_param));
+        p->pent = pent;
+        p->sector = sector; 
+        p->segment = i;     
+        p->vblock = vblock; /* dbg */
+        
         /* Issue the write to the store. */
-	    async_write(vdi, vblock, spage, write_cb, (void *)p);
+        vdi_write(vdi, vblock, spage, write_cb, (void *)p);
     }
 
     return BLKTAP_STOLEN;
@@ -516,8 +553,6 @@ int parallax_request(blkif_request_t *req)
     blkif_response_t *rsp;
     domid_t  dom   = ID_TO_DOM(req->id);
     blkif_t *blkif = blkif_find_by_handle(dom, 0);
-
-    //DPRINTF("parallax_request: req=%p, dom=%d, blkif=%p\n", req, dom, blkif); 
     
     if (blkif == NULL)
         goto err;
@@ -535,14 +570,15 @@ int parallax_request(blkif_request_t *req)
         return parallax_write(req, blkif);
         
     } else {
+        printf("Unknown request message type!\n");
         /* Unknown operation */
         goto err;
     }
     
 err:
     rsp = (blkif_response_t *)req;
-    rsp->id = req->id;
     rsp->operation = req->operation;
+    rsp->id = req->id;
     rsp->status = BLKIF_RSP_ERROR;
     return BLKTAP_RESPOND;  
 }
@@ -559,7 +595,7 @@ int main(int argc, char *argv[])
     DPRINTF("parallax: starting.\n"); 
     __init_blockstore();
     DPRINTF("parallax: initialized blockstore...\n"); 
-	init_block_async();
+    init_block_async();
     DPRINTF("parallax: initialized async blocks...\n"); 
     __init_vdi();
     DPRINTF("parallax: initialized vdi registry etc...\n"); 

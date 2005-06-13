@@ -29,12 +29,25 @@
 #define _PAGE_PSE       0x080
 #define _PAGE_GLOBAL    0x100
 
-
+#if defined(__i386__)
 #define L1_PAGETABLE_SHIFT       12
 #define L2_PAGETABLE_SHIFT       22
- 
+#elif defined(__x86_64__)
+#define L1_PAGETABLE_SHIFT      12
+#define L2_PAGETABLE_SHIFT      21
+#define L3_PAGETABLE_SHIFT      30
+#define L4_PAGETABLE_SHIFT      39
+#endif
+
+#if defined(__i386__) 
 #define ENTRIES_PER_L1_PAGETABLE 1024
 #define ENTRIES_PER_L2_PAGETABLE 1024
+#elif defined(__x86_64__)
+#define L1_PAGETABLE_ENTRIES    512
+#define L2_PAGETABLE_ENTRIES    512
+#define L3_PAGETABLE_ENTRIES    512
+#define L4_PAGETABLE_ENTRIES    512
+#endif
  
 #define PAGE_SHIFT              L1_PAGETABLE_SHIFT
 #define PAGE_SIZE               (1UL << PAGE_SHIFT)
@@ -42,11 +55,51 @@
 
 typedef unsigned long l1_pgentry_t;
 typedef unsigned long l2_pgentry_t;
+#if defined(__x86_64__)
+typedef unsigned long l3_pgentry_t;
+typedef unsigned long l4_pgentry_t;
+#endif
 
+#if defined(__i386__)
 #define l1_table_offset(_a) \
           (((_a) >> L1_PAGETABLE_SHIFT) & (ENTRIES_PER_L1_PAGETABLE - 1))
 #define l2_table_offset(_a) \
           ((_a) >> L2_PAGETABLE_SHIFT)
+#elif defined(__x86_64__)
+#define l1_table_offset(_a) \
+  (((_a) >> L1_PAGETABLE_SHIFT) & (L1_PAGETABLE_ENTRIES - 1))
+#define l2_table_offset(_a) \
+  (((_a) >> L2_PAGETABLE_SHIFT) & (L2_PAGETABLE_ENTRIES - 1))
+#define l3_table_offset(_a) \
+	(((_a) >> L3_PAGETABLE_SHIFT) & (L3_PAGETABLE_ENTRIES - 1))
+#define l4_table_offset(_a) \
+	(((_a) >> L4_PAGETABLE_SHIFT) & (L4_PAGETABLE_ENTRIES - 1))
+#endif
+
+struct domain_setup_info
+{
+    unsigned long v_start;
+    unsigned long v_end;
+    unsigned long v_kernstart;
+    unsigned long v_kernend;
+    unsigned long v_kernentry;
+
+    unsigned int  load_symtab;
+    unsigned long symtab_addr;
+    unsigned long symtab_len;
+};
+
+typedef int (*parseimagefunc)(char *image, unsigned long image_size,
+			      struct domain_setup_info *dsi);
+typedef int (*loadimagefunc)(char *image, unsigned long image_size, int xch,
+			     u32 dom, unsigned long *parray,
+			     struct domain_setup_info *dsi);
+
+struct load_funcs
+{
+    parseimagefunc parseimage;
+    loadimagefunc loadimage;
+};
 
 #define ERROR(_m, _a...)  \
     fprintf(stderr, "ERROR: " _m "\n" , ## _a )
@@ -232,9 +285,7 @@ typedef struct mfn_mapper {
     
 } mfn_mapper_t;
 
-unsigned long xc_get_m2p_start_mfn ( int xc_handle );
-
-long xc_get_tot_pages(int xc_handle, u32 domid);
+unsigned long xc_get_m2p_start_mfn (int xc_handle);
 
 int xc_copy_to_domain_page(int xc_handle, u32 domid,
                             unsigned long dst_pfn, void *src_page);
@@ -247,7 +298,11 @@ void xc_map_memcpy(unsigned long dst, char *src, unsigned long size,
                    int xch, u32 dom, unsigned long *parray,
                    unsigned long vstart);
 
-int pin_table(
-    int xc_handle, unsigned int type, unsigned long mfn, domid_t dom);
+int pin_table(int xc_handle, unsigned int type, unsigned long mfn,
+	      domid_t dom);
+
+/* image loading */
+int probe_elf(char *image, unsigned long image_size, struct load_funcs *funcs);
+int probe_bin(char *image, unsigned long image_size, struct load_funcs *funcs);
 
 #endif /* __XC_PRIVATE_H__ */

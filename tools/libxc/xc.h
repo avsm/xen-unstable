@@ -252,7 +252,9 @@ int xc_linux_build(int xc_handle,
                    const char *cmdline,
                    unsigned int control_evtchn,
                    unsigned long flags,
-                   unsigned int vcpus);
+                   unsigned int vcpus,
+                   unsigned int store_evtchn,
+                   unsigned long *store_mfn);
 
 int
 xc_plan9_build (int xc_handle,
@@ -388,8 +390,8 @@ int xc_physdev_pci_access_modify(int xc_handle,
                                  int enable);
 
 int xc_readconsolering(int xc_handle,
-                       char *str, 
-                       unsigned int max_chars, 
+                       char **pbuffer,
+                       unsigned int *pnr_chars, 
                        int clear);
 
 typedef dom0_physinfo_t xc_physinfo_t;
@@ -499,5 +501,10 @@ int xc_gnttab_dump_table(int        xc_handle,
                          u32        dom,
                          s16       *status);
 
+/* Get current total pages allocated to a domain. */
+long xc_get_tot_pages(int xc_handle, u32 domid);
+
+/* Execute a privileged dom0 operation. */
+int xc_dom0_op(int xc_handle, dom0_op_t *op);
 
 #endif /* __XC_H__ */
