@@ -106,6 +106,7 @@ rom_gdtr:
  * main and setup our own environment.
  */
 	.globl	_start
+	.code32
 _start:
 	cli
 
@@ -135,7 +136,7 @@ _start:
 	.align	4
 	.globl	halt
 halt:
-	pushl	$halt_msg
+	push	$halt_msg
 	call	printf
 #ifdef TEST
         movw    $0x8A00, %dx

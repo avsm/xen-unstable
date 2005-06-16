@@ -17,7 +17,6 @@
 3f9e7d60PWZJeVh5xdnk0nLUdxlqEA docs/figs/xenlogo.eps
 418a3248xjIqmNKo0v_XQSfAvlBGFw docs/html.sty
 41c0c4116itF389v0CEWcmzue6zJkA docs/misc/VMX_changes.txt
-4022a73cgxX1ryj1HgS-IwwB6NUi2A docs/misc/XenDebugger-HOWTO
 412f4bd9sm5mCQ8BkrgKcAKZGadq7Q docs/misc/blkif-drivers-explained.txt
 420b949cy9ZGzED74Fz_DaWlK7tT4g docs/misc/crashdb.txt
 4251a1f82AexscYEiF4Iku8Gc_kWfQ docs/misc/grant-tables.txt
@@ -468,7 +467,7 @@
 413aa1d0oNP8HXLvfPuMe6cSroUfSA patches/linux-2.6.11/agpgart.patch
 427261074Iy1MkbbqIV6zdZDWWx_Jg patches/linux-2.6.11/i386-cpu-hotplug-updated-for-mm.patch
 42372652KCUP-IOH9RN19YQmGhs4aA patches/linux-2.6.11/iomap.patch
-428359d4b3fDYtazwXi4UUmSWaOUew patches/linux-2.6.11/linux-2.6.11.11.patch
+428359d4b3fDYtazwXi4UUmSWaOUew patches/linux-2.6.11/linux-2.6.11.12.patch
 4296fb998LGSWCcljGKbOCUv3h9uRQ patches/linux-2.6.11/net-csum.patch
 429ae875I9ZrqrRDjGD34IC2kzDREw patches/linux-2.6.11/rcu-nohz.patch
 429ba3007184K-y6WHQ6KgY65-lEIQ patches/linux-2.6.11/udp-frag.patch
@@ -542,6 +541,7 @@
 42a0c8dasiso9c-2sCvHBzP6YVjATA tools/debugger/pdb/evtchn.mli
 42a0c8daXD_6Y62A_u5-PO_Klrhi0w tools/debugger/pdb/pdb_caml_xc.c
 42a0c8danJXun9ay5SPBhhkKvuUPfg tools/debugger/pdb/pdb_xen.c
+42b03d06llc_GE7fXGQ6-rYR4VFAcw tools/debugger/pdb/readme
 42a0c8dbjK6Du89D2SUcxsuAdlUu3w tools/debugger/pdb/server.ml
 401d7e160vaxMBAUSLSicuZ7AQjJ3w tools/examples/Makefile
 401d7e16UgeqroJQTIhwkrDVkoWgZQ tools/examples/README
