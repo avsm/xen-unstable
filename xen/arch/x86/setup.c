@@ -3,342 +3,131 @@
 #include <xen/init.h>
 #include <xen/lib.h>
 #include <xen/sched.h>
-#include <xen/pci.h>
+#include <xen/domain.h>
 #include <xen/serial.h>
 #include <xen/softirq.h>
 #include <xen/acpi.h>
 #include <xen/console.h>
+#include <xen/serial.h>
 #include <xen/trace.h>
 #include <xen/multiboot.h>
+#include <xen/domain_page.h>
 #include <asm/bitops.h>
 #include <asm/smp.h>
 #include <asm/processor.h>
 #include <asm/mpspec.h>
 #include <asm/apic.h>
 #include <asm/desc.h>
-#include <asm/domain_page.h>
-#include <asm/pdb.h>
 #include <asm/shadow.h>
 #include <asm/e820.h>
 
-/* opt_dom0_mem: Kilobytes of memory allocated to domain 0. */
-static unsigned int opt_dom0_mem = 64000;
-integer_param("dom0_mem", opt_dom0_mem);
+extern void dmi_scan_machine(void);
+extern void generic_apic_probe(void);
 
 /*
  * opt_xenheap_megabytes: Size of Xen heap in megabytes, excluding the
  * pfn_info table and allocation bitmap.
  */
 static unsigned int opt_xenheap_megabytes = XENHEAP_DEFAULT_MB;
-#if defined(__x86_64__)
+#if defined(CONFIG_X86_64)
 integer_param("xenheap_megabytes", opt_xenheap_megabytes);
 #endif
-
-/* opt_noht: If true, Hyperthreading is ignored. */
-int opt_noht = 0;
-boolean_param("noht", opt_noht);
-
-/* opt_noacpi: If true, ACPI tables are not parsed. */
-static int opt_noacpi = 0;
-boolean_param("noacpi", opt_noacpi);
 
 /* opt_nosmp: If true, secondary processors are ignored. */
 static int opt_nosmp = 0;
 boolean_param("nosmp", opt_nosmp);
 
-/* opt_ignorebiostables: If true, ACPI and MP tables are ignored. */
-/* NB. This flag implies 'nosmp' and 'noacpi'. */
-static int opt_ignorebiostables = 0;
-boolean_param("ignorebiostables", opt_ignorebiostables);
+/* maxcpus: maximum number of CPUs to activate. */
+static unsigned int max_cpus = NR_CPUS;
+integer_param("maxcpus", max_cpus); 
 
 /* opt_watchdog: If true, run a watchdog NMI on each processor. */
 static int opt_watchdog = 0;
 boolean_param("watchdog", opt_watchdog);
 
-unsigned long xenheap_phys_end;
+/* **** Linux config option: propagated to domain0. */
+/* "acpi=off":    Sisables both ACPI table parsing and interpreter. */
+/* "acpi=force":  Override the disable blacklist.                   */
+/* "acpi=strict": Disables out-of-spec workarounds.                 */
+/* "acpi=ht":     Limit ACPI just to boot-time to enable HT.        */
+/* "acpi=noirq":  Disables ACPI interrupt routing.                  */
+static void parse_acpi_param(char *s);
+custom_param("acpi", parse_acpi_param);
+
+/* **** Linux config option: propagated to domain0. */
+/* acpi_skip_timer_override: Skip IRQ0 overrides. */
+extern int acpi_skip_timer_override;
+boolean_param("acpi_skip_timer_override", acpi_skip_timer_override);
+
+/* **** Linux config option: propagated to domain0. */
+/* noapic: Disable IOAPIC setup. */
+extern int skip_ioapic_setup;
+boolean_param("noapic", skip_ioapic_setup);
+
+int early_boot = 1;
+
+int ht_per_core = 1;
+cpumask_t cpu_present_map;
+
+/* Limits of Xen heap, used to initialise the allocator. */
+unsigned long xenheap_phys_start, xenheap_phys_end;
 
 extern void arch_init_memory(void);
 extern void init_IRQ(void);
 extern void trap_init(void);
 extern void time_init(void);
 extern void ac_timer_init(void);
-extern void initialize_keytable();
-extern int do_timer_lists_from_pit;
+extern void initialize_keytable(void);
+extern void early_cpu_init(void);
 
-char ignore_irq13;		/* set if exception 16 works */
-struct cpuinfo_x86 boot_cpu_data = { 0, 0, 0, 0, -1 };
+extern unsigned long cpu0_stack[];
 
-#if defined(__x86_64__)
+struct cpuinfo_x86 boot_cpu_data = { 0, 0, 0, 0, -1, 1, 0, 0, -1 };
+
+#if CONFIG_PAGING_LEVELS > 2
 unsigned long mmu_cr4_features = X86_CR4_PSE | X86_CR4_PGE | X86_CR4_PAE;
 #else
 unsigned long mmu_cr4_features = X86_CR4_PSE | X86_CR4_PGE;
 #endif
 EXPORT_SYMBOL(mmu_cr4_features);
 
-unsigned long wait_init_idle;
+struct vcpu *idle_task[NR_CPUS] = { &idle0_vcpu };
 
-struct domain *idle_task[NR_CPUS] = { &idle0_task };
+int acpi_disabled;
 
-#ifdef	CONFIG_ACPI_INTERPRETER
-int acpi_disabled = 0;
-#else
-int acpi_disabled = 1;
-#endif
-EXPORT_SYMBOL(acpi_disabled);
-
-int phys_proc_id[NR_CPUS];
-int logical_proc_id[NR_CPUS];
-
-#if defined(__i386__)
-
-/* Standard macro to see if a specific flag is changeable */
-static inline int flag_is_changeable_p(u32 flag)
+int acpi_force;
+char acpi_param[10] = "";
+static void parse_acpi_param(char *s)
 {
-    u32 f1, f2;
+    /* Save the parameter so it can be propagated to domain0. */
+    strncpy(acpi_param, s, sizeof(acpi_param));
+    acpi_param[sizeof(acpi_param)-1] = '\0';
 
-    asm("pushfl\n\t"
-        "pushfl\n\t"
-        "popl %0\n\t"
-        "movl %0,%1\n\t"
-        "xorl %2,%0\n\t"
-        "pushl %0\n\t"
-        "popfl\n\t"
-        "pushfl\n\t"
-        "popl %0\n\t"
-        "popfl\n\t"
-        : "=&r" (f1), "=&r" (f2)
-        : "ir" (flag));
-
-    return ((f1^f2) & flag) != 0;
-}
-
-/* Probe for the CPUID instruction */
-static int __init have_cpuid_p(void)
-{
-    return flag_is_changeable_p(X86_EFLAGS_ID);
-}
-
-#elif defined(__x86_64__)
-
-#define have_cpuid_p() (1)
-
-#endif
-
-void __init get_cpu_vendor(struct cpuinfo_x86 *c)
-{
-    char *v = c->x86_vendor_id;
-
-    if (!strcmp(v, "GenuineIntel"))
-        c->x86_vendor = X86_VENDOR_INTEL;
-    else if (!strcmp(v, "AuthenticAMD"))
-        c->x86_vendor = X86_VENDOR_AMD;
-    else if (!strcmp(v, "CyrixInstead"))
-        c->x86_vendor = X86_VENDOR_CYRIX;
-    else if (!strcmp(v, "UMC UMC UMC "))
-        c->x86_vendor = X86_VENDOR_UMC;
-    else if (!strcmp(v, "CentaurHauls"))
-        c->x86_vendor = X86_VENDOR_CENTAUR;
-    else if (!strcmp(v, "NexGenDriven"))
-        c->x86_vendor = X86_VENDOR_NEXGEN;
-    else if (!strcmp(v, "RiseRiseRise"))
-        c->x86_vendor = X86_VENDOR_RISE;
-    else if (!strcmp(v, "GenuineTMx86") ||
-             !strcmp(v, "TransmetaCPU"))
-        c->x86_vendor = X86_VENDOR_TRANSMETA;
-    else
-        c->x86_vendor = X86_VENDOR_UNKNOWN;
-}
-
-static void __init init_intel(struct cpuinfo_x86 *c)
-{
-    /* SEP CPUID bug: Pentium Pro reports SEP but doesn't have it */
-    if ( c->x86 == 6 && c->x86_model < 3 && c->x86_mask < 3 )
-        clear_bit(X86_FEATURE_SEP, &c->x86_capability);
-
-#ifdef CONFIG_SMP
-    if ( test_bit(X86_FEATURE_HT, &c->x86_capability) )
+    /* Interpret the parameter for use within Xen. */
+    if ( !strcmp(s, "off") )
     {
-        u32     eax, ebx, ecx, edx;
-        int     initial_apic_id, siblings, cpu = smp_processor_id();
-        
-        cpuid(1, &eax, &ebx, &ecx, &edx);
-        ht_per_core = siblings = (ebx & 0xff0000) >> 16;
-
-        if ( opt_noht )
-            clear_bit(X86_FEATURE_HT, &c->x86_capability[0]);
-
-        if ( siblings <= 1 )
-        {
-            printk(KERN_INFO  "CPU#%d: Hyper-Threading is disabled\n", cpu);
-        } 
-        else if ( siblings > 2 )
-        {
-            panic("We don't support more than two logical CPUs per package!");
-        }
-        else
-        {
-            initial_apic_id = ebx >> 24 & 0xff;
-            phys_proc_id[cpu]    = initial_apic_id >> 1;
-            logical_proc_id[cpu] = initial_apic_id & 1;
-            printk(KERN_INFO  "CPU#%d: Physical ID: %d, Logical ID: %d\n",
-                   cpu, phys_proc_id[cpu], logical_proc_id[cpu]);
-        }
+        disable_acpi();
     }
-#endif
-}
-
-static void __init init_amd(struct cpuinfo_x86 *c)
-{
-    /* Bit 31 in normal CPUID used for nonstandard 3DNow ID;
-       3DNow is IDd by bit 31 in extended CPUID (1*32+31) anyway */
-    clear_bit(0*32+31, &c->x86_capability);
-	
-    switch(c->x86)
+    else if ( !strcmp(s, "force") )
     {
-    case 5:
-        panic("AMD K6 is not supported.\n");
-    case 6:	/* An Athlon/Duron. We can trust the BIOS probably */
-        break;		
+        acpi_force = 1;
+        acpi_ht = 1;
+        acpi_disabled = 0;
     }
-}
-
-/*
- * This does the hard work of actually picking apart the CPU stuff...
- */
-void __init identify_cpu(struct cpuinfo_x86 *c)
-{
-    int junk, i, cpu = smp_processor_id();
-    u32 xlvl, tfms;
-
-    phys_proc_id[cpu]    = cpu;
-    logical_proc_id[cpu] = 0;
-
-    c->x86_vendor = X86_VENDOR_UNKNOWN;
-    c->cpuid_level = -1;	/* CPUID not detected */
-    c->x86_model = c->x86_mask = 0;	/* So far unknown... */
-    c->x86_vendor_id[0] = '\0'; /* Unset */
-    memset(&c->x86_capability, 0, sizeof c->x86_capability);
-
-    if ( !have_cpuid_p() )
-        panic("Ancient processors not supported\n");
-
-    /* Get vendor name */
-    cpuid(0x00000000, &c->cpuid_level,
-          (int *)&c->x86_vendor_id[0],
-          (int *)&c->x86_vendor_id[8],
-          (int *)&c->x86_vendor_id[4]);
-
-    get_cpu_vendor(c);
-		
-    if ( c->cpuid_level == 0 )
-        panic("Decrepit CPUID not supported\n");
-
-    cpuid(0x00000001, &tfms, &junk, &junk,
-          &c->x86_capability[0]);
-    c->x86 = (tfms >> 8) & 15;
-    c->x86_model = (tfms >> 4) & 15;
-    c->x86_mask = tfms & 15;
-
-    /* AMD-defined flags: level 0x80000001 */
-    xlvl = cpuid_eax(0x80000000);
-    if ( (xlvl & 0xffff0000) == 0x80000000 ) {
-        if ( xlvl >= 0x80000001 )
-            c->x86_capability[1] = cpuid_edx(0x80000001);
+    else if ( !strcmp(s, "strict") )
+    {
+        acpi_strict = 1;
     }
-
-    /* Transmeta-defined flags: level 0x80860001 */
-    xlvl = cpuid_eax(0x80860000);
-    if ( (xlvl & 0xffff0000) == 0x80860000 ) {
-        if (  xlvl >= 0x80860001 )
-            c->x86_capability[2] = cpuid_edx(0x80860001);
+    else if ( !strcmp(s, "ht") )
+    {
+        if ( !acpi_force )
+            disable_acpi();
+        acpi_ht = 1;
     }
-
-    printk("CPU%d: Before vendor init, caps: %08x %08x %08x, vendor = %d\n",
-           smp_processor_id(),
-           c->x86_capability[0],
-           c->x86_capability[1],
-           c->x86_capability[2],
-           c->x86_vendor);
-
-    switch ( c->x86_vendor ) {
-    case X86_VENDOR_INTEL:
-        init_intel(c);
-        break;
-    case X86_VENDOR_AMD:
-        init_amd(c);
-        break;
-    case X86_VENDOR_UNKNOWN:  /* Connectix Virtual PC reports this */
-	break;
-    case X86_VENDOR_CENTAUR:
-        break;
-    default:
-        printk("Unknown CPU identifier (%d): continuing anyway, "
-               "but might fail.\n", c->x86_vendor);
+    else if ( !strcmp(s, "noirq") )
+    {
+        acpi_noirq_set();
     }
-	
-    printk("CPU caps: %08x %08x %08x %08x\n",
-           c->x86_capability[0],
-           c->x86_capability[1],
-           c->x86_capability[2],
-           c->x86_capability[3]);
-
-    /*
-     * On SMP, boot_cpu_data holds the common feature set between
-     * all CPUs; so make sure that we indicate which features are
-     * common between the CPUs.  The first time this routine gets
-     * executed, c == &boot_cpu_data.
-     */
-    if ( c != &boot_cpu_data ) {
-        /* AND the already accumulated flags with these */
-        for ( i = 0 ; i < NCAPINTS ; i++ )
-            boot_cpu_data.x86_capability[i] &= c->x86_capability[i];
-    }
-}
-
-
-unsigned long cpu_initialized;
-void __init cpu_init(void)
-{
-#if defined(__i386__) /* XXX */
-    int nr = smp_processor_id();
-    struct tss_struct * t = &init_tss[nr];
-
-    if ( test_and_set_bit(nr, &cpu_initialized) )
-        panic("CPU#%d already initialized!!!\n", nr);
-    printk("Initializing CPU#%d\n", nr);
-
-    t->bitmap = IOBMP_INVALID_OFFSET;
-    memset(t->io_bitmap, ~0, sizeof(t->io_bitmap));
-
-    /* Set up GDT and IDT. */
-    SET_GDT_ENTRIES(current, DEFAULT_GDT_ENTRIES);
-    SET_GDT_ADDRESS(current, DEFAULT_GDT_ADDRESS);
-    __asm__ __volatile__("lgdt %0": "=m" (*current->mm.gdt));
-    __asm__ __volatile__("lidt %0": "=m" (idt_descr));
-
-    /* No nested task. */
-    __asm__("pushfl ; andl $0xffffbfff,(%esp) ; popfl");
-
-    /* Ensure FPU gets initialised for each domain. */
-    stts();
-
-    /* Set up and load the per-CPU TSS and LDT. */
-    t->ss0  = __HYPERVISOR_DS;
-    t->esp0 = get_stack_top();
-    set_tss_desc(nr,t);
-    load_TR(nr);
-    __asm__ __volatile__("lldt %%ax"::"a" (0));
-
-    /* Clear all 6 debug registers. */
-#define CD(register) __asm__("movl %0,%%db" #register ::"r"(0) );
-    CD(0); CD(1); CD(2); CD(3); /* no db4 and db5 */; CD(6); CD(7);
-#undef CD
-
-    /* Install correct page table. */
-    write_ptbase(&current->mm);
-
-    init_idle_task();
-#endif
 }
 
 static void __init do_initcalls(void)
@@ -348,17 +137,16 @@ static void __init do_initcalls(void)
         (*call)();
 }
 
-unsigned long pci_mem_start = 0x10000000;
-
 static void __init start_of_day(void)
 {
-    unsigned long low_mem_size;
-    
-#ifdef MEMORY_GUARD
+    int i;
+
+    early_cpu_init();
+
+    paging_init();
+
     /* Unmap the first page of CPU0's stack. */
-    extern unsigned long cpu0_stack[];
-    memguard_guard_range(cpu0_stack, PAGE_SIZE);
-#endif
+    memguard_guard_stack(cpu0_stack);
 
     open_softirq(NEW_TLBFLUSH_CLOCK_PERIOD_SOFTIRQ, new_tlbflush_clock_period);
 
@@ -368,103 +156,89 @@ static void __init start_of_day(void)
     sort_exception_tables();
 
     arch_do_createdomain(current);
-
-    /* Tell the PCI layer not to allocate too close to the RAM area.. */
-    low_mem_size = ((max_page << PAGE_SHIFT) + 0xfffff) & ~0xfffff;
-    if ( low_mem_size > pci_mem_start ) pci_mem_start = low_mem_size;
     
-    identify_cpu(&boot_cpu_data); /* get CPU type info */
-    if ( cpu_has_fxsr ) set_in_cr4(X86_CR4_OSFXSR);
-    if ( cpu_has_xmm )  set_in_cr4(X86_CR4_OSXMMEXCPT);
-#ifdef CONFIG_SMP
-    if ( opt_ignorebiostables )
-    {
-        opt_nosmp  = 1;           /* No SMP without configuration          */
-        opt_noacpi = 1;           /* ACPI will just confuse matters also   */
-    }
-    else
-    {
-        find_smp_config();
-        smp_alloc_memory();       /* trampoline which other CPUs jump at   */
-    }
-#endif
-    paging_init();                /* not much here now, but sets up fixmap */
-    if ( !opt_noacpi )
-        acpi_boot_init();
-#ifdef CONFIG_SMP
+    /* Map default GDT into their final position in the idle page table. */
+    map_pages_to_xen(
+        GDT_VIRT_START(current) + FIRST_RESERVED_GDT_BYTE,
+        virt_to_phys(gdt_table) >> PAGE_SHIFT, 1, PAGE_HYPERVISOR);
+
+    find_smp_config();
+
+    smp_alloc_memory();
+
+    dmi_scan_machine();
+
+    generic_apic_probe();
+
+    acpi_boot_table_init();
+    acpi_boot_init();
+
     if ( smp_found_config ) 
         get_smp_config();
-#endif
-    scheduler_init();	
-    init_IRQ();  /* installs simple interrupt wrappers. Starts HZ clock. */
+
+    init_apic_mappings();
+
+    init_IRQ();
+
     trap_init();
-    time_init(); /* installs software handler for HZ clock. */
-    init_apic_mappings(); /* make APICs addressable in our pagetables. */
+
+    ac_timer_init();
+
+    time_init();
 
     arch_init_memory();
 
-#ifndef CONFIG_SMP    
-    APIC_init_uniprocessor();
-#else
+    scheduler_init();	
+
+    identify_cpu(&boot_cpu_data);
+    if ( cpu_has_fxsr )
+        set_in_cr4(X86_CR4_OSFXSR);
+    if ( cpu_has_xmm )
+        set_in_cr4(X86_CR4_OSXMMEXCPT);
+
     if ( opt_nosmp )
-	APIC_init_uniprocessor();
-    else
-    	smp_boot_cpus(); 
-    /*
-     * Does loads of stuff, including kicking the local
-     * APIC, and the IO APIC after other CPUs are booted.
-     * Each IRQ is preferably handled by IO-APIC, but
-     * fall thru to 8259A if we have to (but slower).
-     */
-#endif
+        max_cpus = 0;
+    smp_prepare_cpus(max_cpus);
 
-    __sti();
+    /* We aren't hotplug-capable yet. */
+    BUG_ON(!cpus_empty(cpu_present_map));
+    for_each_cpu ( i )
+        cpu_set(i, cpu_present_map);
 
-    initialize_keytable(); /* call back handling for key codes */
+    /* Sanity: We ought to be taking interrupts by now. */
+    local_irq_enable();
 
-    serial_init_stage2();
+    initialize_keytable();
 
-#ifdef XEN_DEBUGGER
-    initialize_pdb();      /* pervasive debugger */
-#endif
+    serial_init_postirq();
 
-    if ( !cpu_has_apic )
+    init_xen_time();
+
+    for_each_present_cpu ( i )
     {
-        do_timer_lists_from_pit = 1;
-        if ( smp_num_cpus != 1 )
-            panic("We need local APICs on SMP machines!");
+        if ( num_online_cpus() >= max_cpus )
+            break;
+        if ( !cpu_online(i) )
+            __cpu_up(i);
     }
 
-    ac_timer_init();    /* init accurate timers */
-    init_xen_time();	/* initialise the time */
-    schedulers_start(); /* start scheduler for each CPU */
+    printk("Brought up %ld CPUs\n", (long)num_online_cpus());
+    smp_cpus_done(max_cpus);
 
-    check_nmi_watchdog();
-
-#ifdef CONFIG_PCI
-    pci_init();
-#endif
     do_initcalls();
 
-#ifdef CONFIG_SMP
-    wait_init_idle = cpu_online_map;
-    clear_bit(smp_processor_id(), &wait_init_idle);
-    smp_threads_ready = 1;
-    smp_commence(); /* Tell other CPUs that state of the world is stable. */
-    while ( wait_init_idle != 0 )
-        cpu_relax();
-#endif
+    schedulers_start();
 
-    watchdog_on = 1;
+    watchdog_enable();
 }
+
+#define EARLY_FAIL() for ( ; ; ) __asm__ __volatile__ ( "hlt" )
 
 void __init __start_xen(multiboot_info_t *mbi)
 {
-    unsigned char *cmdline;
+    char *cmdline;
     module_t *mod = (module_t *)__va(mbi->mods_addr);
-    void *heap_start;
     unsigned long firsthole_start, nr_pages;
-    unsigned long dom0_memory_start, dom0_memory_end;
     unsigned long initial_images_start, initial_images_end;
     struct e820entry e820_raw[E820MAX];
     int i, e820_raw_nr = 0, bytes = 0;
@@ -474,10 +248,14 @@ void __init __start_xen(multiboot_info_t *mbi)
         cmdline_parse(__va(mbi->cmdline));
 
     /* Must do this early -- e.g., spinlocks rely on get_current(). */
-    set_current(&idle0_task);
+    set_current(&idle0_vcpu);
+    set_processor_id(0);
+
+    smp_prepare_boot_cpu();
 
     /* We initialise the serial devices very early so we can get debugging. */
-    serial_init_stage1();
+    ns16550_init();
+    serial_init_preirq();
 
     init_console();
 
@@ -485,7 +263,13 @@ void __init __start_xen(multiboot_info_t *mbi)
     if ( !(mbi->flags & MBI_MODULES) || (mbi->mods_count == 0) )
     {
         printk("FATAL ERROR: Require at least one Multiboot module.\n");
-        for ( ; ; ) ;
+        EARLY_FAIL();
+    }
+
+    if ( ((unsigned long)cpu0_stack & (STACK_SIZE-1)) != 0 )
+    {
+        printk("FATAL ERROR: Misaligned CPU0 stack.\n");
+        EARLY_FAIL();
     }
 
     xenheap_phys_end = opt_xenheap_megabytes << 20;
@@ -500,7 +284,7 @@ void __init __start_xen(multiboot_info_t *mbi)
             e820_raw[e820_raw_nr].size = 
                 ((u64)map->length_high << 32) | (u64)map->length_low;
             e820_raw[e820_raw_nr].type = 
-                (map->type > E820_NVS) ? E820_RESERVED : map->type;
+                (map->type > E820_SHARED_PAGE) ? E820_RESERVED : map->type;
             e820_raw_nr++;
             bytes += map->size + 4;
         }
@@ -521,7 +305,7 @@ void __init __start_xen(multiboot_info_t *mbi)
         for ( ; ; ) ;
     }
 
-    max_page = init_e820(e820_raw, e820_raw_nr);
+    max_page = init_e820(e820_raw, &e820_raw_nr);
 
     /* Find the first high-memory RAM hole. */
     for ( i = 0; i < e820.nr_map; i++ )
@@ -539,19 +323,18 @@ void __init __start_xen(multiboot_info_t *mbi)
         printk("Not enough memory to stash the DOM0 kernel image.\n");
         for ( ; ; ) ;
     }
-#if defined(__i386__)
+#if defined(CONFIG_X86_32)
     memmove((void *)initial_images_start,  /* use low mapping */
             (void *)mod[0].mod_start,      /* use low mapping */
             mod[mbi->mods_count-1].mod_end - mod[0].mod_start);
-#elif defined(__x86_64__)
+#elif defined(CONFIG_X86_64)
     memmove(__va(initial_images_start),
             __va(mod[0].mod_start),
             mod[mbi->mods_count-1].mod_end - mod[0].mod_start);
 #endif
 
     /* Initialise boot-time allocator with all RAM situated after modules. */
-    heap_start = memguard_init(&_end);
-    heap_start = __va(init_boot_allocator(__pa(heap_start)));
+    xenheap_phys_start = init_boot_allocator(__pa(&_end));
     nr_pages   = 0;
     for ( i = 0; i < e820.nr_map; i++ )
     {
@@ -562,35 +345,48 @@ void __init __start_xen(multiboot_info_t *mbi)
             init_boot_pages((e820.map[i].addr < initial_images_end) ?
                             initial_images_end : e820.map[i].addr,
                             e820.map[i].addr + e820.map[i].size);
+#if defined (CONFIG_X86_64)
+        /*
+         * x86/64 maps all registered RAM. Points to note:
+         *  1. The initial pagetable already maps low 64MB, so skip that.
+         *  2. We must map *only* RAM areas, taking care to avoid I/O holes.
+         *     Failure to do this can cause coherency problems and deadlocks
+         *     due to cache-attribute mismatches (e.g., AMD/AGP Linux bug).
+         */
+        {
+            /* Calculate page-frame range, discarding partial frames. */
+            unsigned long start, end;
+            start = PFN_UP(e820.map[i].addr);
+            end   = PFN_DOWN(e820.map[i].addr + e820.map[i].size);
+            /* Clip the range to above 64MB. */
+            if ( end < (64UL << (20-PAGE_SHIFT)) )
+                continue;
+            if ( start < (64UL << (20-PAGE_SHIFT)) )
+                start = 64UL << (20-PAGE_SHIFT);
+            /* Request the mapping. */
+            map_pages_to_xen(
+                PAGE_OFFSET + (start << PAGE_SHIFT),
+                start, end-start, PAGE_HYPERVISOR);
+        }
+#endif
     }
+
+    memguard_init();
 
     printk("System RAM: %luMB (%lukB)\n", 
            nr_pages >> (20 - PAGE_SHIFT),
            nr_pages << (PAGE_SHIFT - 10));
 
-    /* Allocate an aligned chunk of RAM for DOM0. */
-    dom0_memory_start = alloc_boot_pages(opt_dom0_mem << 10, 4UL << 20);
-    dom0_memory_end   = dom0_memory_start + (opt_dom0_mem << 10);
-    if ( dom0_memory_start == 0 )
-    {
-        printk("Not enough memory for DOM0 memory reservation.\n");
-        for ( ; ; ) ;
-    }
-
     init_frametable();
 
     end_boot_allocator();
 
-    init_xenheap_pages(__pa(heap_start), xenheap_phys_end);
+    init_xenheap_pages(xenheap_phys_start, xenheap_phys_end);
     printk("Xen heap: %luMB (%lukB)\n",
-	   (xenheap_phys_end-__pa(heap_start)) >> 20,
-	   (xenheap_phys_end-__pa(heap_start)) >> 10);
+	   (xenheap_phys_end-xenheap_phys_start) >> 20,
+	   (xenheap_phys_end-xenheap_phys_start) >> 10);
 
-    /* Initialise the slab allocator. */
-    xmem_cache_init();
-    xmem_cache_sizes_init(max_page);
-
-    domain_startofday();
+    early_boot = 0;
 
     start_of_day();
 
@@ -603,35 +399,52 @@ void __init __start_xen(multiboot_info_t *mbi)
     if ( dom0 == NULL )
         panic("Error creating domain 0\n");
 
-    set_bit(DF_PRIVILEGED, &dom0->flags);
+    set_bit(_DOMF_privileged, &dom0->domain_flags);
 
-    /* Grab the DOM0 command line. Skip past the image name. */
-    cmdline = (unsigned char *)(mod[0].string ? __va(mod[0].string) : NULL);
+    /* Grab the DOM0 command line. */
+    cmdline = (char *)(mod[0].string ? __va(mod[0].string) : NULL);
     if ( cmdline != NULL )
     {
+        static char dom0_cmdline[MAX_GUEST_CMDLINE];
+
+        /* Skip past the image name. */
         while ( *cmdline == ' ' ) cmdline++;
         if ( (cmdline = strchr(cmdline, ' ')) != NULL )
             while ( *cmdline == ' ' ) cmdline++;
+
+        /* Copy the command line to a local buffer. */
+        strcpy(dom0_cmdline, cmdline);
+        cmdline = dom0_cmdline;
+
+        /* Append any extra parameters. */
+        if ( skip_ioapic_setup && !strstr(cmdline, "noapic") )
+            strcat(cmdline, " noapic");
+        if ( acpi_skip_timer_override &&
+             !strstr(cmdline, "acpi_skip_timer_override") )
+            strcat(cmdline, " acpi_skip_timer_override");
+        if ( (strlen(acpi_param) != 0) && !strstr(cmdline, "acpi=") )
+        {
+            strcat(cmdline, " acpi=");
+            strcat(cmdline, acpi_param);
+        }
     }
 
     /*
      * We're going to setup domain0 using the module(s) that we stashed safely
      * above our heap. The second module, if present, is an initrd ramdisk.
      */
-    if ( construct_dom0(dom0, dom0_memory_start, dom0_memory_end,
-                        (char *)initial_images_start, 
+    if ( construct_dom0(dom0,
+                        initial_images_start, 
                         mod[0].mod_end-mod[0].mod_start,
                         (mbi->mods_count == 1) ? 0 :
-                        (char *)initial_images_start + 
+                        initial_images_start + 
                         (mod[1].mod_start-mod[0].mod_start),
                         (mbi->mods_count == 1) ? 0 :
                         mod[mbi->mods_count-1].mod_end - mod[1].mod_start,
                         cmdline) != 0)
         panic("Could not set up DOM0 guest OS\n");
 
-    /* The stash space for the initial kernel image can now be freed up. */
-    init_domheap_pages(initial_images_start, initial_images_end);
-
+    /* Scrub RAM that is still free and so may go to an unprivileged domain. */
     scrub_heap_pages();
 
     init_trace_bufs();
@@ -639,7 +452,20 @@ void __init __start_xen(multiboot_info_t *mbi)
     /* Give up the VGA console if DOM0 is configured to grab it. */
     console_endboot(cmdline && strstr(cmdline, "tty0"));
 
-    domain_unpause_by_systemcontroller(current);
+    /* Hide UART from DOM0 if we're using it */
+    serial_endboot();
+
     domain_unpause_by_systemcontroller(dom0);
+
     startup_cpu_idle_loop();
 }
+
+/*
+ * Local variables:
+ * mode: C
+ * c-set-style: "BSD"
+ * c-basic-offset: 4
+ * tab-width: 4
+ * indent-tabs-mode: nil
+ * End:
+ */

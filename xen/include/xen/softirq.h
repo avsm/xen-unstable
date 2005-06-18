@@ -8,7 +8,8 @@
 #define KEYPRESS_SOFTIRQ                  3
 #define NMI_SOFTIRQ                       4
 #define PAGE_SCRUB_SOFTIRQ                5
-#define NR_SOFTIRQS                       6
+#define DOMAIN_SHUTDOWN_FINALISE_SOFTIRQ  6
+#define NR_SOFTIRQS                       7
 
 #ifndef __ASSEMBLY__
 
@@ -16,6 +17,7 @@
 #include <xen/lib.h>
 #include <xen/smp.h>
 #include <asm/bitops.h>
+#include <asm/current.h>
 #include <asm/hardirq.h>
 
 typedef void (*softirq_handler)(void);

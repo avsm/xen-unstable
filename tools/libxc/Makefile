@@ -4,7 +4,7 @@ INSTALL_PROG	= $(INSTALL) -m0755
 INSTALL_DATA	= $(INSTALL) -m0644
 INSTALL_DIR	= $(INSTALL) -d -m0755
 
-MAJOR    = 2.0
+MAJOR    = 3.0
 MINOR    = 0
 
 CC       = gcc
@@ -12,15 +12,15 @@ CC       = gcc
 XEN_ROOT = ../..
 include $(XEN_ROOT)/tools/Rules.mk
 
-vpath %c       $(XEN_LIBXUTIL)
-INCLUDES += -I $(XEN_LIBXUTIL)
-
 SRCS     :=
-SRCS     += xc_atropos.c
+SRCS     += xc_sedf.c
 SRCS     += xc_bvtsched.c
+SRCS     += xc_core.c
 SRCS     += xc_domain.c
 SRCS     += xc_evtchn.c
-SRCS     += xc_io.c
+SRCS     += xc_gnttab.c
+SRCS     += xc_load_bin.c
+SRCS     += xc_load_elf.c
 SRCS     += xc_linux_build.c
 SRCS     += xc_plan9_build.c
 SRCS     += xc_linux_restore.c
@@ -28,7 +28,9 @@ SRCS     += xc_linux_save.c
 SRCS     += xc_misc.c
 SRCS     += xc_physdev.c
 SRCS     += xc_private.c
-SRCS     += xc_rrobin.c
+SRCS     += xc_ptrace.c
+SRCS     += xc_ptrace_core.c
+SRCS     += xc_vmx_build.c
 
 CFLAGS   += -Wall
 CFLAGS   += -Werror
@@ -42,7 +44,8 @@ DEPS     = .*.d
 LIB_OBJS := $(patsubst %.c,%.o,$(SRCS))
 PIC_OBJS := $(patsubst %.c,%.opic,$(SRCS))
 
-LIB      := libxc.a libxc.so libxc.so.$(MAJOR) libxc.so.$(MAJOR).$(MINOR)
+LIB      := libxc.a libxc-pic.a
+LIB      += libxc.so libxc.so.$(MAJOR) libxc.so.$(MAJOR).$(MINOR)
 
 all: build
 build: check-for-zlib mk-symlinks
@@ -68,13 +71,18 @@ mk-symlinks:
 	  ln -sf ../../$(LINUX_ROOT)/include/asm-xen/linux-public/*.h . )
 
 install: build
-	[ -d $(DESTDIR)/usr/lib ] || $(INSTALL_DIR) $(DESTDIR)/usr/lib
+	[ -d $(DESTDIR)/usr/$(LIBDIR) ] || $(INSTALL_DIR) $(DESTDIR)/usr/$(LIBDIR)
 	[ -d $(DESTDIR)/usr/include ] || $(INSTALL_DIR) $(DESTDIR)/usr/include
-	$(INSTALL_PROG) libxc.so.$(MAJOR).$(MINOR) $(DESTDIR)/usr/lib
-	$(INSTALL_DATA) libxc.a $(DESTDIR)/usr/lib
-	ln -sf libxc.so.$(MAJOR).$(MINOR) $(DESTDIR)/usr/lib/libxc.so.$(MAJOR)
-	ln -sf libxc.so.$(MAJOR) $(DESTDIR)/usr/lib/libxc.so
+	$(INSTALL_PROG) libxc.so.$(MAJOR).$(MINOR) $(DESTDIR)/usr/$(LIBDIR)
+	$(INSTALL_DATA) libxc.a $(DESTDIR)/usr/$(LIBDIR)
+	ln -sf libxc.so.$(MAJOR).$(MINOR) $(DESTDIR)/usr/$(LIBDIR)/libxc.so.$(MAJOR)
+	ln -sf libxc.so.$(MAJOR) $(DESTDIR)/usr/$(LIBDIR)/libxc.so
 	$(INSTALL_DATA) xc.h $(DESTDIR)/usr/include
+
+.PHONY: TAGS clean rpm install all
+
+TAGS:
+	etags -t $(SRCS) *.h
 
 clean:
 	rm -rf *.a *.so* *.o *.opic *.rpm $(LIB) *~ $(DEPS) xen
@@ -88,7 +96,10 @@ rpm: build
 	mv staging/i386/*.rpm .
 	rm -rf staging
 
-libxc.a: $(OBJS)
+libxc.a: $(LIB_OBJS)
+	$(AR) rc $@ $^
+
+libxc-pic.a: $(PIC_OBJS)
 	$(AR) rc $@ $^
 
 libxc.so: libxc.so.$(MAJOR)
@@ -97,6 +108,6 @@ libxc.so.$(MAJOR): libxc.so.$(MAJOR).$(MINOR)
 	ln -sf $< $@
 
 libxc.so.$(MAJOR).$(MINOR): $(PIC_OBJS)
-	$(CC) -Wl,-soname -Wl,libxc.so.$(MAJOR) -shared -o $@ $^ -L../libxutil -lxutil -lz
+	$(CC) $(CFLAGS) $(LDFLAGS) -Wl,-soname -Wl,libxc.so.$(MAJOR) -shared -o $@ $^ -lz
 
 -include $(DEPS)

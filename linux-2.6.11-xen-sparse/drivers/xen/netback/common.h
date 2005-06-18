@@ -35,6 +35,8 @@ typedef struct netif_st {
     domid_t          domid;
     unsigned int     handle;
 
+    u8               fe_dev_addr[6];
+
     /* Physical parameters of the comms window. */
     unsigned long    tx_shmem_frame;
     unsigned long    rx_shmem_frame;
@@ -76,6 +78,7 @@ typedef struct netif_st {
 
 void netif_create(netif_be_create_t *create);
 void netif_destroy(netif_be_destroy_t *destroy);
+void netif_creditlimit(netif_be_creditlimit_t *creditlimit);
 void netif_connect(netif_be_connect_t *connect);
 int  netif_disconnect(netif_be_disconnect_t *disconnect, u8 rsp_id);
 void netif_disconnect_complete(netif_t *netif);

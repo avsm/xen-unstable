@@ -67,9 +67,14 @@ static int xlvbd_get_vbd_info(vdisk_t *disk_info)
     memset(&req, 0, sizeof(req));
     req.operation   = BLKIF_OP_PROBE;
     req.nr_segments = 1;
+#ifdef CONFIG_XEN_BLKDEV_GRANT
+    blkif_control_probe_send(&req, &rsp,
+                             (unsigned long)(virt_to_machine(buf)));
+#else
     req.frame_and_sects[0] = virt_to_machine(buf) | 7;
 
     blkif_control_send(&req, &rsp);
+#endif
 
     if ( rsp.status <= 0 )
     {
@@ -114,12 +119,6 @@ static int xlvbd_init_device(vdisk_t *xd)
     if ( (bd = bdget(device)) == NULL )
         return -1;
 
-    /*
-     * Update of partition info, and check of usage count, is protected
-     * by the per-block-device semaphore.
-     */
-    down(&bd->bd_sem);
-
     if ( ((disk = xldev_to_xldisk(device)) != NULL) && (disk->usage != 0) )
     {
         printk(KERN_ALERT "VBD update failed - in use [dev=%x]\n", device);
@@ -136,11 +135,6 @@ static int xlvbd_init_device(vdisk_t *xd)
 
 	major_name = XLSCSI_MAJOR_NAME;
 	max_part   = XLSCSI_MAX_PART;
-
-    } else if (VDISK_VIRTUAL(xd->info)) {
-
-	major_name = XLVBD_MAJOR_NAME;
-	max_part   = XLVBD_MAX_PART;
 
     } else { 
 
@@ -248,8 +242,8 @@ static int xlvbd_init_device(vdisk_t *xd)
         blk_size[major] = gd->sizes;
     }
 
-    if ( VDISK_READONLY(xd->info) )
-        set_device_ro(device, 1); 
+    if ( xd->info & VDISK_READONLY )
+        set_device_ro(device, 1);
 
     gd->flags[minor >> gd->minor_shift] |= GENHD_FL_XEN;
 
@@ -298,20 +292,16 @@ static int xlvbd_init_device(vdisk_t *xd)
         gd->sizes[minor] = capacity>>(BLOCK_SIZE_BITS-9);
         
         /* Some final fix-ups depending on the device type */
-        switch ( VDISK_TYPE(xd->info) )
+        if ( xd->info & VDISK_REMOVABLE )
         { 
-        case VDISK_TYPE_CDROM:
-        case VDISK_TYPE_FLOPPY: 
-        case VDISK_TYPE_TAPE:
             gd->flags[minor >> gd->minor_shift] |= GENHD_FL_REMOVABLE; 
             printk(KERN_ALERT 
                    "Skipping partition check on %s /dev/%s\n", 
-                   VDISK_TYPE(xd->info)==VDISK_TYPE_CDROM ? "cdrom" : 
-                   (VDISK_TYPE(xd->info)==VDISK_TYPE_TAPE ? "tape" : 
-                    "floppy"), disk_name(gd, MINOR(device), buf)); 
-            break; 
-
-        case VDISK_TYPE_DISK:
+                   (xd->info & VDISK_CDROM) ? "cdrom" : "removable",
+                   disk_name(gd, MINOR(device), buf)); 
+        }
+        else
+        {
             /* Only check partitions on real discs (not virtual!). */
             if ( gd->flags[minor>>gd->minor_shift] & GENHD_FL_VIRT_PARTNS )
             {
@@ -321,17 +311,10 @@ static int xlvbd_init_device(vdisk_t *xd)
                 break;
             }
             register_disk(gd, device, gd->max_p, &xlvbd_block_fops, capacity);
-            break; 
-
-        default:
-            printk(KERN_ALERT "XenoLinux: unknown device type %d\n", 
-                   VDISK_TYPE(xd->info)); 
-            break; 
         }
     }
 
  out:
-    up(&bd->bd_sem);
     bdput(bd);    
     return rc;
 }
@@ -355,12 +338,6 @@ static int xlvbd_remove_device(int device)
 
     if ( (bd = bdget(device)) == NULL )
         return -1;
-
-    /*
-     * Update of partition info, and check of usage count, is protected
-     * by the per-block-device semaphore.
-     */
-    down(&bd->bd_sem);
 
     if ( ((gd = get_gendisk(device)) == NULL) ||
          ((disk = xldev_to_xldisk(device)) == NULL) )
@@ -423,7 +400,6 @@ static int xlvbd_remove_device(int device)
     }
 
  out:
-    up(&bd->bd_sem);
     bdput(bd);
     return rc;
 }

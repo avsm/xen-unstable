@@ -2,7 +2,8 @@
 #define __ASM_IO_APIC_H
 
 #include <xen/config.h>
-#include <xen/types.h>
+#include <asm/fixmap.h>
+#include <asm/types.h>
 #include <asm/mpspec.h>
 
 /*
@@ -13,42 +14,51 @@
 
 #ifdef CONFIG_X86_IO_APIC
 
-#define APIC_MISMATCH_DEBUG
-
 #define IO_APIC_BASE(idx) \
-		((volatile int *)(fix_to_virt(FIX_IO_APIC_BASE_0 + idx) \
+		((volatile int *)(__fix_to_virt(FIX_IO_APIC_BASE_0 + idx) \
 		+ (mp_ioapics[idx].mpc_apicaddr & ~PAGE_MASK)))
 
 /*
  * The structure of the IO-APIC:
  */
-struct IO_APIC_reg_00 {
-	__u32	__reserved_2	: 14,
-		LTS		:  1,
-		delivery_type	:  1,
-		__reserved_1	:  8,
-		ID		:  4,
-		__reserved_0	:  4;
-} __attribute__ ((packed));
+union IO_APIC_reg_00 {
+	u32	raw;
+	struct {
+		u32	__reserved_2	: 14,
+			LTS		:  1,
+			delivery_type	:  1,
+			__reserved_1	:  8,
+			ID		:  8;
+	} __attribute__ ((packed)) bits;
+};
 
-struct IO_APIC_reg_01 {
-	__u32	version		:  8,
-		__reserved_2	:  7,
-		PRQ		:  1,
-		entries		:  8,
-		__reserved_1	:  8;
-} __attribute__ ((packed));
+union IO_APIC_reg_01 {
+	u32	raw;
+	struct {
+		u32	version		:  8,
+			__reserved_2	:  7,
+			PRQ		:  1,
+			entries		:  8,
+			__reserved_1	:  8;
+	} __attribute__ ((packed)) bits;
+};
 
-struct IO_APIC_reg_02 {
-	__u32	__reserved_2	: 24,
-		arbitration	:  4,
-		__reserved_1	:  4;
-} __attribute__ ((packed));
+union IO_APIC_reg_02 {
+	u32	raw;
+	struct {
+		u32	__reserved_2	: 24,
+			arbitration	:  4,
+			__reserved_1	:  4;
+	} __attribute__ ((packed)) bits;
+};
 
-struct IO_APIC_reg_03 {
-	__u32	boot_DT		: 1,
-		__reserved_1	: 31;
-} __attribute__ ((packed));
+union IO_APIC_reg_03 {
+	u32	raw;
+	struct {
+		u32	boot_DT		:  1,
+			__reserved_1	: 31;
+	} __attribute__ ((packed)) bits;
+};
 
 /*
  * # of IO-APICs and # of IRQ routing registers
@@ -106,7 +116,7 @@ extern struct mpc_config_ioapic mp_ioapics[MAX_IO_APICS];
 extern int mp_irq_entries;
 
 /* MP IRQ source entries */
-extern struct mpc_config_intsrc *mp_irqs;
+extern struct mpc_config_intsrc mp_irqs[MAX_IRQ_SOURCES];
 
 /* non-0 if default (table-less) MP configuration */
 extern int mpc_default_type;
@@ -124,45 +134,41 @@ static inline void io_apic_write(unsigned int apic, unsigned int reg, unsigned i
 }
 
 /*
- * Synchronize the IO-APIC and the CPU by doing
- * a dummy read from the IO-APIC
+ * Re-write a value: to be used for read-modify-write
+ * cycles where the read already set up the index register.
+ *
+ * Older SiS APIC requires we rewrite the index regiser
  */
-static inline void io_apic_sync(unsigned int apic)
+#define sis_apic_bug 0 /* This may need propagating from domain0. */
+static inline void io_apic_modify(unsigned int apic, unsigned int reg, unsigned int value)
 {
-	(void) *(IO_APIC_BASE(apic)+4);
+	if (sis_apic_bug)
+		*IO_APIC_BASE(apic) = reg;
+	*(IO_APIC_BASE(apic)+4) = value;
 }
+
+/* 1 if "noapic" boot option passed */
+extern int skip_ioapic_setup;
 
 /*
  * If we use the IO-APIC for IRQ routing, disable automatic
  * assignment of PCI IRQ's.
  */
-#define io_apic_assign_pci_irqs (mp_irq_entries && !skip_ioapic_setup)
+#define io_apic_assign_pci_irqs (mp_irq_entries && !skip_ioapic_setup && io_apic_irqs)
 
 #ifdef CONFIG_ACPI_BOOT
 extern int io_apic_get_unique_id (int ioapic, int apic_id);
 extern int io_apic_get_version (int ioapic);
 extern int io_apic_get_redir_entries (int ioapic);
 extern int io_apic_set_pci_routing (int ioapic, int pin, int irq, int edge_level, int active_high_low);
+#endif /*CONFIG_ACPI_BOOT*/
+
+extern int (*ioapic_renumber_irq)(int ioapic, int irq);
+
+#else  /* !CONFIG_X86_IO_APIC */
+#define io_apic_assign_pci_irqs 0
 #endif
 
-extern int skip_ioapic_setup;	/* 1 for "noapic" */
-
-static inline void disable_ioapic_setup(void)
-{
-	skip_ioapic_setup = 1;
-}
-
-static inline int ioapic_setup_disabled(void)
-{
-	return skip_ioapic_setup;
-}
-
-#else	/* !CONFIG_X86_IO_APIC */
-#define io_apic_assign_pci_irqs 0
-
-static inline void disable_ioapic_setup(void)
-{ }
-
-#endif	/* !CONFIG_X86_IO_APIC */
+extern int assign_irq_vector(int irq);
 
 #endif

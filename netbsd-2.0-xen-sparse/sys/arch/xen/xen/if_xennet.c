@@ -580,7 +580,7 @@ xennet_rx_push_buffer(struct xennet_softc *sc, int id)
 		INVALID_P2M_ENTRY;
 
 	rx_mcl[nr_pfns].op = __HYPERVISOR_update_va_mapping;
-	rx_mcl[nr_pfns].args[0] = sc->sc_rx_bufa[id].xb_rx.xbrx_va >> PAGE_SHIFT;
+	rx_mcl[nr_pfns].args[0] = sc->sc_rx_bufa[id].xb_rx.xbrx_va;
 	rx_mcl[nr_pfns].args[1] = 0;
 	rx_mcl[nr_pfns].args[2] = 0;
 
@@ -598,7 +598,7 @@ xennet_rx_push_buffer(struct xennet_softc *sc, int id)
 	xpq_flush_queue();
 
 	/* After all PTEs have been zapped we blow away stale TLB entries. */
-	rx_mcl[nr_pfns-1].args[2] = UVMF_FLUSH_TLB;
+	rx_mcl[nr_pfns-1].args[2] = UVMF_TLB_FLUSH|UVMF_LOCAL;
 
 	/* Give away a batch of pages. */
 	rx_mcl[nr_pfns].op = __HYPERVISOR_dom_mem_op;
@@ -612,7 +612,7 @@ xennet_rx_push_buffer(struct xennet_softc *sc, int id)
 	(void)HYPERVISOR_multicall(rx_mcl, nr_pfns+1);
 
 	/* Check return status of HYPERVISOR_dom_mem_op(). */
-	if ( rx_mcl[nr_pfns].args[5] != nr_pfns )
+	if ( rx_mcl[nr_pfns].result != nr_pfns )
 		panic("Unable to reduce memory reservation\n");
 
 	/* Above is a suitable barrier to ensure backend will see requests. */
@@ -679,9 +679,9 @@ xen_network_handler(void *arg)
 		mmu->val  = (pa - XPMAP_OFFSET) >> PAGE_SHIFT;
 		mmu++;
 		mcl->op = __HYPERVISOR_update_va_mapping;
-		mcl->args[0] = sc->sc_rx_bufa[rx->id].xb_rx.xbrx_va >> PAGE_SHIFT;
+		mcl->args[0] = sc->sc_rx_bufa[rx->id].xb_rx.xbrx_va;
 		mcl->args[1] = (rx->addr & PG_FRAME) | PG_V|PG_KW;
-		mcl->args[2] = UVMF_FLUSH_TLB; // 0;
+		mcl->args[2] = UVMF_TLB_FLUSH|UVMF_LOCAL; // 0;
 		mcl++;
 
 		xpmap_phys_to_machine_mapping
@@ -872,7 +872,7 @@ network_alloc_rx_buffers(struct xennet_softc *sc)
 			INVALID_P2M_ENTRY;
 
 		rx_mcl[nr_pfns].op = __HYPERVISOR_update_va_mapping;
-		rx_mcl[nr_pfns].args[0] = va >> PAGE_SHIFT;
+		rx_mcl[nr_pfns].args[0] = va;
 		rx_mcl[nr_pfns].args[1] = 0;
 		rx_mcl[nr_pfns].args[2] = 0;
 
@@ -898,7 +898,7 @@ network_alloc_rx_buffers(struct xennet_softc *sc)
 	xpq_flush_queue();
 
 	/* After all PTEs have been zapped we blow away stale TLB entries. */
-	rx_mcl[nr_pfns-1].args[2] = UVMF_FLUSH_TLB;
+	rx_mcl[nr_pfns-1].args[2] = UVMF_TLB_FLUSH|UVMF_LOCAL;
 
 	/* Give away a batch of pages. */
 	rx_mcl[nr_pfns].op = __HYPERVISOR_dom_mem_op;
@@ -912,7 +912,7 @@ network_alloc_rx_buffers(struct xennet_softc *sc)
 	(void)HYPERVISOR_multicall(rx_mcl, nr_pfns+1);
 
 	/* Check return status of HYPERVISOR_dom_mem_op(). */
-	if (rx_mcl[nr_pfns].args[5] != nr_pfns)
+	if (rx_mcl[nr_pfns].result != nr_pfns)
 		panic("Unable to reduce memory reservation\n");
 
 	/* Above is a suitable barrier to ensure backend will see requests. */

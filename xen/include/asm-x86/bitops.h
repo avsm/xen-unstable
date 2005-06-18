@@ -7,6 +7,11 @@
 
 #include <xen/config.h>
 
+#ifndef STR
+#define __STR(x) #x
+#define STR(x) __STR(x)
+#endif
+
 /*
  * These have to be done with inline assembly: that way the bit-setting
  * is guaranteed to be atomic. All bit operations return 0 if the bit
@@ -33,10 +38,10 @@
  * Note that @nr may be almost arbitrarily large; this function is not
  * restricted to acting on a single-word quantity.
  */
-static __inline__ void set_bit(long nr, volatile void * addr)
+static __inline__ void set_bit(int nr, volatile void * addr)
 {
 	__asm__ __volatile__( LOCK_PREFIX
-		"bts"__OS" %1,%0"
+		"btsl %1,%0"
 		:"=m" (ADDR)
 		:"dIr" (nr));
 }
@@ -50,10 +55,10 @@ static __inline__ void set_bit(long nr, volatile void * addr)
  * If it's called on the same region of memory simultaneously, the effect
  * may be that only one operation succeeds.
  */
-static __inline__ void __set_bit(long nr, volatile void * addr)
+static __inline__ void __set_bit(int nr, volatile void * addr)
 {
 	__asm__(
-		"bts"__OS" %1,%0"
+		"btsl %1,%0"
 		:"=m" (ADDR)
 		:"dIr" (nr));
 }
@@ -68,10 +73,10 @@ static __inline__ void __set_bit(long nr, volatile void * addr)
  * you should call smp_mb__before_clear_bit() and/or smp_mb__after_clear_bit()
  * in order to ensure changes are visible on other processors.
  */
-static __inline__ void clear_bit(long nr, volatile void * addr)
+static __inline__ void clear_bit(int nr, volatile void * addr)
 {
 	__asm__ __volatile__( LOCK_PREFIX
-		"btr"__OS" %1,%0"
+		"btrl %1,%0"
 		:"=m" (ADDR)
 		:"dIr" (nr));
 }
@@ -87,10 +92,10 @@ static __inline__ void clear_bit(long nr, volatile void * addr)
  * If it's called on the same region of memory simultaneously, the effect
  * may be that only one operation succeeds.
  */
-static __inline__ void __change_bit(long nr, volatile void * addr)
+static __inline__ void __change_bit(int nr, volatile void * addr)
 {
 	__asm__ __volatile__(
-		"btc"__OS" %1,%0"
+		"btcl %1,%0"
 		:"=m" (ADDR)
 		:"dIr" (nr));
 }
@@ -104,10 +109,10 @@ static __inline__ void __change_bit(long nr, volatile void * addr)
  * Note that @nr may be almost arbitrarily large; this function is not
  * restricted to acting on a single-word quantity.
  */
-static __inline__ void change_bit(long nr, volatile void * addr)
+static __inline__ void change_bit(int nr, volatile void * addr)
 {
 	__asm__ __volatile__( LOCK_PREFIX
-		"btc"__OS" %1,%0"
+		"btcl %1,%0"
 		:"=m" (ADDR)
 		:"dIr" (nr));
 }
@@ -120,12 +125,12 @@ static __inline__ void change_bit(long nr, volatile void * addr)
  * This operation is atomic and cannot be reordered.  
  * It also implies a memory barrier.
  */
-static __inline__ int test_and_set_bit(long nr, volatile void * addr)
+static __inline__ int test_and_set_bit(int nr, volatile void * addr)
 {
-	long oldbit;
+	int oldbit;
 
 	__asm__ __volatile__( LOCK_PREFIX
-		"bts"__OS" %2,%1\n\tsbb"__OS" %0,%0"
+		"btsl %2,%1\n\tsbbl %0,%0"
 		:"=r" (oldbit),"=m" (ADDR)
 		:"dIr" (nr) : "memory");
 	return oldbit;
@@ -140,12 +145,12 @@ static __inline__ int test_and_set_bit(long nr, volatile void * addr)
  * If two examples of this operation race, one can appear to succeed
  * but actually fail.  You must protect multiple accesses with a lock.
  */
-static __inline__ int __test_and_set_bit(long nr, volatile void * addr)
+static __inline__ int __test_and_set_bit(int nr, volatile void * addr)
 {
-	long oldbit;
+	int oldbit;
 
 	__asm__(
-		"bts"__OS" %2,%1\n\tsbb"__OS" %0,%0"
+		"btsl %2,%1\n\tsbbl %0,%0"
 		:"=r" (oldbit),"=m" (ADDR)
 		:"dIr" (nr));
 	return oldbit;
@@ -159,12 +164,12 @@ static __inline__ int __test_and_set_bit(long nr, volatile void * addr)
  * This operation is atomic and cannot be reordered.  
  * It also implies a memory barrier.
  */
-static __inline__ int test_and_clear_bit(long nr, volatile void * addr)
+static __inline__ int test_and_clear_bit(int nr, volatile void * addr)
 {
-	long oldbit;
+	int oldbit;
 
 	__asm__ __volatile__( LOCK_PREFIX
-		"btr"__OS" %2,%1\n\tsbb"__OS" %0,%0"
+		"btrl %2,%1\n\tsbbl %0,%0"
 		:"=r" (oldbit),"=m" (ADDR)
 		:"dIr" (nr) : "memory");
 	return oldbit;
@@ -179,24 +184,24 @@ static __inline__ int test_and_clear_bit(long nr, volatile void * addr)
  * If two examples of this operation race, one can appear to succeed
  * but actually fail.  You must protect multiple accesses with a lock.
  */
-static __inline__ int __test_and_clear_bit(long nr, volatile void * addr)
+static __inline__ int __test_and_clear_bit(int nr, volatile void * addr)
 {
-	long oldbit;
+	int oldbit;
 
 	__asm__(
-		"btr"__OS" %2,%1\n\tsbb"__OS" %0,%0"
+		"btrl %2,%1\n\tsbbl %0,%0"
 		:"=r" (oldbit),"=m" (ADDR)
 		:"dIr" (nr));
 	return oldbit;
 }
 
 /* WARNING: non atomic and it can be reordered! */
-static __inline__ int __test_and_change_bit(long nr, volatile void * addr)
+static __inline__ int __test_and_change_bit(int nr, volatile void * addr)
 {
-	long oldbit;
+	int oldbit;
 
 	__asm__ __volatile__(
-		"btc"__OS" %2,%1\n\tsbb"__OS" %0,%0"
+		"btcl %2,%1\n\tsbbl %0,%0"
 		:"=r" (oldbit),"=m" (ADDR)
 		:"dIr" (nr) : "memory");
 	return oldbit;
@@ -210,29 +215,29 @@ static __inline__ int __test_and_change_bit(long nr, volatile void * addr)
  * This operation is atomic and cannot be reordered.  
  * It also implies a memory barrier.
  */
-static __inline__ int test_and_change_bit(long nr, volatile void * addr)
+static __inline__ int test_and_change_bit(int nr, volatile void * addr)
 {
-	long oldbit;
+	int oldbit;
 
 	__asm__ __volatile__( LOCK_PREFIX
-		"btc"__OS" %2,%1\n\tsbb"__OS" %0,%0"
+		"btcl %2,%1\n\tsbbl %0,%0"
 		:"=r" (oldbit),"=m" (ADDR)
 		:"dIr" (nr) : "memory");
 	return oldbit;
 }
 
 
-static __inline__ int constant_test_bit(long nr, const volatile void * addr)
+static __inline__ int constant_test_bit(int nr, const volatile void * addr)
 {
 	return ((1UL << (nr & 31)) & (((const volatile unsigned int *) addr)[nr >> 5])) != 0;
 }
 
-static __inline__ int variable_test_bit(long nr, volatile void * addr)
+static __inline__ int variable_test_bit(int nr, volatile void * addr)
 {
-	long oldbit;
+	int oldbit;
 
 	__asm__ __volatile__(
-		"bt"__OS" %2,%1\n\tsbb"__OS" %0,%0"
+		"btl %2,%1\n\tsbbl %0,%0"
 		:"=r" (oldbit)
 		:"m" (ADDR),"dIr" (nr));
 	return oldbit;
@@ -243,36 +248,58 @@ static __inline__ int variable_test_bit(long nr, volatile void * addr)
  constant_test_bit((nr),(addr)) : \
  variable_test_bit((nr),(addr)))
 
+extern unsigned int __find_first_bit(
+    const unsigned long *addr, unsigned int size);
+extern unsigned int __find_next_bit(
+    const unsigned long *addr, unsigned int size, unsigned int offset);
+extern unsigned int __find_first_zero_bit(
+    const unsigned long *addr, unsigned int size);
+extern unsigned int __find_next_zero_bit(
+    const unsigned long *addr, unsigned int size, unsigned int offset);
+
+/* return index of first bit set in val or BITS_PER_LONG when no bit is set */
+static inline unsigned int __scanbit(unsigned long val)
+{
+	__asm__ ( "bsf %1,%0" : "=r" (val) : "r" (val), "0" (BITS_PER_LONG) );
+	return (unsigned int)val;
+}
+
+/**
+ * find_first_bit - find the first set bit in a memory region
+ * @addr: The address to start the search at
+ * @size: The maximum size to search
+ *
+ * Returns the bit-number of the first set bit, not the number of the byte
+ * containing a bit.
+ */
+#define find_first_bit(addr,size) \
+((__builtin_constant_p(size) && (size) <= BITS_PER_LONG ? \
+  (__scanbit(*(unsigned long *)addr)) : \
+  __find_first_bit(addr,size)))
+
+/**
+ * find_next_bit - find the first set bit in a memory region
+ * @addr: The address to base the search on
+ * @offset: The bitnumber to start searching at
+ * @size: The maximum size to search
+ */
+#define find_next_bit(addr,size,off) \
+((__builtin_constant_p(size) && (size) <= BITS_PER_LONG ? \
+  ((off) + (__scanbit((*(unsigned long *)addr) >> (off)))) : \
+  __find_next_bit(addr,size,off)))
+
 /**
  * find_first_zero_bit - find the first zero bit in a memory region
  * @addr: The address to start the search at
- * @size: The maximum bitnumber to search
+ * @size: The maximum size to search
  *
  * Returns the bit-number of the first zero bit, not the number of the byte
- * containing a bit. -1 when none found.
+ * containing a bit.
  */
-static __inline__ int find_first_zero_bit(void * addr, unsigned size)
-{
-	int d0, d1, d2;
-	int res;
-
-	if (!size)
-		return 0;
-	__asm__ __volatile__(
-		"movl $-1,%%eax\n\t"
-		"xorl %%edx,%%edx\n\t"
-		"repe; scasl\n\t"
-		"je 1f\n\t"
-		"xorl -4(%%"__OP"di),%%eax\n\t"
-		"sub"__OS" $4,%%"__OP"di\n\t"
-		"bsfl %%eax,%%edx\n"
-		"1:\tsub"__OS" %%"__OP"bx,%%"__OP"di\n\t"
-		"shl"__OS" $3,%%"__OP"di\n\t"
-		"add"__OS" %%"__OP"di,%%"__OP"dx"
-		:"=d" (res), "=&c" (d0), "=&D" (d1), "=&a" (d2)
-		:"1" ((size + 31) >> 5), "2" (addr), "b" (addr) : "memory");
-	return res;
-}
+#define find_first_zero_bit(addr,size) \
+((__builtin_constant_p(size) && (size) <= BITS_PER_LONG ? \
+  (__scanbit(~*(unsigned long *)addr)) : \
+  __find_first_zero_bit(addr,size)))
 
 /**
  * find_next_zero_bit - find the first zero bit in a memory region
@@ -280,85 +307,23 @@ static __inline__ int find_first_zero_bit(void * addr, unsigned size)
  * @offset: The bitnumber to start searching at
  * @size: The maximum size to search
  */
-static __inline__ int find_next_zero_bit (void * addr, int size, int offset)
-{
-	unsigned int * p = ((unsigned int *) addr) + (offset >> 5);
-	int set = 0, bit = offset & 31, res;
-	
-	if (bit) {
-		/*
-		 * Look for zero in first byte
-		 */
-		__asm__("bsfl %1,%0\n\t"
-			"jne 1f\n\t"
-			"movl $32, %0\n"
-			"1:"
-			: "=r" (set)
-			: "r" (~(*p >> bit)));
-		if (set < (32 - bit))
-			return set + offset;
-		set = 32 - bit;
-		p++;
-	}
-	/*
-	 * No zero yet, search remaining full bytes for a zero
-	 */
-	res = find_first_zero_bit (p, size - 32 * (p - (unsigned int *) addr));
-	return (offset + set + res);
-}
+#define find_next_zero_bit(addr,size,off) \
+((__builtin_constant_p(size) && (size) <= BITS_PER_LONG ? \
+  ((off)+(__scanbit(~(((*(unsigned long *)addr)) >> (off))))) : \
+  __find_next_zero_bit(addr,size,off)))
+
 
 /**
- * ffz - find first zero in word.
- * @word: The word to search
- *
- * Undefined if no zero exists, so code should check against ~0UL first.
+ * find_first_set_bit - find the first set bit in @word
+ * @word: the word to search
+ * 
+ * Returns the bit-number of the first set bit. If no bits are set then the
+ * result is undefined.
  */
-static __inline__ unsigned long ffz(unsigned long word)
+static __inline__ unsigned int find_first_set_bit(unsigned long word)
 {
-	__asm__("bsf"__OS" %1,%0"
-		:"=r" (word)
-		:"r" (~word));
-	return word;
-}
-
-/**
- * ffs - find first bit set
- * @x: the word to search
- *
- * This is defined the same way as
- * the libc and compiler builtin ffs routines, therefore
- * differs in spirit from the above ffz (man ffs).
- */
-static __inline__ int ffs(int x)
-{
-	int r;
-
-	__asm__("bsfl %1,%0\n\t"
-		"jnz 1f\n\t"
-		"movl $-1,%0\n"
-		"1:" : "=r" (r) : "g" (x));
-	return r+1;
-}
-
-/*
- * These are the preferred 'find first' functions in Xen.
- * Both return the appropriate bit index, with the l.s.b. having index 0.
- * If an appropriate bit is not found then the result is undefined.
- */
-static __inline__ unsigned long find_first_clear_bit(unsigned long word)
-{
-	__asm__("bsf"__OS" %1,%0"
-		:"=r" (word)
-		:"r" (~word));
-	return word;
-}
-
-static __inline__ unsigned long find_first_set_bit(unsigned long word)
-{
-	__asm__("bsf"__OS" %1,%0"
-		:"=r" (word)
-		:"r" (word));
-	return word;
+	__asm__ ( "bsf %1,%0" : "=r" (word) : "r" (word) );
+	return (unsigned int)word;
 }
 
 /**
@@ -367,22 +332,9 @@ static __inline__ unsigned long find_first_set_bit(unsigned long word)
  *
  * The Hamming Weight of a number is the total number of bits set in it.
  */
-
+#define hweight64(x) generic_hweight64(x)
 #define hweight32(x) generic_hweight32(x)
 #define hweight16(x) generic_hweight16(x)
 #define hweight8(x) generic_hweight8(x)
-
-#define ext2_set_bit                 __test_and_set_bit
-#define ext2_clear_bit               __test_and_clear_bit
-#define ext2_test_bit                test_bit
-#define ext2_find_first_zero_bit     find_first_zero_bit
-#define ext2_find_next_zero_bit      find_next_zero_bit
-
-/* Bitmap functions for the minix filesystem.  */
-#define minix_test_and_set_bit(nr,addr) __test_and_set_bit(nr,addr)
-#define minix_set_bit(nr,addr) __set_bit(nr,addr)
-#define minix_test_and_clear_bit(nr,addr) __test_and_clear_bit(nr,addr)
-#define minix_test_bit(nr,addr) test_bit(nr,addr)
-#define minix_find_first_zero_bit(addr,size) find_first_zero_bit(addr,size)
 
 #endif /* _X86_BITOPS_H */

@@ -6,20 +6,20 @@
  * Arch-specifics.
  */
 
-extern void domain_startofday(void);
+struct vcpu *arch_alloc_vcpu_struct(void);
 
-extern struct domain *arch_alloc_domain_struct(void);
+extern void arch_free_vcpu_struct(struct vcpu *v);
 
-extern void arch_free_domain_struct(struct domain *d);
+extern void arch_do_createdomain(struct vcpu *v);
 
-extern void arch_do_createdomain(struct domain *d);
+extern void arch_do_boot_vcpu(struct vcpu *v);
 
-extern int  arch_final_setup_guestos(
-    struct domain *d, full_execution_context_t *c);
+extern int  arch_set_info_guest(
+    struct vcpu *d, struct vcpu_guest_context *c);
 
 extern void free_perdomain_pt(struct domain *d);
 
-extern void domain_relinquish_memory(struct domain *d);
+extern void domain_relinquish_resources(struct domain *d);
 
 extern void dump_pageframe_info(struct domain *d);
 

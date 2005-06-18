@@ -285,6 +285,19 @@ def prettyprint(sxpr, out=sys.stdout, width=80):
         sxp.show(sxpr, out=out)
     print >> out
 
+def prettyprintstring(sxpr, width=80):
+    """Prettyprint an SXP form to a string.
+
+    sxpr	s-expression
+    width	maximum output width
+    """
+    io = StringIO.StringIO()
+    prettyprint(sxpr, out=io, width=width)
+    io.seek(0)
+    val = io.getvalue()
+    io.close()
+    return val
+
 def main():
     pin = sxp.Parser()
     while 1:

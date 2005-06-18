@@ -9,7 +9,25 @@
 
 #ifdef __x86_64__
 
-#define do_multicall_call(_call) BUG()
+#define do_multicall_call(_call)                         \
+    do {                                                 \
+        __asm__ __volatile__ (                           \
+            "movq  "STR(MULTICALL_op)"(%0),%%rax; "      \
+            "andq  $("STR(NR_hypercalls)"-1),%%rax; "    \
+            "leaq  "STR(hypercall_table)"(%%rip),%%rdi; "\
+            "leaq  (%%rdi,%%rax,8),%%rax; "              \
+            "movq  "STR(MULTICALL_arg0)"(%0),%%rdi; "    \
+            "movq  "STR(MULTICALL_arg1)"(%0),%%rsi; "    \
+            "movq  "STR(MULTICALL_arg2)"(%0),%%rdx; "    \
+            "movq  "STR(MULTICALL_arg3)"(%0),%%rcx; "    \
+            "movq  "STR(MULTICALL_arg4)"(%0),%%r8; "     \
+            "callq *(%%rax); "                           \
+            "movq  %%rax,"STR(MULTICALL_result)"(%0); "  \
+            : : "b" (_call)                              \
+              /* all the caller-saves registers */       \
+            : "rax", "rcx", "rdx", "rsi", "rdi",         \
+              "r8",  "r9",  "r10", "r11" );              \
+    } while ( 0 )
 
 #else
 
@@ -26,7 +44,9 @@
             "call  *hypercall_table(,%%eax,4); "       \
             "movl  %%eax,"STR(MULTICALL_result)"(%0); "\
             "addl  $20,%%esp; "                        \
-            : : "b" (_call) : "eax", "ecx", "edx" );   \
+            : : "b" (_call)                            \
+              /* all the caller-saves registers */     \
+            : "eax", "ecx", "edx" );                   \
     } while ( 0 )
 
 #endif
