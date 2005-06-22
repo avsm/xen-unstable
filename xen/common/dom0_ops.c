@@ -19,6 +19,7 @@
 #include <asm/current.h>
 #include <public/dom0_ops.h>
 #include <public/sched_ctl.h>
+#include <acm/acm_hooks.h>
 
 extern long arch_do_dom0_op(dom0_op_t *op, dom0_op_t *u_dom0_op);
 extern void arch_getdomaininfo_ctxt(
@@ -91,6 +92,7 @@ long do_dom0_op(dom0_op_t *u_dom0_op)
 {
     long ret = 0;
     dom0_op_t curop, *op = &curop;
+    void *ssid = NULL; /* save security ptr between pre and post/fail hooks */
 
     if ( !IS_PRIV(current->domain) )
         return -EPERM;
@@ -99,6 +101,9 @@ long do_dom0_op(dom0_op_t *u_dom0_op)
         return -EFAULT;
 
     if ( op->interface_version != DOM0_INTERFACE_VERSION )
+        return -EACCES;
+
+    if ( acm_pre_dom0_op(op, &ssid) )
         return -EACCES;
 
     switch ( op->cmd )
@@ -184,8 +189,8 @@ long do_dom0_op(dom0_op_t *u_dom0_op)
          * domains will all share the second HT of each CPU. Since dom0 is on 
 	     * CPU 0, we favour high numbered CPUs in the event of a tie.
          */
-        pro = ht_per_core - 1;
-        for ( i = pro; i < num_online_cpus(); i += ht_per_core )
+        pro = smp_num_siblings - 1;
+        for ( i = pro; i < num_online_cpus(); i += smp_num_siblings )
             if ( cnt[i] <= cnt[pro] )
                 pro = i;
 
@@ -334,9 +339,14 @@ long do_dom0_op(dom0_op_t *u_dom0_op)
          * - domain is marked as paused or blocked only if all its vcpus 
          *   are paused or blocked 
          * - domain is marked as running if any of its vcpus is running
+         * - only map vcpus that aren't down.  Note, at some point we may
+         *   wish to demux the -1 value to indicate down vs. not-ever-booted
+         *   
          */
         for_each_vcpu ( d, v ) {
-            op->u.getdomaininfo.vcpu_to_cpu[v->vcpu_id] = v->processor;
+            /* only map vcpus that are up */
+            if ( !(test_bit(_VCPUF_down, &v->vcpu_flags)) )
+                op->u.getdomaininfo.vcpu_to_cpu[v->vcpu_id] = v->processor;
             op->u.getdomaininfo.cpumap[v->vcpu_id]      = v->cpumap;
             if ( !(v->vcpu_flags & VCPUF_ctrl_pause) )
                 flags &= ~DOMFLAGS_PAUSED;
@@ -357,6 +367,11 @@ long do_dom0_op(dom0_op_t *u_dom0_op)
             ((d->domain_flags & DOMF_shutdown) ? DOMFLAGS_SHUTDOWN : 0) |
             d->shutdown_code << DOMFLAGS_SHUTDOWNSHIFT;
 
+        if (d->ssid != NULL)
+            op->u.getdomaininfo.ssidref = ((struct acm_ssid_domain *)d->ssid)->ssidref;
+        else    
+            op->u.getdomaininfo.ssidref = ACM_DEFAULT_SSID;
+
         op->u.getdomaininfo.tot_pages   = d->tot_pages;
         op->u.getdomaininfo.max_pages   = d->max_pages;
         op->u.getdomaininfo.shared_info_frame = 
@@ -374,6 +389,7 @@ long do_dom0_op(dom0_op_t *u_dom0_op)
         struct vcpu_guest_context *c;
         struct domain             *d;
         struct vcpu               *v;
+        int i;
 
         d = find_domain_by_id(op->u.getvcpucontext.domain);
         if ( d == NULL )
@@ -388,8 +404,16 @@ long do_dom0_op(dom0_op_t *u_dom0_op)
             put_domain(d);
             break;
         }
+
+        /* find first valid vcpu starting from request. */
+        v = NULL;
+        for ( i = op->u.getvcpucontext.vcpu; i < MAX_VIRT_CPUS; i++ )
+        {
+            v = d->vcpu[i];
+            if ( v != NULL && !(test_bit(_VCPUF_down, &v->vcpu_flags)) )
+                break;
+        }
         
-        v = d->vcpu[op->u.getvcpucontext.vcpu];
         if ( v == NULL )
         {
             ret = -ESRCH;
@@ -493,7 +517,10 @@ long do_dom0_op(dom0_op_t *u_dom0_op)
         ret = arch_do_dom0_op(op,u_dom0_op);
 
     }
-
+    if (!ret)
+        acm_post_dom0_op(op, ssid);
+    else
+        acm_fail_dom0_op(op, ssid);
     return ret;
 }
 

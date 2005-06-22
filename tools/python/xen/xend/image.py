@@ -1,10 +1,12 @@
-import os
+import os, string
 
 import xen.lowlevel.xc; xc = xen.lowlevel.xc.new()
 from xen.xend import sxp
 from xen.xend.XendError import VmError
 from xen.xend.XendLogging import log
 from xen.xend.xenstore import DBVar
+
+from xen.xend.server import channel
 
 class ImageHandler:
     """Abstract base class for image handlers.
@@ -96,8 +98,8 @@ class ImageHandler:
         self.db = vm.db.addChild('/image')
         self.config = config
 
-    def exportToDB(self, save=False):
-        self.db.exportToDB(self, fields=self.__exports__, save=save)
+    def exportToDB(self, save=False, sync=False):
+        self.db.exportToDB(self, fields=self.__exports__, save=save, sync=sync)
 
     def importFromDB(self):
         self.db.importFromDB(self, fields=self.__exports__)
@@ -109,7 +111,7 @@ class ImageHandler:
         except OSError, ex:
             log.warning("error removing bootloader file '%s': %s", f, ex)
 
-    def initDomain(self, dom, memory, cpu, cpu_weight):
+    def initDomain(self, dom, memory, ssidref, cpu, cpu_weight):
         """Initial domain create.
 
         @return domain id
@@ -117,14 +119,14 @@ class ImageHandler:
 
         mem_kb = self.getDomainMemory(memory)
         if not self.vm.restore:
-            dom = xc.domain_create(dom = dom or 0)
+            dom = xc.domain_create(dom = dom or 0, ssidref = ssidref)
             # if bootloader, unlink here. But should go after buildDomain() ?
             if self.vm.bootloader:
                 self.unlink(self.kernel)
                 self.unlink(self.ramdisk)
             if dom <= 0:
                 raise VmError('Creating domain failed: name=%s' % self.vm.name)
-        log.debug("initDomain: cpu=%d mem_kb=%d dom=%d", cpu, mem_kb, dom)
+        log.debug("initDomain: cpu=%d mem_kb=%d ssidref=%d dom=%d", cpu, mem_kb, ssidref, dom)
         # xc.domain_setuuid(dom, uuid)
         xc.domain_setcpuweight(dom, cpu_weight)
         xc.domain_setmaxmem(dom, mem_kb)
@@ -303,7 +305,7 @@ class VmxImageHandler(ImageHandler):
                   + " -f %s" % device_config
                   + self.vncParams()
                   + " -d %d" % self.vm.getDomain()
-                  + " -p %d" % self.device_channel['port1']
+                  + " -p %d" % (int(self.device_channel.port1)-1)
                   + " -m %s" % self.vm.memory)
 
     def vncParams(self):

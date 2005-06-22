@@ -50,6 +50,9 @@ class BlkifBackend:
     def getId(self):
         return self.id
 
+    def getEvtchn(self):
+        return self.evtchn
+
     def closeEvtchn(self):
         if self.evtchn:
             channel.eventChannelClose(self.evtchn)
@@ -167,6 +170,7 @@ class BlkDev(Dev):
         DBVar('params',       ty='str'),
         DBVar('node',         ty='str'),
         DBVar('device',       ty='long'),
+        DBVar('dev_handle',   ty='long'),
         DBVar('start_sector', ty='long'),
         DBVar('nr_sectors',   ty='long'),
         ]
@@ -191,6 +195,13 @@ class BlkDev(Dev):
         self.backendChannel = None
         self.backendId = 0
         self.configure(self.config, recreate=recreate)
+
+    def exportToDB(self, save=False):
+        Dev.exportToDB(self, save=save)
+        backend = self.getBackend()
+        if backend and backend.evtchn:
+            db = self.db.addChild("evtchn")
+            backend.evtchn.saveToDB(db, save=save)
 
     def init(self, recreate=False, reboot=False):
         self.frontendDomain = self.getDomain()

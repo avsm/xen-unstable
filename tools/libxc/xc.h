@@ -110,6 +110,7 @@ int xc_waitdomain_core(int domain,
 
 typedef struct {
     u32           domid;
+    u32           ssidref;
     unsigned int  dying:1, crashed:1, shutdown:1, 
                   paused:1, blocked:1, running:1;
     unsigned int  shutdown_reason; /* only meaningful if shutdown==1 */
@@ -124,6 +125,7 @@ typedef struct {
 
 typedef dom0_getdomaininfo_t xc_domaininfo_t;
 int xc_domain_create(int xc_handle, 
+                     u32 ssidref,
                      u32 *pdomid);
 
 
@@ -169,7 +171,11 @@ int xc_domain_pincpu(int xc_handle,
                      int vcpu,
                      cpumap_t *cpumap);
 /**
- * This function will return information about one or more domains.
+ * This function will return information about one or more domains. It is
+ * designed to iterate over the list of domains. If a single domain is
+ * requested, this function will return the next domain in the list - if
+ * one exists. It is, therefore, important in this case to make sure the
+ * domain requested was the one returned.
  *
  * @parm xc_handle a handle to an open hypervisor interface
  * @parm first_domid the first domain to enumerate information from.  Domains

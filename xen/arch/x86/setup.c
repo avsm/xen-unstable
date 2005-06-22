@@ -20,6 +20,7 @@
 #include <asm/desc.h>
 #include <asm/shadow.h>
 #include <asm/e820.h>
+#include <acm/acm_hooks.h>
 
 extern void dmi_scan_machine(void);
 extern void generic_apic_probe(void);
@@ -66,7 +67,6 @@ boolean_param("noapic", skip_ioapic_setup);
 
 int early_boot = 1;
 
-int ht_per_core = 1;
 cpumask_t cpu_present_map;
 
 /* Limits of Xen heap, used to initialise the allocator. */
@@ -188,7 +188,7 @@ static void __init start_of_day(void)
 
     arch_init_memory();
 
-    scheduler_init();	
+    scheduler_init();
 
     identify_cpu(&boot_cpu_data);
     if ( cpu_has_fxsr )
@@ -383,8 +383,8 @@ void __init __start_xen(multiboot_info_t *mbi)
 
     init_xenheap_pages(xenheap_phys_start, xenheap_phys_end);
     printk("Xen heap: %luMB (%lukB)\n",
-	   (xenheap_phys_end-xenheap_phys_start) >> 20,
-	   (xenheap_phys_end-xenheap_phys_start) >> 10);
+           (xenheap_phys_end-xenheap_phys_start) >> 20,
+           (xenheap_phys_end-xenheap_phys_start) >> 10);
 
     early_boot = 0;
 
@@ -394,12 +394,17 @@ void __init __start_xen(multiboot_info_t *mbi)
 
     shadow_mode_init();
 
+    /* initialize access control security module */
+    acm_init();
+
     /* Create initial domain 0. */
     dom0 = do_createdomain(0, 0);
     if ( dom0 == NULL )
         panic("Error creating domain 0\n");
 
     set_bit(_DOMF_privileged, &dom0->domain_flags);
+    /* post-create hooks sets security label */
+    acm_post_domain0_create(dom0->domain_id);
 
     /* Grab the DOM0 command line. */
     cmdline = (char *)(mod[0].string ? __va(mod[0].string) : NULL);
