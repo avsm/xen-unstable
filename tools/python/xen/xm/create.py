@@ -121,7 +121,7 @@ gopts.var('memory', val='MEMORY',
           use="Domain memory in MB.")
 
 gopts.var('ssidref', val='SSIDREF',
-          fn=set_u32, default=0xffffffff,
+          fn=set_u32, default=-1, 
           use="Security Identifier.")
 
 gopts.var('maxmem', val='MEMORY',
@@ -618,6 +618,7 @@ def main(argv):
         config = opts.vals.config
     else:
         opts.load_defconfig()
+        opts.vals.vnc = not opts.vals.dryrun
         preprocess(opts, opts.vals)
         if not opts.getopt('name') and opts.getopt('defconfig'):
             opts.setopt('name', os.path.basename(opts.getopt('defconfig')))

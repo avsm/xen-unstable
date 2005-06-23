@@ -79,6 +79,8 @@ int xc_domain_getinfo(int xc_handle,
     dom0_op_t op;
     int rc = 0; 
 
+    memset(info, 0, max_doms*sizeof(xc_dominfo_t));
+
     for ( nr_doms = 0; nr_doms < max_doms; nr_doms++ )
     {
         op.cmd = DOM0_GETDOMAININFO;
@@ -128,7 +130,7 @@ int xc_domain_get_vcpu_context(int xc_handle,
                                u32 vcpu,
                                vcpu_guest_context_t *ctxt)
 {
-    int rc, errno_saved;
+    int rc;
     dom0_op_t op;
 
     op.cmd = DOM0_GETVCPUCONTEXT;
@@ -143,11 +145,7 @@ int xc_domain_get_vcpu_context(int xc_handle,
     rc = do_dom0_op(xc_handle, &op);
 
     if ( ctxt != NULL )
-    {
-        errno_saved = errno;
-        (void)munlock(ctxt, sizeof(*ctxt));
-        errno = errno_saved;
-    }
+        safe_munlock(ctxt, sizeof(*ctxt));
 
     if ( rc > 0 )
         return -ESRCH;
