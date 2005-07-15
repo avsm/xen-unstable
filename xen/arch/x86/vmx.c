@@ -38,6 +38,10 @@
 #include <asm/vmx_vmcs.h>
 #include <asm/vmx_intercept.h>
 #include <asm/shadow.h>
+#if CONFIG_PAGING_LEVELS >= 4
+#include <asm/shadow_64.h>
+#endif
+
 #include <public/io/ioreq.h>
 
 #ifdef CONFIG_VMX
@@ -258,6 +262,20 @@ extern long evtchn_send(int lport);
 extern long do_block(void);
 void do_nmi(struct cpu_user_regs *, unsigned long);
 
+static int check_vmx_controls(ctrls, msr)
+{   
+    u32 vmx_msr_low, vmx_msr_high; 
+
+    rdmsr(msr, vmx_msr_low, vmx_msr_high);
+    if (ctrls < vmx_msr_low || ctrls > vmx_msr_high) {
+        printk("Insufficient VMX capability 0x%x, "
+               "msr=0x%x,low=0x%8x,high=0x%x\n", 
+               ctrls, msr, vmx_msr_low, vmx_msr_high);
+        return 0;
+    }
+    return 1;
+}
+
 int start_vmx(void)
 {
     struct vmcs_struct *vmcs;
@@ -287,6 +305,19 @@ int start_vmx(void)
               IA32_FEATURE_CONTROL_MSR_LOCK |
               IA32_FEATURE_CONTROL_MSR_ENABLE_VMXON, 0);
     }
+
+    if (!check_vmx_controls(MONITOR_PIN_BASED_EXEC_CONTROLS, 
+            MSR_IA32_VMX_PINBASED_CTLS_MSR))
+        return 0;
+    if (!check_vmx_controls(MONITOR_CPU_BASED_EXEC_CONTROLS, 
+            MSR_IA32_VMX_PROCBASED_CTLS_MSR))
+        return 0;
+    if (!check_vmx_controls(MONITOR_VM_EXIT_CONTROLS, 
+            MSR_IA32_VMX_EXIT_CTLS_MSR))
+        return 0;
+    if (!check_vmx_controls(MONITOR_VM_ENTRY_CONTROLS, 
+            MSR_IA32_VMX_ENTRY_CTLS_MSR))
+        return 0;
 
     set_in_cr4(X86_CR4_VMXE);   /* Enable VMXE */
 
@@ -797,7 +828,7 @@ vmx_world_restore(struct vcpu *d, struct vmx_assist_context *c)
 skip_cr3:
 
     error |= __vmread(CR4_READ_SHADOW, &old_cr4);
-    error |= __vmwrite(GUEST_CR4, (c->cr4 | X86_CR4_VMXE));
+    error |= __vmwrite(GUEST_CR4, (c->cr4 | VMX_CR4_HOST_MASK));
     error |= __vmwrite(CR4_READ_SHADOW, c->cr4);
 
     error |= __vmwrite(GUEST_IDTR_LIMIT, c->idtr_limit);
@@ -856,7 +887,7 @@ vmx_assist(struct vcpu *d, int mode)
 {
     struct vmx_assist_context c;
     u32 magic;
-    unsigned long cp;
+    u32 cp;
 
     /* make sure vmxassist exists (this is not an error) */
     if (!vmx_copy(&magic, VMXASSIST_MAGIC_OFFSET, sizeof(magic), COPY_IN))
@@ -961,9 +992,15 @@ static int vmx_set_cr0(unsigned long value)
             set_bit(VMX_CPU_STATE_LMA_ENABLED,
               &d->arch.arch_vmx.cpu_state);
             __vmread(VM_ENTRY_CONTROLS, &vm_entry_value);
-            vm_entry_value |= VM_ENTRY_CONTROLS_IA_32E_MODE;
+            vm_entry_value |= VM_ENTRY_CONTROLS_IA32E_MODE;
             __vmwrite(VM_ENTRY_CONTROLS, vm_entry_value);
 
+#if CONFIG_PAGING_LEVELS >= 4 
+            if(!shadow_set_guest_paging_levels(d->domain, 4)) {
+                printk("Unsupported guest paging levels\n");
+                domain_crash_synchronous(); /* need to take a clean path */
+            }
+#endif
         }
 
 	unsigned long crn;
@@ -1018,7 +1055,7 @@ static int vmx_set_cr0(unsigned long value)
                 clear_bit(VMX_CPU_STATE_LMA_ENABLED,
                           &d->arch.arch_vmx.cpu_state);
                 __vmread(VM_ENTRY_CONTROLS, &vm_entry_value);
-                vm_entry_value &= ~VM_ENTRY_CONTROLS_IA_32E_MODE;
+                vm_entry_value &= ~VM_ENTRY_CONTROLS_IA32E_MODE;
                 __vmwrite(VM_ENTRY_CONTROLS, vm_entry_value);
             }
         }
@@ -1164,13 +1201,10 @@ static int mov_to_cr(int gp, int cr, struct cpu_user_regs *regs)
     {
         /* CR4 */
         unsigned long old_guest_cr;
-        unsigned long pae_disabled = 0;
 
         __vmread(GUEST_CR4, &old_guest_cr);
         if (value & X86_CR4_PAE){
             set_bit(VMX_CPU_STATE_PAE_ENABLED, &d->arch.arch_vmx.cpu_state);
-            if(!vmx_paging_enabled(d))
-                pae_disabled = 1;
         } else {
             if (test_bit(VMX_CPU_STATE_LMA_ENABLED,
                          &d->arch.arch_vmx.cpu_state)){
@@ -1180,11 +1214,8 @@ static int mov_to_cr(int gp, int cr, struct cpu_user_regs *regs)
         }
 
         __vmread(CR4_READ_SHADOW, &old_cr);
-        if (pae_disabled)
-            __vmwrite(GUEST_CR4, ((value & ~X86_CR4_PAE) | X86_CR4_VMXE));
-        else
-            __vmwrite(GUEST_CR4, value| X86_CR4_VMXE);
 
+        __vmwrite(GUEST_CR4, value| VMX_CR4_HOST_MASK);
         __vmwrite(CR4_READ_SHADOW, value);
 
         /*
@@ -1352,6 +1383,53 @@ static inline void vmx_vmexit_do_hlt(void)
     raise_softirq(SCHEDULE_SOFTIRQ);
 }
 
+static inline void vmx_vmexit_do_extint(struct cpu_user_regs *regs)
+{
+    unsigned int vector;
+    int error;
+
+    asmlinkage void do_IRQ(struct cpu_user_regs *);
+    void smp_apic_timer_interrupt(struct cpu_user_regs *);
+    void timer_interrupt(int, void *, struct cpu_user_regs *);
+    void smp_event_check_interrupt(void);
+    void smp_invalidate_interrupt(void);
+    void smp_call_function_interrupt(void);
+    void smp_spurious_interrupt(struct cpu_user_regs *regs);
+    void smp_error_interrupt(struct cpu_user_regs *regs);
+
+    if ((error = __vmread(VM_EXIT_INTR_INFO, &vector))
+        && !(vector & INTR_INFO_VALID_MASK))
+        __vmx_bug(regs);
+
+    vector &= 0xff;
+    local_irq_disable();
+
+    switch(vector) {
+        case LOCAL_TIMER_VECTOR:
+            smp_apic_timer_interrupt(regs);
+            break;
+        case EVENT_CHECK_VECTOR:
+            smp_event_check_interrupt();
+            break;
+        case INVALIDATE_TLB_VECTOR:
+            smp_invalidate_interrupt();
+            break;
+        case CALL_FUNCTION_VECTOR:
+            smp_call_function_interrupt();
+            break;
+        case SPURIOUS_APIC_VECTOR:
+            smp_spurious_interrupt(regs);
+            break;
+        case ERROR_APIC_VECTOR:
+            smp_error_interrupt(regs);
+            break;
+        default:
+            regs->entry_vector = vector;
+            do_IRQ(regs);
+            break;
+    }
+}
+
 static inline void vmx_vmexit_do_mwait(void)
 {
 #if VMX_DEBUG
@@ -1445,12 +1523,9 @@ asmlinkage void vmx_vmexit_handler(struct cpu_user_regs regs)
 
 	    if (idtv_info_field & 0x800) { /* valid error code */
 		unsigned long error_code;
-		printk("VMX exit %x: %x/%lx\n",
-			exit_reason, idtv_info_field, error_code);
 		__vmread(VM_EXIT_INTR_ERROR_CODE, &error_code);
 		__vmwrite(VM_ENTRY_EXCEPTION_ERROR_CODE, error_code);
-	    } else
-	    	printk("VMX exit %x: %x\n", exit_reason, idtv_info_field);
+	    } 
 	}
         VMX_DBG_LOG(DBG_LEVEL_1, "idtv_info_field=%x", idtv_info_field);
     }
@@ -1558,27 +1633,8 @@ asmlinkage void vmx_vmexit_handler(struct cpu_user_regs regs)
         break;
     }
     case EXIT_REASON_EXTERNAL_INTERRUPT: 
-    {
-        extern asmlinkage void do_IRQ(struct cpu_user_regs *);
-        extern void smp_apic_timer_interrupt(struct cpu_user_regs *);
-        extern void timer_interrupt(int, void *, struct cpu_user_regs *);
-        unsigned int    vector;
-
-        if ((error = __vmread(VM_EXIT_INTR_INFO, &vector))
-            && !(vector & INTR_INFO_VALID_MASK))
-            __vmx_bug(&regs);
-
-        vector &= 0xff;
-        local_irq_disable();
-
-        if (vector == LOCAL_TIMER_VECTOR) {
-            smp_apic_timer_interrupt(&regs);
-        } else {
-            regs.entry_vector = vector;
-            do_IRQ(&regs);
-        }
+        vmx_vmexit_do_extint(&regs);
         break;
-    }
     case EXIT_REASON_PENDING_INTERRUPT:
         __vmwrite(CPU_BASED_VM_EXEC_CONTROL, 
               MONITOR_CPU_BASED_EXEC_CONTROLS);

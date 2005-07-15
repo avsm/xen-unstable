@@ -404,7 +404,7 @@ int arch_set_info_guest(
         set_bit(_VCPUF_fpu_initialised, &v->vcpu_flags);
 
     v->arch.flags &= ~TF_kernel_mode;
-    if ( c->flags & VGCF_IN_KERNEL )
+    if ( (c->flags & VGCF_IN_KERNEL) || (c->flags & VGCF_VMX_GUEST) )
         v->arch.flags |= TF_kernel_mode;
 
     memcpy(&v->arch.guest_context, c, sizeof(*c));
@@ -643,6 +643,10 @@ static void load_segments(struct vcpu *p, struct vcpu *n)
 static void save_segments(struct vcpu *v)
 {
     struct cpu_user_regs *regs = &v->arch.guest_context.user_regs;
+
+    if ( VMX_DOMAIN(v) )
+        rdmsrl(MSR_SHADOW_GS_BASE, v->arch.arch_vmx.msr_content.shadow_gs);
+
     __asm__ __volatile__ ( "movl %%ds,%0" : "=m" (regs->ds) );
     __asm__ __volatile__ ( "movl %%es,%0" : "=m" (regs->es) );
     __asm__ __volatile__ ( "movl %%fs,%0" : "=m" (regs->fs) );
@@ -791,7 +795,11 @@ void context_switch(struct vcpu *prev, struct vcpu *next)
 
         local_irq_enable();
         
-        if ( !VMX_DOMAIN(next) )
+        if ( VMX_DOMAIN(next) )
+        {
+            vmx_restore_msrs(next);
+        }
+        else
         {
             load_LDT(next);
             load_segments(realprev, next);

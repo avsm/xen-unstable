@@ -28,10 +28,13 @@
 #include <asm/processor.h>
 #include <asm/msr.h>
 #include <asm/vmx.h>
+#include <asm/flushtlb.h>
 #include <xen/event.h>
 #include <xen/kernel.h>
 #include <public/io/ioreq.h>
-
+#if CONFIG_PAGING_LEVELS >= 4
+#include <asm/shadow_64.h>
+#endif
 #ifdef CONFIG_VMX
 
 struct vmcs_struct *alloc_vmcs(void) 
@@ -52,25 +55,22 @@ void free_vmcs(struct vmcs_struct *vmcs)
 {
     int order;
 
-    order = (vmcs_size >> PAGE_SHIFT) - 1;
+    order = get_order(vmcs_size);
     free_xenheap_pages(vmcs, order);
 }
 
 static inline int construct_vmcs_controls(void)
 {
     int error = 0;
-        
+
     error |= __vmwrite(PIN_BASED_VM_EXEC_CONTROL, 
                        MONITOR_PIN_BASED_EXEC_CONTROLS);
 
     error |= __vmwrite(CPU_BASED_VM_EXEC_CONTROL, 
                        MONITOR_CPU_BASED_EXEC_CONTROLS);
-#if defined (__x86_64__)
-    error |= __vmwrite(VM_EXIT_CONTROLS, 
-      MONITOR_VM_EXIT_CONTROLS | VM_EXIT_CONTROLS_IA_32E_MODE);
-#else
+
     error |= __vmwrite(VM_EXIT_CONTROLS, MONITOR_VM_EXIT_CONTROLS);
-#endif
+
     error |= __vmwrite(VM_ENTRY_CONTROLS, MONITOR_VM_ENTRY_CONTROLS);
 
     return error;
@@ -119,6 +119,7 @@ int vmx_setup_platform(struct vcpu *d, struct cpu_user_regs *regs)
     struct e820entry *e820p;
     unsigned long gpfn = 0;
 
+    local_flush_tlb_pge();
     regs->ebx = 0;   /* Linux expects ebx to be 0 for boot proc */
 
     n = regs->ecx;
@@ -308,8 +309,7 @@ construct_init_vmcs_guest(struct cpu_user_regs *regs,
     error |= __vmwrite(CR0_READ_SHADOW, shadow_cr);
     /* CR3 is set in vmx_final_setup_guest */
 #ifdef __x86_64__
-    error |= __vmwrite(GUEST_CR4, host_env->cr4 & ~X86_CR4_PAE);
-    printk("construct_init_vmcs_guest: guest CR4 is %lx\n", host_env->cr4 );
+    error |= __vmwrite(GUEST_CR4, host_env->cr4 & ~X86_CR4_PSE);
 #else
     error |= __vmwrite(GUEST_CR4, host_env->cr4);
 #endif

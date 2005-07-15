@@ -265,7 +265,7 @@ class VmxImageHandler(ImageHandler):
     # Return a list of cmd line args to the device models based on the
     # xm config file
     def parseDeviceModelArgs(self):
-	dmargs = [ 'hda', 'hdb', 'hdc', 'hdd', 'cdrom', 'boot', 'fda', 'fdb',
+	dmargs = [ 'cdrom', 'boot', 'fda', 'fdb',
                    'localtime', 'serial', 'macaddr', 'stdvga', 'isa' ] 
 	ret = []
 	for a in dmargs:
@@ -276,17 +276,31 @@ class VmxImageHandler(ImageHandler):
 
             # Handle booleans gracefully
             if a in ['localtime', 'std-vga', 'isa']:
-                v = int(v)
+                if v != None: v = int(v)
 
 	    log.debug("args: %s, val: %s" % (a,v))
 	    if v: 
 		ret.append("-%s" % a)
 		ret.append("%s" % v)
 
+        # Handle hd img related options
+        device = sxp.child(self.vm.config, 'device')
+        vbdinfo = sxp.child(device, 'vbd')
+        if not vbdinfo:
+            raise VmError("vmx: missing vbd configuration")
+        uname = sxp.child_value(vbdinfo, 'uname')
+        vbddev = sxp.child_value(vbdinfo, 'dev')
+        (vbdtype, vbdparam) = string.split(uname, ':', 1)
+        vbddev_list = ['hda', 'hdb', 'hdc', 'hdd']
+        if vbdtype != 'file' or vbddev not in vbddev_list:
+            raise VmError("vmx: for qemu vbd type=file&dev=hda~hdd")
+        ret.append("-%s" % vbddev)
+        ret.append("%s" % vbdparam)
+
 	# Handle graphics library related options
-	vnc = int(sxp.child_value(self.vm.config, 'vnc'))
-	sdl = int(sxp.child_value(self.vm.config, 'sdl'))
-	nographic = int(sxp.child_value(self.vm.config, 'nographic'))
+	vnc = sxp.child_value(self.vm.config, 'vnc')
+	sdl = sxp.child_value(self.vm.config, 'sdl')
+	nographic = sxp.child_value(self.vm.config, 'nographic')
 	if nographic:
 	    ret.append('-nographic')
 	    return ret
@@ -351,6 +365,8 @@ class VmxImageHandler(ImageHandler):
         @param mem_mb: size in MB
         @return size in KB
         """
-        # Logic x86-32 specific. 
         # 1 page for the PGD + 1 pte page for 4MB of memory (rounded)
-        return (1 + ((mem_mb + 3) >> 2)) * 4
+        if os.uname()[4] == 'x86_64':
+            return (5 + ((mem_mb + 1) >> 1)) * 4
+        else:
+            return (1 + ((mem_mb + 3) >> 2)) * 4
