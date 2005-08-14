@@ -1091,7 +1091,7 @@ gnttab_check_unmap(
                 act->pin -= GNTPIN_hstw_inc;
                             
                 /* any more granted writable mappings? */
-                if ( (act->pin & (GNTPIN_hstw_mask|GNTPIN_devw_mask) == 0)) {
+                if ( (act->pin & (GNTPIN_hstw_mask|GNTPIN_devw_mask)) == 0 ) {
                     clear_bit(_GTF_writing, &rgt->shared[ref].flags);
                     put_page_type(&frame_table[frame]);
                 }
