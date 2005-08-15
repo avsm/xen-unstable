@@ -743,8 +743,7 @@ class XendDomainInfo:
             for ctrl in self.getDeviceControllers():
                 ctrl.initController(reboot=True)
         else:
-	    if self.image.ostype != 'vmx':
-                self.create_configured_devices()
+            self.create_configured_devices()
         if not self.device_model_pid:
             self.device_model_pid = self.image.createDeviceModel()
 
