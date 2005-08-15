@@ -55,6 +55,8 @@ static DECLARE_TASKLET(net_rx_tasklet, net_rx_action, 0);
 
 static struct timer_list net_timer;
 
+#define MAX_PENDING_REQS 256
+
 static struct sk_buff_head rx_queue;
 static multicall_entry_t rx_mcl[NETIF_RX_RING_SIZE*2+1];
 static mmu_update_t rx_mmu[NETIF_RX_RING_SIZE];
@@ -68,7 +70,6 @@ static unsigned char rx_notify[NR_EVENT_CHANNELS];
 /* Don't currently gate addition of an interface to the tx scheduling list. */
 #define tx_work_exists(_if) (1)
 
-#define MAX_PENDING_REQS 256
 static unsigned long mmap_vstart;
 #define MMAP_VADDR(_req) (mmap_vstart + ((_req) * PAGE_SIZE))
 
@@ -518,7 +519,7 @@ inline static void net_tx_action_dealloc(void)
         gop++;
     }
     BUG_ON(HYPERVISOR_grant_table_op(
-        GNTTABOP_unmap_grant_ref, tx_unmap_ops, gop - tx_unmap_ops));
+               GNTTABOP_unmap_grant_ref, tx_unmap_ops, gop - tx_unmap_ops));
 #else
     mcl = tx_mcl;
     while ( dc != dp )
@@ -697,9 +698,9 @@ static void net_tx_action(unsigned long unused)
         skb_reserve(skb, 16);
 #ifdef CONFIG_XEN_NETDEV_GRANT_TX
         mop->host_addr = MMAP_VADDR(pending_idx);
-        mop->dom = netif->domid;
-        mop->ref = txreq.addr >> PAGE_SHIFT;
-        mop->flags = GNTMAP_host_map | GNTMAP_readonly;
+        mop->dom       = netif->domid;
+        mop->ref       = txreq.addr >> PAGE_SHIFT;
+        mop->flags     = GNTMAP_host_map | GNTMAP_readonly;
         mop++;
 #else
 	MULTI_update_va_mapping_otherdomain(
@@ -752,7 +753,12 @@ static void net_tx_action(unsigned long unused)
 
         /* Check the remap error code. */
 #ifdef CONFIG_XEN_NETDEV_GRANT_TX
-        if ( unlikely(mop->dev_bus_addr == 0) )
+        /* 
+           XXX SMH: error returns from grant operations are pretty poorly
+           specified/thought out, but the below at least conforms with 
+           what the rest of the code uses. 
+        */
+        if ( unlikely(mop->handle < 0) )
         {
             printk(KERN_ALERT "#### netback grant fails\n");
             make_tx_response(netif, txreq.id, NETIF_RSP_ERROR);
