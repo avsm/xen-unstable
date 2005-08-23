@@ -775,11 +775,9 @@ static struct miscdevice blktap_miscdev = {
 int blktap_init(void)
 {
     int err, i, j;
-    struct page *page;
 
-    page = balloon_alloc_empty_page_range(MMAP_PAGES);
-    BUG_ON(page == NULL);
-    mmap_vstart = (unsigned long)pfn_to_kaddr(page_to_pfn(page));
+    if ( (mmap_vstart = allocate_empty_lowmem_region(MMAP_PAGES)) == 0 )
+        BUG();
 
 #ifdef CONFIG_XEN_BLKDEV_GRANT
     for (i=0; i<MAX_PENDING_REQS ; i++)

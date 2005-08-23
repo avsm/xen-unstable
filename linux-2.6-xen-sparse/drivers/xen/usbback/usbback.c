@@ -1027,15 +1027,13 @@ void usbif_release_ports(usbif_priv_t *up)
 static int __init usbif_init(void)
 {
     int i;
-    struct page *page;
 
     if ( !(xen_start_info.flags & SIF_INITDOMAIN) &&
          !(xen_start_info.flags & SIF_USB_BE_DOMAIN) )
         return 0;
-
-    page = balloon_alloc_empty_page_range(MMAP_PAGES);
-    BUG_ON(page == NULL);
-    mmap_vstart = (unsigned long)pfn_to_kaddr(page_to_pfn(page));
+    
+    if ( (mmap_vstart = allocate_empty_lowmem_region(MMAP_PAGES)) == 0 )
+        BUG();
 
     pending_cons = 0;
     pending_prod = MAX_PENDING_REQS;
