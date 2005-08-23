@@ -63,15 +63,25 @@
 extern unsigned int *phys_to_machine_mapping;
 #define pfn_to_mfn(_pfn) ((unsigned long)(phys_to_machine_mapping[(_pfn)]))
 #define mfn_to_pfn(_mfn) ((unsigned long)(machine_to_phys_mapping[(_mfn)]))
-static inline unsigned long phys_to_machine(unsigned long phys)
+
+/* Definitions for machine and pseudophysical addresses. */
+#ifdef CONFIG_X86_PAE
+typedef unsigned long long paddr_t;
+typedef unsigned long long maddr_t;
+#else
+typedef unsigned long paddr_t;
+typedef unsigned long maddr_t;
+#endif
+
+static inline maddr_t phys_to_machine(paddr_t phys)
 {
-	unsigned long machine = pfn_to_mfn(phys >> PAGE_SHIFT);
+	maddr_t machine = pfn_to_mfn(phys >> PAGE_SHIFT);
 	machine = (machine << PAGE_SHIFT) | (phys & ~PAGE_MASK);
 	return machine;
 }
-static inline unsigned long machine_to_phys(unsigned long machine)
+static inline paddr_t machine_to_phys(maddr_t machine)
 {
-	unsigned long phys = mfn_to_pfn(machine >> PAGE_SHIFT);
+	paddr_t phys = mfn_to_pfn(machine >> PAGE_SHIFT);
 	phys = (phys << PAGE_SHIFT) | (machine & ~PAGE_MASK);
 	return phys;
 }
@@ -86,8 +96,9 @@ typedef struct { unsigned long pte_low, pte_high; } pte_t;
 typedef struct { unsigned long long pmd; } pmd_t;
 typedef struct { unsigned long long pgd; } pgd_t;
 typedef struct { unsigned long long pgprot; } pgprot_t;
-#define __pte(x) ({ unsigned long long _x = (x); \
-    (((_x)&1) ? ((pte_t) {phys_to_machine(_x)}) : ((pte_t) {(_x)})); })
+#define __pte(x) ({ unsigned long long _x = (x);        \
+    if (_x & 1) _x = phys_to_machine(_x);               \
+    ((pte_t) {(unsigned long)(_x), (unsigned long)(_x>>32)}); })
 #define __pgd(x) ({ unsigned long long _x = (x); \
     (((_x)&1) ? ((pgd_t) {phys_to_machine(_x)}) : ((pgd_t) {(_x)})); })
 #define __pmd(x) ({ unsigned long long _x = (x); \
@@ -227,8 +238,10 @@ extern int sysctl_legacy_va_layout;
 		 VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC)
 
 /* VIRT <-> MACHINE conversion */
-#define virt_to_machine(_a)	(phys_to_machine(__pa(_a)))
-#define machine_to_virt(_m)	(__va(machine_to_phys(_m)))
+#define virt_to_machine(v)	(phys_to_machine(__pa(v)))
+#define machine_to_virt(m)	(__va(machine_to_phys(m)))
+#define virt_to_mfn(v)		(pfn_to_mfn(__pa(v) >> PAGE_SHIFT))
+#define mfn_to_virt(m)		(__va(mfn_to_pfn(m) << PAGE_SHIFT))
 
 #endif /* __KERNEL__ */
 

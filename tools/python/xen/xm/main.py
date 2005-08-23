@@ -202,7 +202,11 @@ def xm_migrate(args):
 def xm_list(args):
     use_long = 0
     show_vcpus = 0
-    (options, params) = getopt(args, 'lv', ['long','vcpus'])
+    try:
+        (options, params) = getopt(args, 'lv', ['long','vcpus'])
+    except GetoptError, opterr:
+        err(opterr)
+        sys.exit(1)
     
     n = len(params)
     for (k, v) in options:
@@ -223,8 +227,9 @@ def xm_list(args):
         domsinfo.append(parse_doms_info(info))
                
     if use_long:
-        # this actually seems like a bad idea, as it just dumps sexp out
-        PrettyPrint.prettyprint(info)
+        for dom in doms:
+            info = server.xend_domain(dom)
+            PrettyPrint.prettyprint(info)
     elif show_vcpus:
         xm_show_vcpus(domsinfo)
     else:
@@ -431,7 +436,7 @@ def xm_sedf(args):
     arg_check(args, 6, "sedf")
     
     dom = args[0]
-    v = map(int, args[1:5])
+    v = map(int, args[1:6])
     from xen.xend.XendClient import server
     server.xend_domain_cpu_sedf_set(dom, *v)
 

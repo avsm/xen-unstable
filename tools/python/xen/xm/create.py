@@ -23,6 +23,7 @@ import string
 import sys
 import socket
 import commands
+import time
 
 import xen.lowlevel.xc
 
@@ -380,7 +381,6 @@ def randomMAC():
 
     @return: MAC address string
     """
-    random.seed()
     mac = [ 0xaa, 0x00, 0x00,
             random.randint(0x00, 0x7f),
             random.randint(0x00, 0xff),
@@ -592,9 +592,14 @@ def choose_vnc_display():
         return d
     return None
 
+vncpid = None
+
 def spawn_vnc(display):
-    os.system("vncviewer -log *:stdout:0 -listen %d &" %
-              (VNC_BASE_PORT + display))
+    vncargs = (["vncviewer" + "-log", "*:stdout:0",
+            "-listen", "%d" % (VNC_BASE_PORT + display) ])
+    global vncpid    
+    vncpid = os.spawnvp(os.P_NOWAIT, "vncviewer", vncargs)
+
     return VNC_BASE_PORT + display
     
 def preprocess_vnc(opts, vals):
@@ -639,6 +644,9 @@ def make_domain(opts, config):
         else:
             dominfo = server.xend_domain_create(config)
     except XendError, ex:
+        import signal
+        if vncpid:
+            os.kill(vncpid, signal.SIGKILL)
         opts.err(str(ex))
 
     dom = sxp.child_value(dominfo, 'name')
@@ -667,20 +675,38 @@ def get_dom0_alloc():
     return 0
 
 def balloon_out(dom0_min_mem, opts):
-    """Balloon out to get memory for domU, if necessarily"""
+    """Balloon out memory from dom0 if necessary"""
     SLACK = 4
+    timeout = 20 # 2s
+    ret = 0
 
     xc = xen.lowlevel.xc.new()
     pinfo = xc.physinfo()
-    free_mem = pinfo['free_pages']/256
-    if free_mem < opts.vals.memory + SLACK:
-        need_mem = opts.vals.memory + SLACK - free_mem
-        cur_alloc = get_dom0_alloc()
-        if cur_alloc - need_mem >= dom0_min_mem:
-            server.xend_domain_mem_target_set(0, cur_alloc - need_mem)
+    free_mem = pinfo['free_pages'] / 256
+    domU_need_mem = opts.vals.memory + SLACK 
+
+    dom0_cur_alloc = get_dom0_alloc()
+    dom0_new_alloc = dom0_cur_alloc - (domU_need_mem - free_mem)
+
+    if free_mem < domU_need_mem and dom0_new_alloc < dom0_min_mem:
+        ret = 1
+    if free_mem < domU_need_mem and ret == 0:
+
+        server.xend_domain_mem_target_set(0, dom0_new_alloc)
+
+        while dom0_cur_alloc > dom0_new_alloc and timeout > 0:
+            time.sleep(0.1) # sleep 100ms
+            dom0_cur_alloc = get_dom0_alloc()
+            timeout -= 1
+        
+        if dom0_cur_alloc > dom0_new_alloc:
+            ret = 1
+    
     del xc
+    return ret
 
 def main(argv):
+    random.seed()
     opts = gopts
     args = opts.parse(argv)
     if opts.vals.help:
@@ -709,7 +735,9 @@ def main(argv):
     else:
         dom0_min_mem = xroot.get_dom0_min_mem()
         if dom0_min_mem != 0:
-            balloon_out(dom0_min_mem, opts)
+            if balloon_out(dom0_min_mem, opts):
+                print >>sys.stderr, "error: cannot allocate enough memory for domain"
+                sys.exit(1)
 
         dom = make_domain(opts, config)
         if opts.vals.console_autoconnect:

@@ -159,10 +159,8 @@ void show_trace(unsigned long *esp)
         addr = *stack++;
         if ( is_kernel_text(addr) )
         {
-            if ( (i != 0) && ((i % 6) == 0) )
-                printk("\n   ");
             printk("[<%p>]", _p(addr));
-            print_symbol(" %s\n", addr);
+            print_symbol(" %s\n   ", addr);
             i++;
         }
     }
@@ -438,7 +436,7 @@ asmlinkage int do_page_fault(struct cpu_user_regs *regs)
              &&
              KERNEL_MODE(v, regs) &&
              ((regs->error_code & 3) == 3) && /* write-protection fault */
-             ptwr_do_page_fault(d, addr) )
+             ptwr_do_page_fault(d, addr, regs) )
         {
             UNLOCK_BIGLOCK(d);
             return EXCRET_fault_fixed;
@@ -471,8 +469,6 @@ asmlinkage int do_page_fault(struct cpu_user_regs *regs)
     if ( likely((fixup = search_exception_table(regs->eip)) != 0) )
     {
         perfc_incrc(copy_user_faults);
-        if ( !shadow_mode_enabled(d) )
-            DPRINTK("Page fault: %p -> %p\n", _p(regs->eip), _p(fixup));
         regs->eip = fixup;
         return 0;
     }

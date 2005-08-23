@@ -23,7 +23,7 @@ Author: Mike Wray <mike.wray@hp.com>
 
 """
 
-import string
+import string, re
 import os
 import time
 import threading
@@ -36,8 +36,10 @@ from xen.xend.server import controller
 from xen.xend.server import SrvDaemon; xend = SrvDaemon.instance()
 from xen.xend.server import messages
 from xen.xend.server.channel import EventChannel, channelFactory
+from xen.util.blkif import blkdev_name_to_number, expand_dev_name
 
 from xen.xend import sxp
+from xen.xend import Blkctl
 from xen.xend.PrettyPrint import prettyprintstring
 from xen.xend.XendBootloader import bootloader
 from xen.xend.XendLogging import log
@@ -138,7 +140,7 @@ def dom_get(dom):
     if domlist and dom == domlist[0]['dom']:
         return domlist[0]
     return None
-    
+
 class XendDomainInfo:
     """Virtual machine object."""
 
@@ -195,19 +197,22 @@ class XendDomainInfo:
 
     recreate = classmethod(recreate)
 
-    def restore(cls, parentdb, config, uuid):
+    def restore(cls, parentdb, config, uuid=None):
         """Create a domain and a VM object to do a restore.
 
         @param parentdb:  parent db
         @param config:    domain configuration
         @param uuid:      uuid to use
         """
+        if not uuid:
+            uuid = getUuid()
         db = parentdb.addChild(uuid)
         vm = cls(db)
         ssidref = int(sxp.child_value(config, 'ssidref'))
         log.debug('restoring with ssidref='+str(ssidref))
         id = xc.domain_create(ssidref = ssidref)
         vm.setdom(id)
+        vm.clear_shutdown()
         try:
             vm.restore = True
             vm.construct(config)
@@ -377,6 +382,41 @@ class XendDomainInfo:
         return ctrl
 
     def createDevice(self, type, devconfig, change=False):
+        if type == 'vbd':
+            typedev = sxp.child_value(devconfig, 'dev')
+            if re.match('^ioemu:', typedev):
+	        return;
+            backdom = domain_exists(sxp.child_value(devconfig, 'backend', '0'))
+
+            devnum = blkdev_name_to_number(sxp.child_value(devconfig, 'dev'))
+
+            # create backend db
+            backdb = backdom.db.addChild("/backend/%s/%s/%d" %
+                                         (type, self.uuid, devnum))
+
+            # create frontend db
+            db = self.db.addChild("/device/%s/%d" % (type, devnum))
+            
+            db['virtual-device'] = "%i" % devnum
+            #db['backend'] = sxp.child_value(devconfig, 'backend', '0')
+            db['backend'] = backdb.getPath()
+            db['backend-id'] = "%i" % int(sxp.child_value(devconfig,
+                                                          'backend', '0'))
+
+            backdb['frontend'] = db.getPath()
+            (type, params) = string.split(sxp.child_value(devconfig, 'uname'), ':', 1)
+            node = Blkctl.block('bind', type, params)
+            backdb['frontend-id'] = "%i" % self.id
+            backdb['physical-device'] = "%li" % blkdev_name_to_number(node)
+            backdb.saveDB(save=True)
+
+            # Ok, super gross, this really doesn't belong in the frontend db...
+            db['type'] = type
+            db['node'] = node
+            db['params'] = params
+            db.saveDB(save=True)
+            
+            return
         ctrl = self.findDeviceController(type)
         return ctrl.createDevice(devconfig, recreate=self.recreate,
                                  change=change)
@@ -583,7 +623,7 @@ class XendDomainInfo:
         self.create_channel()
         self.image.createImage()
         self.exportToDB()
-        if self.store_channel:
+        if self.store_channel and self.store_mfn >= 0:
             self.db.introduceDomain(self.id,
                                     self.store_mfn,
                                     self.store_channel)
@@ -593,7 +633,7 @@ class XendDomainInfo:
     def delete(self):
         """Delete the vm's db.
         """
-        if self.dom_get(self.id):
+        if dom_get(self.id):
             return
         self.id = None
         self.saveToDB(sync=True)
@@ -668,6 +708,16 @@ class XendDomainInfo:
         for ctrl in self.getDeviceControllers():
             if ctrl.isDestroyed(): continue
             ctrl.destroyController(reboot=reboot)
+        ddb = self.db.addChild("/device")
+        for type in ddb.keys():
+            if type == 'vbd':
+                typedb = ddb.addChild(type)
+                for dev in typedb.keys():
+                    devdb = typedb.addChild(str(dev))
+                    Blkctl.block('unbind', devdb['type'].getData(),
+                                 devdb['node'].getData())
+                    typedb[dev].delete()
+                typedb.saveDB(save=True)
 
     def show(self):
         """Print virtual machine info.
@@ -743,8 +793,7 @@ class XendDomainInfo:
             for ctrl in self.getDeviceControllers():
                 ctrl.initController(reboot=True)
         else:
-	    if self.image.ostype != 'vmx':
-                self.create_configured_devices()
+            self.create_configured_devices()
         if not self.device_model_pid:
             self.device_model_pid = self.image.createDeviceModel()
 
@@ -754,7 +803,7 @@ class XendDomainInfo:
         @param dev_config: device configuration
         """
         dev_type = sxp.name(dev_config)
-        dev = self.createDevice(self, dev_config, change=True)
+        dev = self.createDevice(dev_type, dev_config, change=True)
         self.config.append(['device', dev.getConfig()])
         return dev.sxpr()
 
@@ -916,8 +965,7 @@ class XendDomainInfo:
         """
         self.configure_fields()
         self.create_devices()
-	if self.image.ostype != 'vmx':
-            self.create_blkif()
+        self.create_blkif()
 
     def create_blkif(self):
         """Create the block device interface (blkif) for the vm.
@@ -925,6 +973,7 @@ class XendDomainInfo:
         at creation time, for example when it uses NFS root.
 
         """
+        return
         blkif = self.getDeviceController("vbd", error=False)
         if not blkif:
             blkif = self.createDeviceController("vbd")
@@ -980,6 +1029,11 @@ class XendDomainInfo:
         db.saveDB(save=True);
         if not reason in ['suspend']:
             self.shutdown_pending = {'start':time.time(), 'reason':reason}
+
+    def clear_shutdown(self):
+        db = self.db.addChild("/control")
+        db['shutdown'] = ""
+        db.saveDB(save=True)
 
     def send_sysrq(self, key=0):
         db = self.db.addChild("/control");

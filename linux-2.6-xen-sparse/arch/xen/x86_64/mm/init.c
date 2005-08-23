@@ -40,12 +40,14 @@
 #include <asm/proto.h>
 #include <asm/smp.h>
 
-#ifndef Dprintk
-#define Dprintk(x...)
+extern unsigned long *contiguous_bitmap;
+
+#if defined(CONFIG_SWIOTLB)
+extern void swiotlb_init(void);
 #endif
 
-#ifdef CONFIG_GART_IOMMU
-extern int swiotlb;
+#ifndef Dprintk
+#define Dprintk(x...)
 #endif
 
 extern char _stext[];
@@ -557,8 +559,6 @@ static void xen_copy_pt(void)
 
 void __init xen_init_pt(void)
 {
-        pgd_t *old_level4 = (pgd_t *)xen_start_info.pt_base;
-
 	memcpy((void *)init_level4_pgt, 
 	       (void *)xen_start_info.pt_base, PAGE_SIZE);
 
@@ -742,7 +742,7 @@ void __init paging_init(void)
 				set_fixmap(FIX_ISAMAP_BEGIN - i, i * PAGE_SIZE);
 			else
 				__set_fixmap(FIX_ISAMAP_BEGIN - i,
-					     virt_to_machine(empty_zero_page),
+					     virt_to_mfn(empty_zero_page) << PAGE_SHIFT,
 					     PAGE_KERNEL_RO);
 	}
 #endif
@@ -792,8 +792,6 @@ static inline int page_is_ram (unsigned long pagenr)
         return 1;
 }
 
-extern int swiotlb_force;
-
 static struct kcore_list kcore_mem, kcore_vmalloc, kcore_kernel, kcore_modules,
 			 kcore_vsyscall;
 
@@ -802,14 +800,13 @@ void __init mem_init(void)
 	int codesize, reservedpages, datasize, initsize;
 	int tmp;
 
-#ifdef CONFIG_SWIOTLB
-	if (swiotlb_force)
-		swiotlb = 1;
-	if (!iommu_aperture &&
-	    (end_pfn >= 0xffffffff>>PAGE_SHIFT || force_iommu))
-	       swiotlb = 1;
-	if (swiotlb)
-		swiotlb_init();	
+	contiguous_bitmap = alloc_bootmem_low_pages(
+		(end_pfn + 2*BITS_PER_LONG) >> 3);
+	BUG_ON(!contiguous_bitmap);
+	memset(contiguous_bitmap, 0, (end_pfn + 2*BITS_PER_LONG) >> 3);
+
+#if defined(CONFIG_SWIOTLB)
+	swiotlb_init();	
 #endif
 
 	/* How many end-of-memory variables you have, grandma! */
