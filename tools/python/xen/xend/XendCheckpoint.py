@@ -48,7 +48,7 @@ def save(xd, fd, dominfo, live):
     # simply uses the defaults compiled into libxenguest; see the comments 
     # and/or code in xc_linux_save() for more information. 
     cmd = [PATH_XC_SAVE, str(xc.handle()), str(fd),
-           str(dominfo.id), "0", "0", str(live) ]
+           str(dominfo.id), "0", "0", str(int(live)) ]
     log.info("[xc_save] " + join(cmd))
     child = xPopen3(cmd, True, -1, [fd, xc.handle()])
     
@@ -70,6 +70,8 @@ def save(xd, fd, dominfo, live):
                 if l.rstrip() == "suspend":
                     log.info("suspending %d" % dominfo.id)
                     xd.domain_shutdown(dominfo.id, reason='suspend')
+                    dominfo.state_wait("suspended")
+                    log.info("suspend %d done" % dominfo.id)
                     if dominfo.store_channel:
                         try:
                             dominfo.db.releaseDomain(dominfo.id)
@@ -78,8 +80,6 @@ def save(xd, fd, dominfo, live):
                                 "error in domain release on xenstore: %s",
                                 ex)
                             pass
-                    dominfo.state_wait("suspended")
-                    log.info("suspend %d done" % dominfo.id)
                     child.tochild.write("done\n")
                     child.tochild.flush()
         if filter(lambda (fd, event): event & select.POLLHUP, r):
