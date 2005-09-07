@@ -15,6 +15,7 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  *
  * Copyright (C) 2005 Mike Wray Hewlett-Packard
+ * Copyright (C) 2005 Christian Limpach <Christian.Limpach@cl.cam.ac.uk>
  *
  */
 
@@ -45,6 +46,7 @@
 typedef struct XsHandle {
     PyObject_HEAD;
     struct xs_handle *xh;
+    PyObject *watches;
 } XsHandle;
 
 static inline struct xs_handle *xshandle(PyObject *self)
@@ -355,13 +357,19 @@ static PyObject *xspy_set_permissions(PyObject *self, PyObject *args,
 	"Raises RuntimeError on error.\n"				\
 	"\n"
 
+/* Each 10 bits takes ~ 3 digits, plus one, plus one for nul terminator. */
+#define MAX_STRLEN(x) ((sizeof(x) * CHAR_BIT + CHAR_BIT-1) / 10 * 3 + 2)
+
 static PyObject *xspy_watch(PyObject *self, PyObject *args, PyObject *kwds)
 {
     static char *kwd_spec[] = { "path", "token", NULL };
-    static char *arg_spec = "s|is";
+    static char *arg_spec = "sO";
     char *path = NULL;
-    char *token = "";
+    PyObject *token;
+    char token_str[MAX_STRLEN(unsigned long) + 1];
+    int i;
 
+    XsHandle *xsh = (XsHandle *)self;
     struct xs_handle *xh = xshandle(self);
     PyObject *val = NULL;
     int xsval = 0;
@@ -371,8 +379,21 @@ static PyObject *xspy_watch(PyObject *self, PyObject *args, PyObject *kwds)
     if (!PyArg_ParseTupleAndKeywords(args, kwds, arg_spec, kwd_spec, 
                                      &path, &token))
         goto exit;
-    xsval = xs_watch(xh, path, token);
+    Py_INCREF(token);
+    sprintf(token_str, "%li", (unsigned long)token);
+    xsval = xs_watch(xh, path, token_str);
     val = pyvalue_int(xsval);
+    if (xsval) {
+	for (i = 0; i < PyList_Size(xsh->watches); i++) {
+	    if (PyList_GetItem(xsh->watches, i) == Py_None) {
+		PyList_SetItem(xsh->watches, i, token);
+		break;
+	    }
+	}
+	if (i == PyList_Size(xsh->watches))
+	    PyList_Append(xsh->watches, token);
+    } else
+	Py_DECREF(token);
  exit:
     return val;
 }
@@ -393,9 +414,12 @@ static PyObject *xspy_read_watch(PyObject *self, PyObject *args,
     static char *kwd_spec[] = { NULL };
     static char *arg_spec = "";
 
+    XsHandle *xsh = (XsHandle *)self;
     struct xs_handle *xh = xshandle(self);
     PyObject *val = NULL;
     char **xsval = NULL;
+    PyObject *token;
+    int i;
 
     if (!xh)
 	goto exit;
@@ -403,11 +427,23 @@ static PyObject *xspy_read_watch(PyObject *self, PyObject *args,
         goto exit;
     xsval = xs_read_watch(xh);
     if (!xsval) {
-            val = PyErr_SetFromErrno(PyExc_RuntimeError);
-            goto exit;
+	val = PyErr_SetFromErrno(PyExc_RuntimeError);
+	goto exit;
+    }
+    if (sscanf(xsval[1], "%li", (unsigned long *)&token) != 1) {
+	PyErr_SetString(PyExc_RuntimeError, "invalid token");
+	goto exit;
+    }
+    for (i = 0; i < PyList_Size(xsh->watches); i++) {
+	if (token == PyList_GetItem(xsh->watches, i))
+	    break;
+    }
+    if (i == PyList_Size(xsh->watches)) {
+	PyErr_SetString(PyExc_RuntimeError, "invalid token");
+	goto exit;
     }
     /* Create tuple (path, token). */
-    val = Py_BuildValue("(ss)", xsval[0], xsval[1]);
+    val = Py_BuildValue("(sO)", xsval[0], token);
  exit:
     if (xsval)
 	free(xsval);
@@ -426,8 +462,9 @@ static PyObject *xspy_acknowledge_watch(PyObject *self, PyObject *args,
 					PyObject *kwds)
 {
     static char *kwd_spec[] = { "token", NULL };
-    static char *arg_spec = "s";
-    char *token;
+    static char *arg_spec = "O";
+    PyObject *token;
+    char token_str[MAX_STRLEN(unsigned long) + 1];
 
     struct xs_handle *xh = xshandle(self);
     PyObject *val = NULL;
@@ -437,7 +474,8 @@ static PyObject *xspy_acknowledge_watch(PyObject *self, PyObject *args,
 	goto exit;
     if (!PyArg_ParseTupleAndKeywords(args, kwds, arg_spec, kwd_spec, &token))
         goto exit;
-    xsval = xs_acknowledge_watch(xh, token);
+    sprintf(token_str, "%li", (unsigned long)token);
+    xsval = xs_acknowledge_watch(xh, token_str);
     val = pyvalue_int(xsval);
  exit:
     return val;
@@ -455,10 +493,13 @@ static PyObject *xspy_acknowledge_watch(PyObject *self, PyObject *args,
 static PyObject *xspy_unwatch(PyObject *self, PyObject *args, PyObject *kwds)
 {
     static char *kwd_spec[] = { "path", "token", NULL };
-    static char *arg_spec = "s|s";
+    static char *arg_spec = "sO";
     char *path = NULL;
-    char *token = "";
+    PyObject *token;
+    char token_str[MAX_STRLEN(unsigned long) + 1];
+    int i;
 
+    XsHandle *xsh = (XsHandle *)self;
     struct xs_handle *xh = xshandle(self);
     PyObject *val = NULL;
     int xsval = 0;
@@ -468,8 +509,16 @@ static PyObject *xspy_unwatch(PyObject *self, PyObject *args, PyObject *kwds)
     if (!PyArg_ParseTupleAndKeywords(args, kwds, arg_spec, kwd_spec, &path,
 				     &token))
         goto exit;
-    xsval = xs_unwatch(xh, path, token);
+    sprintf(token_str, "%li", (unsigned long)token);
+    xsval = xs_unwatch(xh, path, token_str);
     val = pyvalue_int(xsval);
+    for (i = 0; i < PyList_Size(xsh->watches); i++) {
+	if (token == PyList_GetItem(xsh->watches, i)) {
+	    Py_INCREF(Py_None);
+	    PyList_SetItem(xsh->watches, i, Py_None);
+	    break;
+	}
+    }
  exit:
     return val;
 }
@@ -612,7 +661,9 @@ static PyObject *xspy_close(PyObject *self, PyObject *args, PyObject *kwds)
 {
     static char *kwd_spec[] = { NULL };
     static char *arg_spec = "";
+    int i;
 
+    XsHandle *xsh = (XsHandle *)self;
     struct xs_handle *xh = xshandle(self);
     PyObject *val = NULL;
     int xsval = 1;
@@ -621,8 +672,13 @@ static PyObject *xspy_close(PyObject *self, PyObject *args, PyObject *kwds)
 	goto exit;
     if (!PyArg_ParseTupleAndKeywords(args, kwds, arg_spec, kwd_spec))
         goto exit;
+    for (i = 0; i < PyList_Size(xsh->watches); i++) {
+	/* TODO: xs_unwatch watches */
+	Py_INCREF(Py_None);
+	PyList_SetItem(xsh->watches, i, Py_None);
+    }
     xs_daemon_close(xh);
-    ((XsHandle*)self)->xh = NULL;
+    xsh->xh = NULL;
     val = pyvalue_int(xsval);
  exit:
     return val;
@@ -750,20 +806,24 @@ static PyObject *xshandle_open(PyObject *self, PyObject *args, PyObject *kwds)
 
     if (!PyArg_ParseTupleAndKeywords(args, kwds, arg_spec, kwd_spec,
                                      &readonly))
-        goto exit;
+	return NULL;
 
     xsh = PyObject_New(XsHandle, &xshandle_type);
     if (!xsh)
+	return NULL;
+    xsh->watches = PyList_New(0);
+    if (!xsh->watches)
 	goto exit;
     xsh->xh = (readonly ? xs_daemon_open_readonly() : xs_daemon_open());
     if (!xsh->xh) {
-        PyObject_Del(xsh);
-        val = pyvalue_int(0);
+	Py_DECREF(xsh->watches);
         goto exit;
     }
     val = (PyObject *)xsh;
- exit:
     return val;
+ exit:
+    PyObject_Del(xsh);
+    return NULL;
 }
 
 static PyMethodDef xs_methods[] = {
