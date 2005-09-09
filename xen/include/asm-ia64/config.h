@@ -21,6 +21,22 @@
 #define CONFIG_EFI_PCDP
 #define CONFIG_SERIAL_SGI_L1_CONSOLE
 
+#undef CONFIG_XEN_SMP
+
+#ifdef CONFIG_XEN_SMP
+#define CONFIG_SMP 1
+#define NR_CPUS 2
+#define CONFIG_NR_CPUS 2
+#else
+#undef CONFIG_SMP
+#define NR_CPUS 1
+#define CONFIG_NR_CPUS 1
+#endif
+//#define NR_CPUS 16
+//#define CONFIG_NR_CPUS 16
+//leave SMP for a later time
+//#undef CONFIG_SMP
+
 #ifndef __ASSEMBLY__
 
 // can't find where this typedef was before?!?
@@ -75,13 +91,16 @@ extern char _end[]; /* standard ELF symbol */
 //#define __cond_lock(x) (x)
 #define __must_check
 #define __deprecated
+#ifndef RELOC_HIDE
+# define RELOC_HIDE(ptr, off)					\
+  ({ unsigned long __ptr;					\
+     __ptr = (unsigned long) (ptr);				\
+    (typeof(ptr)) (__ptr + (off)); })
+#endif
 
 // xen/include/asm/config.h
 #define HZ 100
-// leave SMP for a later time
-#define NR_CPUS 1
-//#define NR_CPUS 16
-//#define CONFIG_NR_CPUS 16
+// FIXME SMP: leave SMP for a later time
 #define barrier() __asm__ __volatile__("": : :"memory")
 
 ///////////////////////////////////////////////////////////////
@@ -99,13 +118,18 @@ extern char _end[]; /* standard ELF symbol */
 
 // from include/asm-ia64/smp.h
 #ifdef CONFIG_SMP
-#error "Lots of things to fix to enable CONFIG_SMP!"
+#warning "Lots of things to fix to enable CONFIG_SMP!"
 #endif
+// FIXME SMP
 #define	get_cpu()	0
 #define put_cpu()	do {} while(0)
 
 // needed for common/dom0_ops.c until hyperthreading is supported
+#ifdef CONFIG_SMP
+extern int smp_num_siblings;
+#else
 #define smp_num_siblings 1
+#endif
 
 // from linux/include/linux/mm.h
 struct page;
@@ -144,7 +168,9 @@ struct page;
 #define ____cacheline_aligned_in_smp
 #define ____cacheline_maxaligned_in_smp
 
+#ifndef __ASSEMBLY__
 #include "asm/types.h"	// for u64
+#endif
 
 // warning: unless search_extable is declared, the return value gets
 // truncated to 32-bits, causing a very strange error in privop handling
@@ -177,6 +203,7 @@ void sort_main_extable(void);
 #endif // CONFIG_VTI
 
 #define __attribute_used__	__attribute__ ((unused))
+#define __nocast
 
 // see include/asm-x86/atomic.h (different from standard linux)
 #define _atomic_set(v,i) (((v).counter) = (i))
@@ -236,9 +263,6 @@ void dummy_called(char *function);
 // these declarations got moved at some point, find a better place for them
 extern int ht_per_core;
 
-// needed for include/xen/smp.h
-#define __smp_processor_id()	0
-
 // xen/include/asm/config.h
 /******************************************************************************
  * config.h
@@ -253,10 +277,6 @@ extern int ht_per_core;
 
 #define CONFIG_MCKINLEY
 
-//#define CONFIG_SMP 1
-//#define CONFIG_NR_CPUS 2
-//leave SMP for a later time
-#undef CONFIG_SMP
 #undef CONFIG_X86_LOCAL_APIC
 #undef CONFIG_X86_IO_APIC
 #undef CONFIG_X86_L1_CACHE_SHIFT
@@ -274,6 +294,10 @@ extern int ht_per_core;
 #define CONFIG_XEN_ATTENTION_KEY 1
 #endif /* __ASSEMBLY__ */
 #endif /* __XEN_IA64_CONFIG_H__ */
+
+// needed for include/xen/smp.h
+#define __smp_processor_id()	0
+
 
 // FOLLOWING ADDED FOR XEN POST-NGIO and/or LINUX 2.6.7
 

@@ -201,7 +201,7 @@ static u16 gr_info[32]={
 
 	RPT(r1), RPT(r2), RPT(r3),
 
-#ifdef  CONFIG_VTI
+#if defined(XEN) && defined(CONFIG_VTI)
 	RPT(r4), RPT(r5), RPT(r6), RPT(r7),
 #else   //CONFIG_VTI
 	RSW(r4), RSW(r5), RSW(r6), RSW(r7),
@@ -295,8 +295,8 @@ rotate_reg (unsigned long sor, unsigned long rrb, unsigned long reg)
 	return reg;
 }
 
-#ifdef CONFIG_VTI
-static void
+#if defined(XEN) && defined(CONFIG_VTI)
+void
 set_rse_reg (struct pt_regs *regs, unsigned long r1, unsigned long val, unsigned long nat)
 {
 	struct switch_stack *sw = (struct switch_stack *) regs - 1;
@@ -364,25 +364,25 @@ set_rse_reg (struct pt_regs *regs, unsigned long r1, unsigned long val, unsigned
 static void
 get_rse_reg (struct pt_regs *regs, unsigned long r1, unsigned long *val, unsigned long *nat)
 {
-	struct switch_stack *sw = (struct switch_stack *) regs - 1;
-	unsigned long *bsp, *addr, *rnat_addr, *ubs_end, *bspstore;
-	unsigned long *kbs = (void *) current + IA64_RBS_OFFSET;
-	unsigned long rnats, nat_mask;
-	unsigned long on_kbs;
+    struct switch_stack *sw = (struct switch_stack *) regs - 1;
+    unsigned long *bsp, *addr, *rnat_addr, *ubs_end, *bspstore;
+    unsigned long *kbs = (void *) current + IA64_RBS_OFFSET;
+    unsigned long rnats, nat_mask;
+    unsigned long on_kbs;
     unsigned long old_rsc, new_rsc;
-	long sof = (regs->cr_ifs) & 0x7f;
-	long sor = 8 * ((regs->cr_ifs >> 14) & 0xf);
-	long rrb_gr = (regs->cr_ifs >> 18) & 0x7f;
-	long ridx = r1 - 32;
+    long sof = (regs->cr_ifs) & 0x7f;
+    long sor = 8 * ((regs->cr_ifs >> 14) & 0xf);
+    long rrb_gr = (regs->cr_ifs >> 18) & 0x7f;
+    long ridx = r1 - 32;
 
-	if (ridx >= sof) {
-		/* read of out-of-frame register returns an undefined value; 0 in our case.  */
-		DPRINT("ignoring read from r%lu; only %lu registers are allocated!\n", r1, sof);
-		panic("wrong stack register number");
-	}
+    if (ridx >= sof) {
+        /* read of out-of-frame register returns an undefined value; 0 in our case.  */
+        DPRINT("ignoring read from r%lu; only %lu registers are allocated!\n", r1, sof);
+        panic("wrong stack register number");
+    }
 
-	if (ridx < sor)
-		ridx = rotate_reg(sor, rrb_gr, ridx);
+    if (ridx < sor)
+        ridx = rotate_reg(sor, rrb_gr, ridx);
 
     old_rsc=ia64_get_rsc();
     new_rsc=old_rsc&(~(0x3));
@@ -391,9 +391,9 @@ get_rse_reg (struct pt_regs *regs, unsigned long r1, unsigned long *val, unsigne
     bspstore = ia64_get_bspstore();
     bsp =kbs + (regs->loadrs >> 19); //16+3;
 
-	addr = ia64_rse_skip_regs(bsp, -sof + ridx);
+    addr = ia64_rse_skip_regs(bsp, -sof + ridx);
     nat_mask = 1UL << ia64_rse_slot_num(addr);
-	rnat_addr = ia64_rse_rnat_addr(addr);
+    rnat_addr = ia64_rse_rnat_addr(addr);
 
     if(addr >= bspstore){
 
@@ -401,7 +401,7 @@ get_rse_reg (struct pt_regs *regs, unsigned long r1, unsigned long *val, unsigne
         ia64_mf ();
         bspstore = ia64_get_bspstore();
     }
-	*val=*addr;
+    *val=*addr;
     if(bspstore < rnat_addr){
         *nat=!!(ia64_get_rnat()&nat_mask);
     }else{
@@ -409,6 +409,7 @@ get_rse_reg (struct pt_regs *regs, unsigned long r1, unsigned long *val, unsigne
     }
     ia64_set_rsc(old_rsc);
 }
+
 #else // CONFIG_VTI
 static void
 set_rse_reg (struct pt_regs *regs, unsigned long r1, unsigned long val, int nat)
@@ -590,7 +591,7 @@ setreg (unsigned long regnum, unsigned long val, int nat, struct pt_regs *regs)
 		unat = &sw->ar_unat;
 	} else {
 		addr = (unsigned long)regs;
-#ifdef CONFIG_VTI
+#if defined(XEN) && defined(CONFIG_VTI)
 		unat = &regs->eml_unat;
 #else //CONFIG_VTI
 		unat = &sw->caller_unat;
@@ -780,7 +781,7 @@ getreg (unsigned long regnum, unsigned long *val, int *nat, struct pt_regs *regs
 		unat = &sw->ar_unat;
 	} else {
 		addr = (unsigned long)regs;
-#ifdef  CONFIG_VTI
+#if defined(XEN) && defined(CONFIG_VTI)
 		unat = &regs->eml_unat;;
 #else   //CONFIG_VTI
 		unat = &sw->caller_unat;
@@ -1527,6 +1528,10 @@ printk("ia64_handle_unaligned: called, not working yet\n");
 	 *		- ldX.spill
 	 *		- stX.spill
 	 *	Reason: RNATs are based on addresses
+	 *		- ld16
+	 *		- st16
+	 *	Reason: ld16 and st16 are supposed to occur in a single
+	 *		memory op
 	 *
 	 *	synchronization:
 	 *		- cmpxchg
@@ -1548,6 +1553,10 @@ printk("ia64_handle_unaligned: called, not working yet\n");
 	switch (opcode) {
 	      case LDS_OP:
 	      case LDSA_OP:
+		if (u.insn.x)
+			/* oops, really a semaphore op (cmpxchg, etc) */
+			goto failure;
+		/* no break */
 	      case LDS_IMM_OP:
 	      case LDSA_IMM_OP:
 	      case LDFS_OP:
@@ -1572,6 +1581,10 @@ printk("ia64_handle_unaligned: called, not working yet\n");
 	      case LDCCLR_OP:
 	      case LDCNC_OP:
 	      case LDCCLRACQ_OP:
+		if (u.insn.x)
+			/* oops, really a semaphore op (cmpxchg, etc) */
+			goto failure;
+		/* no break */
 	      case LD_IMM_OP:
 	      case LDA_IMM_OP:
 	      case LDBIAS_IMM_OP:
@@ -1584,6 +1597,10 @@ printk("ia64_handle_unaligned: called, not working yet\n");
 
 	      case ST_OP:
 	      case STREL_OP:
+		if (u.insn.x)
+			/* oops, really a semaphore op (cmpxchg, etc) */
+			goto failure;
+		/* no break */
 	      case ST_IMM_OP:
 	      case STREL_IMM_OP:
 		ret = emulate_store_int(ifa, u.insn, regs);
