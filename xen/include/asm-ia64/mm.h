@@ -34,6 +34,8 @@ typedef unsigned long page_flags_t;
  */
 #define PFN_ORDER(_pfn)	((_pfn)->u.free.order)
 
+#define PRtype_info "08x"
+
 struct page
 {
     /* Each frame can be threaded onto a doubly-linked list. */
@@ -161,8 +163,8 @@ static inline int get_page(struct pfn_info *page,
 	    unlikely((nx & PGC_count_mask) == 0) ||	/* Count overflow? */
 	    unlikely((x >> 32) != _domain)) {		/* Wrong owner? */
 	    DPRINTK("Error pfn %lx: rd=%p, od=%p, caf=%08x, taf=%08x\n",
-		page_to_pfn(page), domain, unpickle_domptr(d),
-		x, page->u.inuse.typeinfo);
+		page_to_pfn(page), domain, unpickle_domptr(domain),
+		x, page->u.inuse.type_info);
 	    return 0;
 	}
     }
@@ -209,6 +211,12 @@ void memguard_unguard_range(void *p, unsigned long l);
 #define memguard_guard_range(_p,_l)    ((void)0)
 #define memguard_unguard_range(_p,_l)  ((void)0)
 #endif
+
+// prototype of misc memory stuff
+unsigned long __get_free_pages(unsigned int mask, unsigned int order);
+void __free_pages(struct page *page, unsigned int order);
+void *pgtable_quicklist_alloc(void);
+void pgtable_quicklist_free(void *pgtable_entry);
 
 // FOLLOWING FROM linux-2.6.7/include/mm.h
 
@@ -316,6 +324,7 @@ struct vm_area_struct {
 #define VM_STACK_FLAGS	(VM_GROWSDOWN | VM_STACK_DEFAULT_FLAGS | VM_ACCOUNT)
 #endif
 
+#if 0	/* removed when rebasing to 2.6.13 */
 /*
  * The zone field is never updated after free_area_init_core()
  * sets it, so none of the operations on it need to be atomic.
@@ -347,6 +356,7 @@ static inline void set_page_zone(struct page *page, unsigned long nodezone_num)
 	page->flags &= ~(~0UL << NODEZONE_SHIFT);
 	page->flags |= nodezone_num << NODEZONE_SHIFT;
 }
+#endif
 
 #ifndef CONFIG_DISCONTIGMEM          /* Don't use mapnrs, do it properly */
 extern unsigned long max_mapnr;

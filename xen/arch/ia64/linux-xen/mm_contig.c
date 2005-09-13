@@ -62,7 +62,8 @@ show_mem (void)
 	printk("%d reserved pages\n", reserved);
 	printk("%d pages shared\n", shared);
 	printk("%d pages swap cached\n", cached);
-	printk("%ld pages in page table cache\n", pgtable_cache_size);
+	printk("%ld pages in page table cache\n",
+		pgtable_quicklist_total_size());
 }
 #endif
 
@@ -191,8 +192,13 @@ per_cpu_init (void)
 	 * get_zeroed_page().
 	 */
 	if (smp_processor_id() == 0) {
+#ifdef XEN
+		cpu_data = alloc_xenheap_pages(PERCPU_PAGE_SHIFT -
+			PAGE_SHIFT + get_order(NR_CPUS));
+#else
 		cpu_data = __alloc_bootmem(PERCPU_PAGE_SIZE * NR_CPUS,
 					   PERCPU_PAGE_SIZE, __pa(MAX_DMA_ADDRESS));
+#endif
 		for (cpu = 0; cpu < NR_CPUS; cpu++) {
 			memcpy(cpu_data, __phys_per_cpu_start, __per_cpu_end - __per_cpu_start);
 			__per_cpu_offset[cpu] = (char *) cpu_data - __per_cpu_start;
@@ -204,6 +210,7 @@ per_cpu_init (void)
 }
 #endif /* CONFIG_SMP */
 
+#ifndef XEN
 static int
 count_pages (u64 start, u64 end, void *arg)
 {
@@ -229,7 +236,6 @@ count_dma_pages (u64 start, u64 end, void *arg)
  * Set up the page tables.
  */
 
-#ifndef XEN
 void
 paging_init (void)
 {
@@ -285,7 +291,7 @@ paging_init (void)
 		vmem_map = (struct page *) vmalloc_end;
 		efi_memmap_walk(create_mem_map_page_table, NULL);
 
-		mem_map = contig_page_data.node_mem_map = vmem_map;
+		NODE_DATA(0)->node_mem_map = vmem_map;
 		free_area_init_node(0, &contig_page_data, zones_size,
 				    0, zholes_size);
 
@@ -302,4 +308,4 @@ paging_init (void)
 #endif /* !CONFIG_VIRTUAL_MEM_MAP */
 	zero_page_memmap_ptr = virt_to_page(ia64_imva(empty_zero_page));
 }
-#endif /* !CONFIG_XEN */
+#endif
