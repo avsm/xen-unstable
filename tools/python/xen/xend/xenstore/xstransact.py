@@ -36,8 +36,6 @@ class xstransact:
         return xshandle().transaction_end(False)
 
     def abort(self):
-        if not self.in_transaction:
-            raise RuntimeError
         self.in_transaction = False
         return xshandle().transaction_end(True)
 
@@ -106,6 +104,45 @@ class xstransact:
             ret.extend(self._list(key))
         return ret
 
+    def gather(self, *args):
+        if len(args) and type(args[0]) != tuple:
+            args = args,
+        ret = []
+        for tup in args:
+            if len(tup) == 2:
+                (key, fn) = tup
+                defval = None
+            else:
+                (key, fn, defval) = tup
+            try:
+                val = fn(self._read(key))
+            except TypeError:
+                val = defval
+            ret.append(val)
+        if len(ret) == 1:
+            return ret[0]
+        return ret
+
+    def store(self, *args):
+        if len(args) and type(args[0]) != tuple:
+            args = args,
+        for tup in args:
+            if len(tup) == 2:
+                (key, val) = tup
+                try:
+                    fmt = { str : "%s",
+                            int : "%i",
+                            float : "%f",
+                            type(None) : None }[type(val)]
+                except KeyError:
+                    raise TypeError
+            else:
+                (key, val, fmt) = tup
+            if val is None:
+                self._remove(key)
+            else:
+                self._write(key, fmt % val)
+
 
     def Read(cls, path, *args):
         while True:
@@ -115,10 +152,14 @@ class xstransact:
                 t.commit()
                 return v
             except RuntimeError, ex:
+                t.abort()
                 if ex.args[0] == errno.ETIMEDOUT:
                     pass
                 else:
                     raise
+            except:
+                t.abort()
+                raise
 
     Read = classmethod(Read)
 
@@ -130,10 +171,14 @@ class xstransact:
                 t.commit()
                 return
             except RuntimeError, ex:
+                t.abort()
                 if ex.args[0] == errno.ETIMEDOUT:
                     pass
                 else:
                     raise
+            except:
+                t.abort()
+                raise
 
     Write = classmethod(Write)
 
@@ -145,10 +190,14 @@ class xstransact:
                 t.commit()
                 return
             except RuntimeError, ex:
+                t.abort()
                 if ex.args[0] == errno.ETIMEDOUT:
                     pass
                 else:
                     raise
+            except:
+                t.abort()
+                raise
 
     Remove = classmethod(Remove)
 
@@ -160,9 +209,51 @@ class xstransact:
                 t.commit()
                 return v
             except RuntimeError, ex:
+                t.abort()
                 if ex.args[0] == errno.ETIMEDOUT:
                     pass
                 else:
                     raise
+            except:
+                t.abort()
+                raise
 
     List = classmethod(List)
+
+    def Gather(cls, path, *args):
+        while True:
+            try:
+                t = cls(path)
+                v = t.gather(*args)
+                t.commit()
+                return v
+            except RuntimeError, ex:
+                t.abort()
+                if ex.args[0] == errno.ETIMEDOUT:
+                    pass
+                else:
+                    raise
+            except:
+                t.abort()
+                raise
+
+    Gather = classmethod(Gather)
+
+    def Store(cls, path, *args):
+        while True:
+            try:
+                t = cls(path)
+                v = t.store(*args)
+                t.commit()
+                return v
+            except RuntimeError, ex:
+                t.abort()
+                if ex.args[0] == errno.ETIMEDOUT:
+                    pass
+                else:
+                    raise
+            except:
+                t.abort()
+                raise
+
+    Store = classmethod(Store)

@@ -149,7 +149,8 @@ class XendDomainInfo:
         path = "/".join(db.getPath().split("/")[0:-2])
         vm = cls(uuid, path, db)
         vm.setDomid(domid)
-        vm.name = vm.readVm("name")
+        vm.name, vm.start_time = vm.gatherVm(("name", str),
+                                             ("start-time", float))
         try:
             db.readDB()
         except: pass
@@ -204,7 +205,6 @@ class XendDomainInfo:
 
     __exports__ = [
         DBVar('config',        ty='sxpr'),
-        DBVar('start_time',    ty='float'),
         DBVar('state',         ty='str'),
         DBVar('restart_mode',  ty='str'),
         DBVar('restart_state', ty='str'),
@@ -263,7 +263,7 @@ class XendDomainInfo:
         self.device_model_pid = 0
 
         self.writeVm("uuid", self.uuid)
-        self.writeDom("vm", self.path)
+        self.storeDom("vm", self.path)
 
     def readVm(self, *args):
         return xstransact.Read(self.path, *args)
@@ -274,6 +274,12 @@ class XendDomainInfo:
     def removeVm(self, *args):
         return xstransact.Remove(self.path, *args)
 
+    def gatherVm(self, *args):
+        return xstransact.Gather(self.path, *args)
+
+    def storeVm(self, *args):
+        return xstransact.Store(self.path, *args)
+
     def readDom(self, *args):
         return xstransact.Read(self.path, *args)
 
@@ -282,6 +288,12 @@ class XendDomainInfo:
 
     def removeDom(self, *args):
         return xstransact.Remove(self.path, *args)
+
+    def gatherDom(self, *args):
+        return xstransact.Gather(self.path, *args)
+
+    def storeDom(self, *args):
+        return xstransact.Store(self.path, *args)
 
     def setDB(self, db):
         self.db = db
@@ -304,47 +316,35 @@ class XendDomainInfo:
         @param dom: domain id
         """
         self.domid = domid
-        self.writeDom("domid", "%i" % self.domid)
+        self.storeDom("domid", self.domid)
 
     def getDomain(self):
         return self.domid
 
     def setName(self, name):
         self.name = name
-        self.writeVm("name", name)
+        self.storeVm("name", name)
 
     def getName(self):
         return self.name
 
     def setStoreRef(self, ref):
         self.store_mfn = ref
-        if ref:
-            self.writeDom("store/ring-ref", "%i" % ref)
-        else:
-            self.removeDom("store/ring-ref")
+        self.storeDom("store/ring-ref", ref)
 
     def setStoreChannel(self, channel):
         if self.store_channel and self.store_channel != channel:
             self.store_channel.close()
         self.store_channel = channel
-        if channel:
-            self.writeDom("store/port", "%i" % channel.port1)
-        else:
-            self.removeDom("store/port")
+        self.storeDom("store/port", channel.port1)
 
     def setConsoleRef(self, ref):
         self.console_mfn = ref
-        if ref:
-            self.writeDom("console/ring-ref", "%i" % ref)
-        else:
-            self.removeDom("console/ring-ref")
+        self.storeDom("console/ring-ref", ref)
 
     def setMemoryTarget(self, target):
         self.memory_target = target
-        if target:
-            self.writeDom("memory/target", "%i" % target)
-        else:
-            self.removeDom("memory/target")
+        self.storeDom("memory/target", target)
 
     def update(self, info=None):
         """Update with  info from xc.domain_getinfo().
@@ -800,6 +800,7 @@ class XendDomainInfo:
             return
         if self.start_time is None:
             self.start_time = time.time()
+            self.storeVm(("start-time", self.start_time))
         try:
             cpu = int(sxp.child_value(self.config, 'cpu', '-1'))
         except:
@@ -822,7 +823,7 @@ class XendDomainInfo:
                 # if anything goes wrong, assume the port was not yet set
                 pass
         ret = EventChannel.interdomain(0, self.domid, port1=port, port2=0)
-        self.writeDom(path, "%i" % ret.port1)
+        self.storeDom(path, ret.port1)
         return ret
         
     def create_channel(self):
@@ -1069,12 +1070,12 @@ class XendDomainInfo:
             availability = "offline"
         else:
             availability = "online"
-        self.writeVm("cpu/%d/availability" % vcpu, availability)
+        self.storeVm("cpu/%d/availability" % vcpu, availability)
 
     def shutdown(self, reason):
         if not reason in shutdown_reasons.values():
             raise XendError('invalid reason:' + reason)
-        self.writeVm("control/shutdown", reason)
+        self.storeVm("control/shutdown", reason)
         if not reason in ['suspend']:
             self.shutdown_pending = {'start':time.time(), 'reason':reason}
 
@@ -1082,7 +1083,7 @@ class XendDomainInfo:
         self.removeVm("control/shutdown")
 
     def send_sysrq(self, key=0):
-        self.writeVm("control/sysrq", '%c' % key)
+        self.storeVm("control/sysrq", '%c' % key)
 
     def shutdown_time_left(self, timeout):
         if not self.shutdown_pending:
