@@ -65,9 +65,11 @@ void foo(void)
 	DEFINE(XSI_INCOMPL_REG_OFS, offsetof(mapped_regs_t, incomplete_regframe));
 	DEFINE(XSI_PEND_OFS, offsetof(mapped_regs_t, pending_interruption));
 	DEFINE(XSI_RR0_OFS, offsetof(mapped_regs_t, rrs[0]));
+	DEFINE(XSI_IHA_OFS, offsetof(mapped_regs_t, iha));
 	DEFINE(XSI_TPR_OFS, offsetof(mapped_regs_t, tpr));
 	DEFINE(XSI_PTA_OFS, offsetof(mapped_regs_t, pta));
 	DEFINE(XSI_ITV_OFS, offsetof(mapped_regs_t, itv));
+	DEFINE(XSI_KR0_OFS, offsetof(mapped_regs_t, krs[0]));
 	//DEFINE(IA64_TASK_BLOCKED_OFFSET,offsetof (struct task_struct, blocked));
 	//DEFINE(IA64_TASK_CLEAR_CHILD_TID_OFFSET,offsetof (struct task_struct, clear_child_tid));
 	//DEFINE(IA64_TASK_GROUP_LEADER_OFFSET, offsetof (struct task_struct, group_leader));
