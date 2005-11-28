@@ -297,13 +297,11 @@ void free_monitor_pagetable(struct vcpu *v)
 
     /*
      * free monitor_table.
-     * Note: for VMX guest, only BSP need do this free.
      */
-    if (!(VMX_DOMAIN(v) && v->vcpu_id)) {
-        mfn = pagetable_get_pfn(v->arch.monitor_table);
-        unmap_domain_page(v->arch.monitor_vtable);
-        free_domheap_page(&frame_table[mfn]);
-    }
+    mfn = pagetable_get_pfn(v->arch.monitor_table);
+    unmap_domain_page(v->arch.monitor_vtable);
+    free_domheap_page(&frame_table[mfn]);
+
     v->arch.monitor_table = mk_pagetable(0);
     v->arch.monitor_vtable = 0;
 }
@@ -396,18 +394,15 @@ void free_monitor_pagetable(struct vcpu *v)
 
     /*
      * Then free monitor_table.
-     * Note: for VMX guest, only BSP need do this free.
      */
-    if (!(VMX_DOMAIN(v) && v->vcpu_id)) {
-        mfn = pagetable_get_pfn(v->arch.monitor_table);
-        unmap_domain_page(v->arch.monitor_vtable);
-        free_domheap_page(&frame_table[mfn]);
-    }
+    mfn = pagetable_get_pfn(v->arch.monitor_table);
+    unmap_domain_page(v->arch.monitor_vtable);
+    free_domheap_page(&frame_table[mfn]);
 
     v->arch.monitor_table = mk_pagetable(0);
     v->arch.monitor_vtable = 0;
 }
-#endif 
+#endif
 
 static void
 shadow_free_snapshot(struct domain *d, struct out_of_sync_entry *entry)
@@ -1183,8 +1178,6 @@ static int shadow_mode_table_op(
 
         d->arch.shadow_fault_count       = 0;
         d->arch.shadow_dirty_count       = 0;
-        d->arch.shadow_dirty_net_count   = 0;
-        d->arch.shadow_dirty_block_count = 0;
 
         break;
    
@@ -1193,15 +1186,10 @@ static int shadow_mode_table_op(
 
         sc->stats.fault_count       = d->arch.shadow_fault_count;
         sc->stats.dirty_count       = d->arch.shadow_dirty_count;
-        sc->stats.dirty_net_count   = d->arch.shadow_dirty_net_count;
-        sc->stats.dirty_block_count = d->arch.shadow_dirty_block_count;
 
         d->arch.shadow_fault_count       = 0;
         d->arch.shadow_dirty_count       = 0;
-        d->arch.shadow_dirty_net_count   = 0;
-        d->arch.shadow_dirty_block_count = 0;
  
-
         if ( (sc->dirty_bitmap == NULL) || 
              (d->arch.shadow_dirty_bitmap == NULL) )
         {
@@ -1236,8 +1224,6 @@ static int shadow_mode_table_op(
     case DOM0_SHADOW_CONTROL_OP_PEEK:
         sc->stats.fault_count       = d->arch.shadow_fault_count;
         sc->stats.dirty_count       = d->arch.shadow_dirty_count;
-        sc->stats.dirty_net_count   = d->arch.shadow_dirty_net_count;
-        sc->stats.dirty_block_count = d->arch.shadow_dirty_block_count;
  
         if ( (sc->dirty_bitmap == NULL) || 
              (d->arch.shadow_dirty_bitmap == NULL) )
