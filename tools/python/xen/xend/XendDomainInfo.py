@@ -43,7 +43,7 @@ import XendRoot
 from xen.xend.XendBootloader import bootloader
 from xen.xend.XendError import XendError, VmError
 
-from xen.xend.xenstore.xstransact import xstransact
+from xen.xend.xenstore.xstransact import xstransact, complete
 from xen.xend.xenstore.xsutil import GetDomainPath, IntroduceDomain
 from xen.xend.xenstore.xswatch import xswatch
 
@@ -83,8 +83,6 @@ STATE_DOM_OK       = 1
 STATE_DOM_SHUTDOWN = 2
 
 SHUTDOWN_TIMEOUT = 30
-
-VMROOT  = '/vm/'
 
 ZOMBIE_PREFIX = 'Zombie-'
 
@@ -234,7 +232,7 @@ def recreate(xeninfo, priv):
             log.warn(str(exn))
 
         vm = XendDomainInfo(xeninfo, domid, dompath, True, priv)
-        vm.removeDom()
+        vm.recreateDom()
         vm.removeVm()
         vm.storeVmDetails()
         vm.storeDomDetails()
@@ -385,7 +383,7 @@ class XendDomainInfo:
         else:
             self.domid = None
 
-        self.vmpath  = VMROOT + self.info['uuid']
+        self.vmpath  = XendDomain.VMROOT + self.info['uuid']
         self.dompath = dompath
 
         if augment:
@@ -569,6 +567,14 @@ class XendDomainInfo:
 
     def removeDom(self, *args):
         return xstransact.Remove(self.dompath, *args)
+
+    def recreateDom(self):
+        complete(self.dompath, lambda t: self._recreateDom(t))
+
+    def _recreateDom(self, t):
+        t.remove()
+        t.mkdir()
+        t.set_permissions({ 'dom' : self.domid })
 
 
     ## private:
@@ -769,7 +775,10 @@ class XendDomainInfo:
                     if reason == 'suspend':
                         self.state_set(STATE_DOM_SHUTDOWN)
                         # Don't destroy the domain.  XendCheckpoint will do
-                        # this once it has finished.
+                        # this once it has finished.  However, stop watching
+                        # the VM path now, otherwise we will end up with one
+                        # watch for the old domain, and one for the new.
+                        self.unwatchVm()
                     elif reason in ['poweroff', 'reboot']:
                         restart_reason = reason
                     else:
@@ -1084,7 +1093,7 @@ class XendDomainInfo:
 
         self.dompath = GetDomainPath(self.domid)
 
-        self.removeDom()
+        self.recreateDom()
 
         # Set maximum number of vcpus in domain
         xc.domain_max_vcpus(self.domid, int(self.info['vcpus']))
@@ -1179,18 +1188,31 @@ class XendDomainInfo:
     def cleanupVm(self):
         """Cleanup VM resources.  Idempotent.  Nothrow guarantee."""
 
-        try:
-            try:
-                if self.vmWatch:
-                    self.vmWatch.unwatch()
-                self.vmWatch = None
-            except:
-                log.exception("Unwatching VM path failed.")
+        self.unwatchVm()
 
+        try:
             self.removeVm()
         except:
             log.exception("Removing VM path failed.")
 
+
+    ## private:
+
+    def unwatchVm(self):
+        """Remove the watch on the VM path, if any.  Idempotent.  Nothrow
+        guarantee."""
+
+        try:
+            try:
+                if self.vmWatch:
+                    self.vmWatch.unwatch()
+            finally:
+                self.vmWatch = None
+        except:
+            log.exception("Unwatching VM path failed.")
+
+
+    ## public:
 
     def destroy(self):
         """Cleanup VM and destroy domain.  Nothrow guarantee."""
@@ -1345,6 +1367,7 @@ class XendDomainInfo:
             if rename:
                 self.preserveForRestart()
             else:
+                self.unwatchVm()
                 self.destroyDomain()
 
             # new_dom's VM will be the same as this domain's VM, except where
@@ -1381,10 +1404,11 @@ class XendDomainInfo:
         log.info("Renaming dead domain %s (%d, %s) to %s (%s).",
                  self.info['name'], self.domid, self.info['uuid'],
                  new_name, new_uuid)
+        self.unwatchVm()
         self.release_devices()
         self.info['name'] = new_name
         self.info['uuid'] = new_uuid
-        self.vmpath = VMROOT + new_uuid
+        self.vmpath = XendDomain.VMROOT + new_uuid
         self.storeVmDetails()
         self.preserve()
 
@@ -1392,6 +1416,7 @@ class XendDomainInfo:
     def preserve(self):
         log.info("Preserving dead domain %s (%d).", self.info['name'],
                  self.domid)
+        self.unwatchVm()
         self.storeDom('xend/shutdown_completed', 'True')
         self.state_set(STATE_DOM_SHUTDOWN)
 
