@@ -111,6 +111,7 @@ unsigned long translate_domain_pte(unsigned long pteval,
 		}
 	}
 	else if ((mpaddr >> PAGE_SHIFT) > d->max_pages) {
+		if ((mpaddr & ~0x1fffL ) != (1L << 40))
 		printf("translate_domain_pte: bad mpa=%p (> %p),vadr=%p,pteval=%p,itir=%p\n",
 			mpaddr,d->max_pages<<PAGE_SHIFT,address,pteval,itir);
 		tdpfoo();
@@ -715,9 +716,9 @@ ia64_handle_reflection (unsigned long ifa, struct pt_regs *regs, unsigned long i
 	unsigned long check_lazy_cover = 0;
 	unsigned long psr = regs->cr_ipsr;
 
-	if (!(psr & IA64_PSR_CPL)) {
-		printk("ia64_handle_reflection: reflecting with priv=0!!\n");
-	}
+	/* Following faults shouldn'g be seen from Xen itself */
+	if (!(psr & IA64_PSR_CPL)) BUG();
+
 	switch(vector) {
 	    case 8:
 		vector = IA64_DIRTY_BIT_VECTOR; break;
@@ -743,6 +744,13 @@ ia64_handle_reflection (unsigned long ifa, struct pt_regs *regs, unsigned long i
 			printf("ia64_handle_reflection: handling regNaT fault");
 			vector = IA64_NAT_CONSUMPTION_VECTOR; break;
 		}
+#if 1
+		// pass null pointer dereferences through with no error
+		// but retain debug output for non-zero ifa
+		if (!ifa) {
+			vector = IA64_NAT_CONSUMPTION_VECTOR; break;
+		}
+#endif
 printf("*** NaT fault... attempting to handle as privop\n");
 printf("isr=%p, ifa=%p,iip=%p,ipsr=%p\n",isr,ifa,regs->cr_iip,psr);
 		//regs->eml_unat = 0;  FIXME: DO WE NEED THIS???

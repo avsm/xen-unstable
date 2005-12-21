@@ -191,7 +191,7 @@ void start_kernel(void)
     firsthole_start = 0;
     efi_memmap_walk(xen_find_first_hole, &firsthole_start);
 
-    if (ia64_boot_param->domain_start == 0
+    if (running_on_sim || ia64_boot_param->domain_start == 0
 	|| ia64_boot_param->domain_size == 0) {
 	    /* This is possible only with the old elilo, which does not support
 	       a vmm.  Fix now, and continue without initrd.  */
@@ -247,6 +247,11 @@ void start_kernel(void)
     max_page = 0;
     efi_memmap_walk(find_max_pfn, &max_page);
     printf("find_memory: efi_memmap_walk returns max_page=%lx\n",max_page);
+    /* this is a bad hack.  see dom_fw.c creation of EFI map for dom0 */
+    max_page = (GRANULEROUNDDOWN(max_page << PAGE_SHIFT)
+	- IA64_GRANULE_SIZE) >> PAGE_SHIFT;
+    printf("find_memory: last granule reserved for dom0; xen max_page=%lx\n",
+	max_page);
 
     heap_start = memguard_init(ia64_imva(&_end));
     printf("Before heap_start: 0x%lx\n", heap_start);
