@@ -644,6 +644,17 @@ void __init mem_init(void)
 		totalram_pages++;
 	}
 
+        /* Make the Xen hole reserved. */
+        unsigned long hole_start, hole_size;
+        hole_size = xen_pfn_hole_size();
+        hole_start = xen_pfn_hole_start();
+        for (pfn = hole_start; pfn < hole_start + hole_size; pfn++) {
+                printk("<0>Reserve %lx for hole.\n",
+                       pfn);
+                SetPageReserved(pfn_to_page(pfn));
+                BUG_ON(!PageReserved(pfn_to_page(pfn)));
+        }
+
 	reservedpages = 0;
 	for (tmp = 0; tmp < max_low_pfn; tmp++)
 		/*

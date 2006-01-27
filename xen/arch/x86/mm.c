@@ -1041,7 +1041,7 @@ static inline int update_l1e(l1_pgentry_t *pl1e,
     if ( unlikely(cmpxchg_user(pl1e, o, n) != 0) ||
          unlikely(o != l1e_get_intpte(ol1e)) )
     {
-        MEM_LOG("Failed to update %" PRIpte " -> %" PRIpte
+        printf("Failed to update %" PRIpte " -> %" PRIpte
                 ": saw %" PRIpte,
                 l1e_get_intpte(ol1e),
                 l1e_get_intpte(nl1e),
@@ -1058,11 +1058,16 @@ static int mod_l1_entry(l1_pgentry_t *pl1e, l1_pgentry_t nl1e)
     l1_pgentry_t ol1e;
     struct domain *d = current->domain;
 
-    if ( unlikely(__copy_from_user(&ol1e, pl1e, sizeof(ol1e)) != 0) )
+    shadow_sync_all(d);
+    if ( unlikely(__copy_from_user(&ol1e, pl1e, sizeof(ol1e)) != 0) ) {
+        printf("copy_from_user1 failed %p, l2 %lx.\n", pl1e,
+               *(unsigned long *)&__linear_l2_table[l2_table_offset((unsigned long)pl1e)]);
         return 0;
+    }
 
-    if ( unlikely(shadow_mode_refcounts(d)) )
+    if ( unlikely(shadow_mode_refcounts(d)) ) {
         return update_l1e(pl1e, ol1e, nl1e);
+    }
 
     if ( l1e_get_flags(nl1e) & _PAGE_PRESENT )
     {
@@ -1929,7 +1934,57 @@ int do_mmuext_op(
             }
             break;
         }
-            
+
+        case MMUEXT_PFN_HOLE_BASE:
+        {
+            if (FOREIGNDOM->start_pfn_hole) {
+                rc = FOREIGNDOM->start_pfn_hole;
+                okay = 1;
+            } else {
+                rc = FOREIGNDOM->start_pfn_hole =
+                    FOREIGNDOM->max_pages;
+                okay = 1;
+                if (shadow_mode_translate(FOREIGNDOM)) {
+                    /* Fill in a few entries in the hole.  At the
+                       moment, this means the shared info page and the
+                       grant table pages. */
+                    struct domain_mmap_cache c1, c2;
+                    unsigned long pfn, mfn, x;
+                    domain_mmap_cache_init(&c1);
+                    domain_mmap_cache_init(&c2);
+                    shadow_lock(FOREIGNDOM);
+                    pfn = FOREIGNDOM->start_pfn_hole;
+                    mfn = virt_to_phys(FOREIGNDOM->shared_info) >> PAGE_SHIFT;
+                    set_p2m_entry(FOREIGNDOM, pfn, mfn, &c1, &c2);
+                    set_pfn_from_mfn(mfn, pfn);
+                    pfn++;
+                    for (x = 0; x < NR_GRANT_FRAMES; x++) {
+                        mfn = gnttab_shared_mfn(FOREIGNDOM,
+                                                FOREIGNDOM->grant_table,
+                                                x);
+                        set_p2m_entry(FOREIGNDOM, pfn, mfn, &c1, &c2);
+                        set_pfn_from_mfn(mfn, pfn);
+                        pfn++;
+                    }
+                    shadow_unlock(FOREIGNDOM);
+                    domain_mmap_cache_destroy(&c1);
+                    domain_mmap_cache_destroy(&c2);
+                }
+            }
+            break;
+        }
+
+        case MMUEXT_PFN_HOLE_SIZE:
+        {
+            if (shadow_mode_translate(FOREIGNDOM)) {
+                rc = PFN_HOLE_SIZE;
+            } else {
+                rc = 0;
+            }
+            okay = 1;
+            break;
+        }
+
         default:
             MEM_LOG("Invalid extended pt command 0x%x", op.cmd);
             okay = 0;
@@ -2151,32 +2206,17 @@ int do_mmu_update(
 
         case MMU_MACHPHYS_UPDATE:
 
-            mfn = req.ptr >> PAGE_SHIFT;
-            gpfn = req.val;
-
-            /* HACK ALERT...  Need to think about this some more... */
-            if ( unlikely(shadow_mode_translate(FOREIGNDOM) && IS_PRIV(d)) )
-            {
-                shadow_lock(FOREIGNDOM);
-                printk("privileged guest dom%d requests pfn=%lx to "
-                       "map mfn=%lx for dom%d\n",
-                       d->domain_id, gpfn, mfn, FOREIGNDOM->domain_id);
-                set_pfn_from_mfn(mfn, gpfn);
-                set_p2m_entry(FOREIGNDOM, gpfn, mfn, &sh_mapcache, &mapcache);
-                okay = 1;
-                shadow_unlock(FOREIGNDOM);
+            if (shadow_mode_translate(FOREIGNDOM)) {
+                MEM_LOG("can't mutate m2p table of translate mode guest");
                 break;
             }
+
+            mfn = req.ptr >> PAGE_SHIFT;
+            gpfn = req.val;
 
             if ( unlikely(!get_page_from_pagenr(mfn, FOREIGNDOM)) )
             {
                 MEM_LOG("Could not get page for mach->phys update");
-                break;
-            }
-
-            if ( unlikely(shadow_mode_translate(FOREIGNDOM) && !IS_PRIV(d)) )
-            {
-                MEM_LOG("can't mutate the m2p of translated guests");
                 break;
             }
 
@@ -2505,8 +2545,10 @@ int do_update_va_mapping(unsigned long va, u64 val64,
 
     perfc_incrc(calls_to_update_va);
 
-    if ( unlikely(!__addr_ok(va) && !shadow_mode_external(d)) )
+    if ( unlikely(!__addr_ok(va) && !shadow_mode_external(d)) ) {
+        printf("Bad update_va_mapping.\n");
         return -EINVAL;
+    }
 
     LOCK_BIGLOCK(d);
 
@@ -2515,9 +2557,13 @@ int do_update_va_mapping(unsigned long va, u64 val64,
     if ( unlikely(shadow_mode_enabled(d)) )
         check_pagetable(v, "pre-va"); /* debug */
 
+    shadow_sync_all(d);
+
     if ( unlikely(!mod_l1_entry(&linear_pg_table[l1_linear_offset(va)],
-                                val)) )
+                                val)) ) {
+        printf("mod_l1_entry failed.\n");
         rc = -EINVAL;
+    }
 
     if ( likely(rc == 0) && unlikely(shadow_mode_enabled(d)) )
     {
@@ -2534,7 +2580,8 @@ int do_update_va_mapping(unsigned long va, u64 val64,
         }
     
         rc = shadow_do_update_va_mapping(va, val, v);
-
+        if (rc)
+            printf("shadow_do_update_va_mapping says %d.\n", rc);
         check_pagetable(v, "post-va"); /* debug */
     }
 
@@ -2649,7 +2696,7 @@ long set_gdt(struct vcpu *v,
 
     /* Check the pages in the new GDT. */
     for ( i = 0; i < nr_pages; i++ ) {
-        pfn = frames[i];
+        pfn = frames[i] = __gpfn_to_mfn(d, frames[i]);
         if ((pfn >= max_page) ||
             !get_page_and_type(pfn_to_page(pfn), d, PGT_gdt_page) )
             goto fail;
@@ -2678,7 +2725,7 @@ long set_gdt(struct vcpu *v,
 
 long do_set_gdt(unsigned long *frame_list, unsigned int entries)
 {
-    int i, nr_pages = (entries + 511) / 512;
+    int nr_pages = (entries + 511) / 512;
     unsigned long frames[16];
     long ret;
 
@@ -2688,9 +2735,6 @@ long do_set_gdt(unsigned long *frame_list, unsigned int entries)
     
     if ( copy_from_user(frames, frame_list, nr_pages * sizeof(unsigned long)) )
         return -EFAULT;
-
-    for ( i = 0; i < nr_pages; i++ )
-        frames[i] = __gpfn_to_mfn(current->domain, frames[i]);
 
     LOCK_BIGLOCK(current->domain);
 

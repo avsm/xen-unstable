@@ -65,7 +65,7 @@ increase_reservation(
 
     return nr_extents;
 }
-    
+
 static long
 populate_physmap(
     struct domain *d, 
@@ -75,8 +75,9 @@ populate_physmap(
     unsigned int   flags,
     int           *preempted)
 {
-    struct pfn_info *page;
-    unsigned long    i, j, pfn, mfn;
+    struct pfn_info         *page;
+    unsigned long            i, j, pfn, mfn;
+    struct domain_mmap_cache cache1, cache2;
 
     if ( !array_access_ok(extent_list, nr_extents, sizeof(*extent_list)) )
         return 0;
@@ -85,12 +86,18 @@ populate_physmap(
          !multipage_allocation_permitted(current->domain) )
         return 0;
 
+    if (shadow_mode_translate(d)) {
+        domain_mmap_cache_init(&cache1);
+        domain_mmap_cache_init(&cache2);
+        shadow_lock(d);
+    }
+
     for ( i = 0; i < nr_extents; i++ )
     {
         if ( hypercall_preempt_check() )
         {
             *preempted = 1;
-            return i;
+            goto out;
         }
 
         if ( unlikely((page = alloc_domheap_pages(
@@ -99,23 +106,37 @@ populate_physmap(
             DPRINTK("Could not allocate order=%d extent: "
                     "id=%d flags=%x (%ld of %d)\n",
                     extent_order, d->domain_id, flags, i, nr_extents);
-            return i;
+            goto out;
         }
 
         mfn = page_to_pfn(page);
 
         if ( unlikely(__get_user(pfn, &extent_list[i]) != 0) )
-            return i;
+            goto out;
 
-        for ( j = 0; j < (1 << extent_order); j++ )
+        for ( j = 0; j < (1 << extent_order); j++ ) {
+            printf("Populating %lx with %lx.\n",
+                   pfn + j, mfn + j);
+            if (shadow_mode_translate(d))
+                set_p2m_entry(d, pfn + j, mfn + j, &cache1, &cache2);
             set_pfn_from_mfn(mfn + j, pfn + j);
+        }
 
-        /* Inform the domain of the new page's machine address. */ 
-        if ( __put_user(mfn, &extent_list[i]) != 0 )
-            return i;
+        if (!shadow_mode_translate(d)) {
+            /* Inform the domain of the new page's machine address. */ 
+            if ( __put_user(mfn, &extent_list[i]) != 0 )
+                goto out;
+        }
     }
 
-    return nr_extents;
+ out:
+    if (shadow_mode_translate(d)) {
+        shadow_unlock(d);
+        domain_mmap_cache_destroy(&cache1);
+        domain_mmap_cache_destroy(&cache2);
+    }
+
+    return i;
 }
     
 static long
@@ -128,7 +149,7 @@ decrease_reservation(
     int           *preempted)
 {
     struct pfn_info *page;
-    unsigned long    i, j, mfn;
+    unsigned long    i, j, gpfn, mfn;
 
     if ( !array_access_ok(extent_list, nr_extents, sizeof(*extent_list)) )
         return 0;
@@ -141,19 +162,20 @@ decrease_reservation(
             return i;
         }
 
-        if ( unlikely(__get_user(mfn, &extent_list[i]) != 0) )
+        if ( unlikely(__get_user(gpfn, &extent_list[i]) != 0) )
             return i;
 
         for ( j = 0; j < (1 << extent_order); j++ )
         {
-            if ( unlikely((mfn + j) >= max_page) )
+            mfn = __gpfn_to_mfn(d, gpfn + j);
+            if ( unlikely(mfn >= max_page) )
             {
-                DPRINTK("Domain %u page number out of range (%lx >= %lx)\n", 
-                        d->domain_id, mfn + j, max_page);
+                DPRINTK("Domain %u page number out of range (%lx(%lx) >= %lx)\n", 
+                        d->domain_id, mfn, gpfn, max_page);
                 return i;
             }
             
-            page = pfn_to_page(mfn + j);
+            page = pfn_to_page(mfn);
             if ( unlikely(!get_page(page, d)) )
             {
                 DPRINTK("Bad page free for domain %u\n", d->domain_id);
@@ -166,8 +188,18 @@ decrease_reservation(
             if ( test_and_clear_bit(_PGC_allocated, &page->count_info) )
                 put_page(page);
 
-            shadow_sync_and_drop_references(d, page);
-
+            if (shadow_mode_translate(d)) {
+                struct domain_mmap_cache c1, c2;
+                domain_mmap_cache_init(&c1);
+                domain_mmap_cache_init(&c2);
+                shadow_lock(d);
+                shadow_sync_and_drop_references(d, page);
+                set_p2m_entry(d, gpfn + j, -1, &c1, &c2);
+                set_pfn_from_mfn(mfn + j, INVALID_M2P_ENTRY);
+                shadow_unlock(d);
+                domain_mmap_cache_destroy(&c1);
+                domain_mmap_cache_destroy(&c2);
+            }
             put_page(page);
         }
     }

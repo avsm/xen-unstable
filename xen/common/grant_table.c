@@ -481,6 +481,7 @@ gnttab_setup_table(
     gnttab_setup_table_t  op;
     struct domain        *d;
     int                   i;
+    unsigned long         mfn;
 
     if ( count != 1 )
         return -EINVAL;
@@ -520,9 +521,12 @@ gnttab_setup_table(
     {
         ASSERT(d->grant_table != NULL);
         (void)put_user(GNTST_okay, &uop->status);
-        for ( i = 0; i < op.nr_frames; i++ )
-            (void)put_user(gnttab_shared_mfn(d, d->grant_table, i),
-                           &op.frame_list[i]);
+        for ( i = 0; i < op.nr_frames; i++ ) {
+            mfn = gnttab_shared_mfn(d, d->grant_table, i);
+            if (shadow_mode_translate(d))
+                mfn = __mfn_to_gpfn(d, mfn);
+            (void)put_user(mfn, &op.frame_list[i]);
+        }
     }
 
     put_domain(d);
@@ -707,6 +711,7 @@ gnttab_transfer(
     int i;
     grant_entry_t *sha;
     gnttab_transfer_t gop;
+    unsigned long real_mfn;
 
     for ( i = 0; i < count; i++ )
     {
@@ -727,7 +732,8 @@ gnttab_transfer(
             continue;
         }
 
-        page = pfn_to_page(gop.mfn);
+        real_mfn = __gpfn_to_mfn(d, gop.mfn);
+        page = pfn_to_page(real_mfn);
         if ( unlikely(IS_XEN_HEAP_FRAME(page)) )
         { 
             DPRINTK("gnttab_transfer: xen frame %lx\n",
@@ -788,7 +794,21 @@ gnttab_transfer(
 
         /* Tell the guest about its new page frame. */
         sha = &e->grant_table->shared[gop.ref];
-        sha->frame = gop.mfn;
+        if (shadow_mode_translate(e)) {
+            struct domain_mmap_cache c1, c2;
+            unsigned long pfn = sha->frame;
+            domain_mmap_cache_init(&c1);
+            domain_mmap_cache_init(&c2);
+            shadow_lock(e);
+            shadow_sync_and_drop_references(e, page);
+            set_p2m_entry(e, pfn, real_mfn, &c1, &c2);
+            set_pfn_from_mfn(real_mfn, pfn);
+            shadow_unlock(e);
+            domain_mmap_cache_destroy(&c1);
+            domain_mmap_cache_destroy(&c2);
+        } else {
+            sha->frame = real_mfn;
+        }
         wmb();
         sha->flags |= GTF_transfer_completed;
 

@@ -13,6 +13,7 @@
 #include <asm/current.h>
 #include <public/nmi.h>
 #include <public/version.h>
+#include <asm/shadow.h>
 
 void cmdline_parse(char *cmdline)
 {
@@ -155,7 +156,10 @@ long do_xen_version(int cmd, void *arg)
         switch ( fi.submap_idx )
         {
         case 0:
-            fi.submap = 0;
+            if (shadow_mode_wr_pt_pte(current->domain))
+                fi.submap = XENFEAT_writable_mmu_structures;
+            else
+                fi.submap = 0;
             break;
         default:
             return -EINVAL;

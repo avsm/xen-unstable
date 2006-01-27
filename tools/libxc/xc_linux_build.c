@@ -3,6 +3,7 @@
  */
 
 #include "xg_private.h"
+#include "xc_private.h"
 #include <xenctrl.h>
 
 #if defined(__i386__)
@@ -31,6 +32,8 @@
 #define L3_PROT (_PAGE_PRESENT|_PAGE_RW|_PAGE_ACCESSED|_PAGE_DIRTY|_PAGE_USER)
 #define L4_PROT (_PAGE_PRESENT|_PAGE_RW|_PAGE_ACCESSED|_PAGE_DIRTY|_PAGE_USER)
 #endif
+
+#define NR_GRANT_FRAMES 4
 
 #ifdef __ia64__
 #define get_tot_pages xc_get_max_pages
@@ -95,7 +98,10 @@ static int setup_pg_tables(int xc_handle, uint32_t dom,
     ppt_alloc = (vpt_start - dsi_v_start) >> PAGE_SHIFT;
     alloc_pt(l2tab, vl2tab, pl2tab);
     vl2e = &vl2tab[l2_table_offset(dsi_v_start)];
-    ctxt->ctrlreg[3] = l2tab;
+    if (shadow_mode_enabled)
+        ctxt->ctrlreg[3] = pl2tab;
+    else
+        ctxt->ctrlreg[3] = l2tab;
 
     for ( count = 0; count < ((v_end - dsi_v_start) >> PAGE_SHIFT); count++ )
     {
@@ -163,7 +169,10 @@ static int setup_pg_tables_pae(int xc_handle, uint32_t dom,
 
     alloc_pt(l3tab, vl3tab, pl3tab);
     vl3e = &vl3tab[l3_table_offset_pae(dsi_v_start)];
-    ctxt->ctrlreg[3] = l3tab;
+    if (shadow_mode_enabled)
+        ctxt->ctrlreg[3] = pl3tab;
+    else
+        ctxt->ctrlreg[3] = l3tab;
 
     for ( count = 0; count < ((v_end - dsi_v_start) >> PAGE_SHIFT); count++)
     {
@@ -243,7 +252,10 @@ static int setup_pg_tables_64(int xc_handle, uint32_t dom,
     ppt_alloc = (vpt_start - dsi_v_start) >> PAGE_SHIFT;
     alloc_pt(l4tab, vl4tab, pl4tab);
     vl4e = &vl4tab[l4_table_offset(dsi_v_start)];
-    ctxt->ctrlreg[3] = l4tab;
+    if (shadow_mode_enabled)
+        ctxt->ctrlreg[3] = pl4tab;
+    else
+        ctxt->ctrlreg[3] = l4tab;
     
     for ( count = 0; count < ((v_end-dsi_v_start)>>PAGE_SHIFT); count++)
     {
@@ -513,6 +525,8 @@ static int setup_guest(int xc_handle,
         goto error_out;
     }
 
+    shadow_mode_enabled = !!strstr(dsi.xen_guest_string,
+                                   "SHADOW=translate");
     /*
      * Why do we need this? The number of page-table frames depends on the 
      * size of the bootstrap address space. But the size of the address space 
@@ -596,7 +610,7 @@ static int setup_guest(int xc_handle,
         goto error_out;
     }
 
-    if ( (page_array = malloc((nr_pages + 1) * sizeof(unsigned long))) == NULL )
+    if ( (page_array = malloc(nr_pages * sizeof(unsigned long))) == NULL )
     {
         PERROR("Could not allocate memory");
         goto error_out;
@@ -631,19 +645,13 @@ static int setup_guest(int xc_handle,
     if ( (mmu = xc_init_mmu_updates(xc_handle, dom)) == NULL )
         goto error_out;
 
-    shadow_mode_enabled = !!strstr(dsi.xen_guest_string,
-                                   "SHADOW=translate");
-
     /* Write the phys->machine and machine->phys table entries. */
     physmap_pfn = (vphysmap_start - dsi.v_start) >> PAGE_SHIFT;
     physmap = physmap_e = xc_map_foreign_range(
         xc_handle, dom, PAGE_SIZE, PROT_READ|PROT_WRITE,
         page_array[physmap_pfn++]);
 
-    if (shadow_mode_enabled)
-        page_array[nr_pages] = shared_info_frame;
-
-    for ( count = 0; count < nr_pages + shadow_mode_enabled; count++ )
+    for ( count = 0; count < nr_pages; count++ )
     {
         if ( xc_add_mmu_update(
             xc_handle, mmu,
@@ -678,6 +686,16 @@ static int setup_guest(int xc_handle,
             PERROR("Could not enable translation mode");
             goto error_out;
         }
+
+        /* Find the shared info frame.  It's guaranteed to be at the
+           start of the PFN hole. */
+        guest_shared_info_mfn = xc_get_pfn_hole_start(xc_handle, dom);
+        if (guest_shared_info_mfn <= 0) {
+            PERROR("Cannot find shared info pfn");
+            goto error_out;
+        }
+    } else {
+        guest_shared_info_mfn = shared_info_frame;
     }
 
     /* setup page tables */
@@ -738,11 +756,9 @@ static int setup_guest(int xc_handle,
     if (shadow_mode_enabled) {
         guest_store_mfn = (vstoreinfo_start-dsi.v_start) >> PAGE_SHIFT;
         guest_console_mfn = (vconsole_start-dsi.v_start) >> PAGE_SHIFT;
-        guest_shared_info_mfn = nr_pages;
     } else {
         guest_store_mfn = *store_mfn;
         guest_console_mfn = *console_mfn;
-        guest_shared_info_mfn = shared_info_frame;
     }
 
     start_info = xc_map_foreign_range(
