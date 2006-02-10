@@ -40,8 +40,6 @@ extern void failsafe_callback(void);
 extern void system_call(void);
 extern void smp_trap_init(trap_info_t *);
 
-extern cpumask_t cpu_initialized;
-
 /* Number of siblings per CPU package */
 int smp_num_siblings = 1;
 int phys_proc_id[NR_CPUS]; /* Package ID of each logical CPU */
@@ -80,6 +78,21 @@ EXPORT_SYMBOL(x86_cpu_to_apicid);
 #elif !defined(CONFIG_X86_IO_APIC)
 unsigned int maxcpus = NR_CPUS;
 #endif
+
+void __init prefill_possible_map(void)
+{
+	int i, rc;
+
+	if (!cpus_empty(cpu_possible_map))
+		return;
+
+	for (i = 0; i < NR_CPUS; i++) {
+		rc = HYPERVISOR_vcpu_op(VCPUOP_is_up, i, NULL);
+		if (rc == -ENOENT)
+			break;
+		cpu_set(i, cpu_possible_map);
+	}
+}
 
 void __init smp_alloc_memory(void)
 {
@@ -126,10 +139,9 @@ static void xen_smp_intr_exit(unsigned int cpu)
 
 static void cpu_bringup(void)
 {
-	if (!cpu_isset(smp_processor_id(), cpu_initialized)) {
-		cpu_init();
-		preempt_disable();
-	}
+	cpu_init();
+	touch_softlockup_watchdog();
+	preempt_disable();
 	local_irq_enable();
 	cpu_idle();
 }
@@ -196,7 +208,7 @@ void vcpu_prepare(int vcpu)
 
 void __init smp_prepare_cpus(unsigned int max_cpus)
 {
-	int cpu, rc;
+	int cpu;
 	struct task_struct *idle;
 
 	cpu_data[0] = boot_cpu_data;
@@ -208,14 +220,11 @@ void __init smp_prepare_cpus(unsigned int max_cpus)
 	cpu_sibling_map[0] = cpumask_of_cpu(0);
 	cpu_core_map[0]    = cpumask_of_cpu(0);
 
-	if (max_cpus != 0)
-		xen_smp_intr_init(0);
+	xen_smp_intr_init(0);
 
-	for (cpu = 1; cpu < max_cpus; cpu++) {
-		rc = HYPERVISOR_vcpu_op(VCPUOP_is_up, cpu, NULL);
-		if (rc == -ENOENT)
-			break;
-		BUG_ON(rc != 0);
+	for_each_cpu_mask (cpu, cpu_possible_map) {
+		if (cpu == 0)
+			continue;
 
 		cpu_data[cpu] = boot_cpu_data;
 		cpu_2_logical_apicid[cpu] = cpu;
@@ -245,7 +254,6 @@ void __init smp_prepare_cpus(unsigned int max_cpus)
 			(void *)cpu_gdt_descr[cpu].address,
 			XENFEAT_writable_descriptor_tables);
 
-		cpu_set(cpu, cpu_possible_map);
 #ifdef CONFIG_HOTPLUG_CPU
 		if (xen_start_info->flags & SIF_INITDOMAIN)
 			cpu_set(cpu, cpu_present_map);
@@ -274,7 +282,7 @@ void __init smp_prepare_cpus(unsigned int max_cpus)
 
 void __devinit smp_prepare_boot_cpu(void)
 {
-	cpu_possible_map = cpumask_of_cpu(0);
+	prefill_possible_map();
 	cpu_present_map  = cpumask_of_cpu(0);
 	cpu_online_map   = cpumask_of_cpu(0);
 }
