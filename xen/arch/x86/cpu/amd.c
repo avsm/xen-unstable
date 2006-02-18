@@ -42,11 +42,83 @@ custom_param("amd_flush_filter", flush_filter);
 extern void vide(void);
 __asm__(".text\n.align 4\nvide: ret");
 
+/* Can this system suffer from TSC drift due to C1 clock ramping? */
+static int c1_ramping_may_cause_clock_drift(struct cpuinfo_x86 *c) 
+{ 
+	if (c->x86 < 0xf) {
+		/*
+		 * TSC drift doesn't exist on 7th Gen or less
+		 * However, OS still needs to consider effects
+		 * of P-state changes on TSC
+		 */
+		return 0;
+	} else if (cpuid_edx(0x80000007) & (1<<8)) {
+		/*
+		 * CPUID.AdvPowerMgmtInfo.TscInvariant
+		 * EDX bit 8, 8000_0007
+		 * Invariant TSC on 8th Gen or newer, use it
+		 * (assume all cores have invariant TSC)
+		 */
+		return 0;
+	}
+	return 1;
+}
+
+/* PCI access functions. Should be safe to use 0xcf8/0xcfc port accesses here. */
+static u8 pci_read_byte(u32 bus, u32 dev, u32 fn, u32 reg)
+{
+	outl((1U<<31) | (bus << 16) | (dev << 11) | (fn << 8) | (reg & ~3), 0xcf8);
+	return inb(0xcfc + (reg & 3));
+}
+
+static void pci_write_byte(u32 bus, u32 dev, u32 fn, u32 reg, u8 val)
+{
+	outl((1U<<31) | (bus << 16) | (dev << 11) | (fn << 8) | (reg & ~3), 0xcf8);
+	outb(val, 0xcfc + (reg & 3));
+}
+
+/*
+ * Disable C1-Clock ramping if enabled in PMM7.CpuLowPwrEnh on 8th-generation
+ * cores only. Assume BIOS has setup all Northbridges equivalently.
+ */
+static void disable_c1_ramping(void) 
+{
+	u8 pmm7;
+	int node;
+
+	for (node=0; node < NR_CPUS; node++) {
+		/* PMM7: bus=0, dev=0x18+node, function=0x3, register=0x87. */
+		pmm7 = pci_read_byte(0, 0x18+node, 0x3, 0x87);
+		/* Invalid read means we've updated every Northbridge. */
+		if (pmm7 == 0xFF)
+			break;
+		pmm7 &= 0xFC; /* clear pmm7[1:0] */
+		pci_write_byte(0, 0x18+node, 0x3, 0x87, pmm7);
+		printk ("AMD: Disabling C1 Clock Ramping Node #%x\n", node);
+	}
+}
+
 static void __init init_amd(struct cpuinfo_x86 *c)
 {
 	u32 l, h;
 	int mbytes = num_physpages >> (20-PAGE_SHIFT);
 	int r;
+
+#ifdef CONFIG_SMP
+	unsigned long long value;
+
+	/* Disable TLB flush filter by setting HWCR.FFDIS on K8
+	 * bit 6 of msr C001_0015
+	 *
+	 * Errata 63 for SH-B3 steppings
+	 * Errata 122 for all steppings (F+ have it disabled by default)
+	 */
+	if (c->x86 == 15) {
+		rdmsrl(MSR_K7_HWCR, value);
+		value |= 1 << 6;
+		wrmsrl(MSR_K7_HWCR, value);
+	}
+#endif
 
 	/*
 	 *	FIXME: We should handle the K5 here. Set up the write
@@ -165,8 +237,13 @@ static void __init init_amd(struct cpuinfo_x86 *c)
 					set_bit(X86_FEATURE_K6_MTRR, c->x86_capability);
 				break;
 			}
-			break;
 
+			if (c->x86_model == 10) {
+				/* AMD Geode LX is model 10 */
+				/* placeholder for any needed mods */
+				break;
+			}
+			break;
 		case 6: /* An Athlon/Duron */
  
 			/* Bit 15 of Athlon specific MSR 15, needs to be 0
@@ -225,9 +302,15 @@ static void __init init_amd(struct cpuinfo_x86 *c)
 	display_cacheinfo(c);
 
 	if (cpuid_eax(0x80000000) >= 0x80000008) {
-		c->x86_num_cores = (cpuid_ecx(0x80000008) & 0xff) + 1;
-		if (c->x86_num_cores & (c->x86_num_cores - 1))
-			c->x86_num_cores = 1;
+		c->x86_max_cores = (cpuid_ecx(0x80000008) & 0xff) + 1;
+		if (c->x86_max_cores & (c->x86_max_cores - 1))
+			c->x86_max_cores = 1;
+	}
+
+	if (cpuid_eax(0x80000000) >= 0x80000007) {
+		c->x86_power = cpuid_edx(0x80000007);
+		if (c->x86_power & (1<<8))
+			set_bit(X86_FEATURE_CONSTANT_TSC, c->x86_capability);
 	}
 
 #ifdef CONFIG_X86_HT
@@ -236,17 +319,21 @@ static void __init init_amd(struct cpuinfo_x86 *c)
 	 * distingush the cores.  Assumes number of cores is a power
 	 * of two.
 	 */
-	if (c->x86_num_cores > 1) {
+	if (c->x86_max_cores > 1) {
 		int cpu = smp_processor_id();
 		unsigned bits = 0;
-		while ((1 << bits) < c->x86_num_cores)
+		while ((1 << bits) < c->x86_max_cores)
 			bits++;
 		cpu_core_id[cpu] = phys_proc_id[cpu] & ((1<<bits)-1);
 		phys_proc_id[cpu] >>= bits;
 		printk(KERN_INFO "CPU %d(%d) -> Core %d\n",
-		       cpu, c->x86_num_cores, cpu_core_id[cpu]);
+		       cpu, c->x86_max_cores, cpu_core_id[cpu]);
 	}
 #endif
+
+	/* Prevent TSC drift in non single-processor, single-core platforms. */
+	if ((smp_processor_id() == 1) && c1_ramping_may_cause_clock_drift(c))
+		disable_c1_ramping();
 
 	start_svm();
 }

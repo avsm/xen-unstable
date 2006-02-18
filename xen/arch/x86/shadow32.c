@@ -807,21 +807,99 @@ void free_monitor_pagetable(struct vcpu *v)
     v->arch.monitor_vtable = 0;
 }
 
+static int
+map_p2m_entry(
+    l1_pgentry_t *l1tab, unsigned long va, unsigned long gpa, unsigned long mfn)
+{
+    unsigned long *l0tab = NULL;
+    l1_pgentry_t l1e = { 0 };
+    struct page_info *page;
+
+    l1e = l1tab[l1_table_offset(va)];
+    if ( !(l1e_get_flags(l1e) & _PAGE_PRESENT) )
+    {
+        page = alloc_domheap_page(NULL);
+        if ( !page )
+            goto fail;
+
+        if ( l0tab  )
+            unmap_domain_page(l0tab);
+        l0tab = map_domain_page(page_to_mfn(page));
+        memset(l0tab, 0, PAGE_SIZE );
+        l1e = l1tab[l1_table_offset(va)] =
+            l1e_from_page(page, __PAGE_HYPERVISOR);
+    }
+    else if ( l0tab == NULL)
+        l0tab = map_domain_page(l1e_get_pfn(l1e));
+
+    l0tab[gpa & ((PAGE_SIZE / sizeof (mfn)) - 1) ] = mfn;
+
+    if ( l0tab )
+        unmap_domain_page(l0tab);
+
+    return 1;
+
+fail:
+    return 0;
+}
+
 int
 set_p2m_entry(struct domain *d, unsigned long pfn, unsigned long mfn,
               struct domain_mmap_cache *l2cache,
               struct domain_mmap_cache *l1cache)
 {
-    unsigned long tabpfn = pagetable_get_pfn(d->arch.phys_table);
+    unsigned long tabpfn;
     l2_pgentry_t *l2, l2e;
     l1_pgentry_t *l1;
     struct page_info *l1page;
     unsigned long va = pfn << PAGE_SHIFT;
+    int error;
+
+    if ( shadow_mode_external(d) )
+    {
+        tabpfn = pagetable_get_pfn(d->vcpu[0]->arch.monitor_table);
+        va = RO_MPT_VIRT_START + (pfn * sizeof (unsigned long));
+    }
+    else
+    {
+        tabpfn = pagetable_get_pfn(d->arch.phys_table);
+        va = pfn << PAGE_SHIFT;
+    }
 
     ASSERT(tabpfn != 0);
     ASSERT(shadow_lock_is_acquired(d));
 
     l2 = map_domain_page_with_cache(tabpfn, l2cache);
+
+    /*
+     * The following code covers (SHM_translate | SHM_external) mode.
+     */
+
+    if ( shadow_mode_external(d) )
+    {
+        l1_pgentry_t *l1tab = NULL;
+        l2_pgentry_t l2e;
+
+        l2e = l2[l2_table_offset(va)];
+
+        ASSERT( l2e_get_flags(l2e) & _PAGE_PRESENT );
+
+        l1tab = map_domain_page(l2e_get_pfn(l2e));
+        error = map_p2m_entry(l1tab, va, pfn, mfn);
+        if ( !error )
+            domain_crash_synchronous(); 
+
+        unmap_domain_page(l1tab);
+        unmap_domain_page_with_cache(l2, l2cache);
+
+        return 1;
+    }
+
+    /*
+     * The following code covers SHM_translate mode.
+     */
+    ASSERT(shadow_mode_translate(d));
+
     l2e = l2[l2_table_offset(va)];
     if ( !(l2e_get_flags(l2e) & _PAGE_PRESENT) )
     {
@@ -842,7 +920,7 @@ set_p2m_entry(struct domain *d, unsigned long pfn, unsigned long mfn,
     unmap_domain_page_with_cache(l2, l2cache);
 
     l1 = map_domain_page_with_cache(l2e_get_pfn(l2e), l1cache);
-    l1[l1_table_offset(va)] = l1e_from_pfn(mfn, __PAGE_HYPERVISOR);
+    l1[l1_table_offset(va)] = (l1_pgentry_t) { mfn };
     unmap_domain_page_with_cache(l1, l1cache);
 
     return 1;
@@ -856,63 +934,55 @@ alloc_p2m_table(struct domain *d)
 
     l2_pgentry_t *l2tab = NULL;
     l1_pgentry_t *l1tab = NULL;
-    unsigned long *l0tab = NULL;
     l2_pgentry_t l2e = { 0 };
-    l1_pgentry_t l1e = { 0 };
+    struct page_info *page;
+    unsigned long gpfn, mfn;
+    int error;
 
-    unsigned long pfn;
-    int i;
-
-    ASSERT ( pagetable_get_pfn(d->vcpu[0]->arch.monitor_table));
-
-    l2tab = map_domain_page(
-        pagetable_get_pfn(d->vcpu[0]->arch.monitor_table));
-
-    list_ent = d->page_list.next;
-
-    for ( i = 0; list_ent != &d->page_list; i++ )
+    if ( pagetable_get_pfn(d->vcpu[0]->arch.monitor_table) )
     {
-        struct page_info *page;
-        page = list_entry(list_ent, struct page_info, list);
-        pfn = page_to_mfn(page);
-
+        l2tab = map_domain_page(
+            pagetable_get_pfn(d->vcpu[0]->arch.monitor_table));
         l2e = l2tab[l2_table_offset(va)];
         if ( !(l2e_get_flags(l2e) & _PAGE_PRESENT) )
         {
             page = alloc_domheap_page(NULL);
 
-            if ( !l1tab )
-                unmap_domain_page(l1tab);
             l1tab = map_domain_page(page_to_mfn(page));
             memset(l1tab, 0, PAGE_SIZE);
             l2e = l2tab[l2_table_offset(va)] =
                 l2e_from_page(page, __PAGE_HYPERVISOR);
         }
-        else if ( l1tab == NULL)
+        else
             l1tab = map_domain_page(l2e_get_pfn(l2e));
+    }
+    else
+    {
+        page = alloc_domheap_page(NULL);
 
-        l1e = l1tab[l1_table_offset(va)];
-        if ( !(l1e_get_flags(l1e) & _PAGE_PRESENT) )
-        {
-            page = alloc_domheap_page(NULL);
-            if ( !l0tab  )
-                unmap_domain_page(l0tab);
-            l0tab = map_domain_page(page_to_mfn(page));
-            memset(l0tab, 0, PAGE_SIZE );
-            l1e = l1tab[l1_table_offset(va)] =
-                l1e_from_page(page, __PAGE_HYPERVISOR);
-        }
-        else if ( l0tab == NULL)
-            l0tab = map_domain_page(l1e_get_pfn(l1e));
-
-        l0tab[i & ((1 << PAGETABLE_ORDER) - 1) ] = pfn;
-        list_ent = frame_table[pfn].list.next;
-        va += sizeof(pfn);
+        l1tab = map_domain_page(page_to_mfn(page));
+        memset(l1tab, 0, PAGE_SIZE);
+        d->arch.phys_table = mk_pagetable(page_to_maddr(page));
     }
 
-    unmap_domain_page(l2tab);
+    list_ent = d->page_list.next;
+
+    for ( gpfn = 0; list_ent != &d->page_list; gpfn++ )
+    {
+        page = list_entry(list_ent, struct page_info, list);
+        mfn = page_to_mfn(page);
+
+        error = map_p2m_entry(l1tab, va, gpfn, mfn);
+        if ( !error )
+            domain_crash_synchronous(); 
+
+        list_ent = frame_table[mfn].list.next;
+        va += sizeof(mfn);
+    }
+
+    if (l2tab)
+        unmap_domain_page(l2tab);
     unmap_domain_page(l1tab);
-    unmap_domain_page(l0tab);
 
     return 1;
 }
@@ -974,21 +1044,26 @@ int shadow_direct_map_fault(unsigned long vpa, struct cpu_user_regs *regs)
     }
 
     shadow_lock(d);
+  
+   __direct_get_l2e(v, vpa, &sl2e);
 
-    __shadow_get_l2e(v, vpa, &sl2e);
-
-   if ( !(l2e_get_flags(sl2e) & _PAGE_PRESENT) )
+    if ( !(l2e_get_flags(sl2e) & _PAGE_PRESENT) )
     {
         page = alloc_domheap_page(NULL);
         if ( !page )
-            goto fail;
+            goto nomem;
 
         smfn = page_to_mfn(page);
         sl2e = l2e_from_pfn(smfn, __PAGE_HYPERVISOR | _PAGE_USER);
-        __shadow_set_l2e(v, vpa, sl2e);
-    }
 
-    sple = (l1_pgentry_t *)map_domain_page(l2e_get_pfn(sl2e));
+        sple = (l1_pgentry_t *)map_domain_page(smfn);
+        memset(sple, 0, PAGE_SIZE);
+        __direct_set_l2e(v, vpa, sl2e);
+    } 
+
+    if ( !sple )
+        sple = (l1_pgentry_t *)map_domain_page(l2e_get_pfn(sl2e));
+
     sl1e = sple[l1_table_offset(vpa)];
 
     if ( !(l1e_get_flags(sl1e) & _PAGE_PRESENT) )
@@ -996,13 +1071,19 @@ int shadow_direct_map_fault(unsigned long vpa, struct cpu_user_regs *regs)
         sl1e = l1e_from_pfn(mfn, __PAGE_HYPERVISOR | _PAGE_USER);
         sple[l1_table_offset(vpa)] = sl1e;
     }
-    unmap_domain_page(sple);
-    shadow_unlock(d);
 
+    if (sple)
+        unmap_domain_page(sple);
+
+    shadow_unlock(d);
     return EXCRET_fault_fixed;
 
 fail:
     return 0;
+
+nomem:
+    shadow_direct_map_clean(v);
+    domain_crash_synchronous();
 }
 
 
@@ -1014,16 +1095,12 @@ int shadow_direct_map_init(struct vcpu *v)
     if ( !(page = alloc_domheap_page(NULL)) )
         goto fail;
 
-    root = map_domain_page_global(page_to_mfn(page));
+    root = map_domain_page(page_to_mfn(page));
     memset(root, 0, PAGE_SIZE);
+    unmap_domain_page(root);
 
     v->domain->arch.phys_table = mk_pagetable(page_to_maddr(page));
-    /* 
-     * We need to set shadow_vtable to get __shadow_set/get_xxx
-     * working
-     */
-    v->arch.shadow_vtable = (l2_pgentry_t *) root;
-    v->arch.shadow_table = mk_pagetable(0);
+
     return 1;
 
 fail:
@@ -1035,9 +1112,8 @@ void shadow_direct_map_clean(struct vcpu *v)
     int i;
     l2_pgentry_t *l2e;
 
-    ASSERT ( v->arch.shadow_vtable );
-
-    l2e = v->arch.shadow_vtable;
+    l2e = map_domain_page(
+      pagetable_get_pfn(v->domain->arch.phys_table));
 
     for ( i = 0; i < L2_PAGETABLE_ENTRIES; i++ )
     {
@@ -1048,8 +1124,7 @@ void shadow_direct_map_clean(struct vcpu *v)
     free_domheap_page(
             mfn_to_page(pagetable_get_pfn(v->domain->arch.phys_table)));
 
-    unmap_domain_page_global(v->arch.shadow_vtable);
-    v->arch.shadow_vtable = 0;
+    unmap_domain_page(l2e);
     v->domain->arch.phys_table = mk_pagetable(0);
 }
 
@@ -1161,13 +1236,6 @@ int __shadow_mode_enable(struct domain *d, unsigned int mode)
                 printk("alloc_p2m_table failed (out-of-memory?)\n");
                 goto nomem;
             }
-        }
-        else
-        {
-            // external guests provide their own memory for their P2M maps.
-            //
-            ASSERT(d == page_get_owner(mfn_to_page(pagetable_get_pfn(
-                d->arch.phys_table))));
         }
     }
 
@@ -1582,14 +1650,7 @@ get_mfn_from_gpfn_foreign(struct domain *d, unsigned long gpfn)
            __func__, d->domain_id, gpfn, l1_pgentry_val(l1e) >> PAGE_SHIFT, tabpfn, l2e, l1tab, l1e);
 #endif
 
-    if ( !(l1e_get_flags(l1e) & _PAGE_PRESENT) )
-    {
-        printk("%s(d->id=%d, gpfn=%lx) => 0 l1e=%" PRIpte "\n",
-               __func__, d->domain_id, gpfn, l1e_get_intpte(l1e));
-        return INVALID_MFN;
-    }
-
-    return l1e_get_pfn(l1e);
+    return l1e_get_intpte(l1e);
 }
 
 static unsigned long
@@ -1704,6 +1765,7 @@ static unsigned long shadow_l2_table(
         {
             unsigned long hl2mfn;
 
+            ASSERT(pagetable_get_paddr(d->arch.phys_table));
             spl2e[l2_table_offset(RO_MPT_VIRT_START)] =
                 l2e_from_paddr(pagetable_get_paddr(d->arch.phys_table),
                                 __PAGE_HYPERVISOR);

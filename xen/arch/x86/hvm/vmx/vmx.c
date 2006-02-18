@@ -25,7 +25,6 @@
 #include <xen/irq.h>
 #include <xen/softirq.h>
 #include <xen/domain_page.h>
-#include <xen/hypercall.h>
 #include <asm/current.h>
 #include <asm/io.h>
 #include <asm/shadow.h>
@@ -89,6 +88,7 @@ void vmx_relinquish_resources(struct vcpu *v)
         if ( d->arch.hvm_domain.shared_page_va )
             unmap_domain_page_global(
 	        (void *)d->arch.hvm_domain.shared_page_va);
+        shadow_direct_map_clean(v);
     }
 
     vmx_request_clear_vmcs(v);
@@ -124,13 +124,10 @@ void vmx_save_segments(struct vcpu *v)
  * are not modified once set for generic domains, we don't save them,
  * but simply reset them to the values set at percpu_traps_init().
  */
-void vmx_load_msrs(struct vcpu *n)
+void vmx_load_msrs(void)
 {
     struct vmx_msr_state *host_state = &percpu_msr[smp_processor_id()];
     int i;
-
-    if ( !hvm_switch_on )
-        return;
 
     while ( host_state->flags )
     {
@@ -247,7 +244,6 @@ static inline int long_mode_do_msr_write(struct cpu_user_regs *regs)
                        host_state->msr_items[VMX_INDEX_MSR_EFER]);
                 set_bit(VMX_INDEX_MSR_EFER, &host_state->flags);
                 set_bit(VMX_INDEX_MSR_EFER, &msr->flags);
-                wrmsrl(MSR_EFER, msr_content);
             }
         }
         break;
@@ -436,6 +432,22 @@ int vmx_instruction_length(struct vcpu *v)
     return inst_len;
 }
 
+unsigned long vmx_get_ctrl_reg(struct vcpu *v, unsigned int num)
+{
+    switch ( num )
+    {
+    case 0:
+        return v->arch.hvm_vmx.cpu_cr0;
+    case 2:
+        return v->arch.hvm_vmx.cpu_cr2;
+    case 3:
+        return v->arch.hvm_vmx.cpu_cr3;
+    default:
+        BUG();
+    }
+    return 0;                   /* dummy */
+}
+
 extern long evtchn_send(int lport);
 void do_nmi(struct cpu_user_regs *);
 
@@ -532,6 +544,7 @@ int start_vmx(void)
     hvm_funcs.realmode = vmx_realmode;
     hvm_funcs.paging_enabled = vmx_paging_enabled;
     hvm_funcs.instruction_length = vmx_instruction_length;
+    hvm_funcs.get_guest_ctrl_reg = vmx_get_ctrl_reg;
 
     hvm_enabled = 1;
 
@@ -616,15 +629,17 @@ static void vmx_do_no_device_fault(void)
     unsigned long cr0;
     struct vcpu *v = current;
 
-    clts();
     setup_fpu(current);
+    __vm_clear_bit(EXCEPTION_BITMAP, EXCEPTION_BITMAP_NM);
+
+    /* Disable TS in guest CR0 unless the guest wants the exception too. */
     __vmread_vcpu(v, CR0_READ_SHADOW, &cr0);
-    if (!(cr0 & X86_CR0_TS)) {
+    if ( !(cr0 & X86_CR0_TS) )
+    {
         __vmread_vcpu(v, GUEST_CR0, &cr0);
         cr0 &= ~X86_CR0_TS;
         __vmwrite(GUEST_CR0, cr0);
     }
-    __vm_clear_bit(EXCEPTION_BITMAP, EXCEPTION_BITMAP_NM);
 }
 
 /* Reserved bits: [31:15], [12:11], [9], [6], [2:1] */
@@ -653,14 +668,17 @@ static void vmx_vmexit_do_cpuid(unsigned long input, struct cpu_user_regs *regs)
                 !vlapic_global_enabled((VLAPIC(v))) )
             clear_bit(X86_FEATURE_APIC, &edx);
 
-#if CONFIG_PAGING_LEVELS >= 3
+#if CONFIG_PAGING_LEVELS < 3
+        clear_bit(X86_FEATURE_PSE, &edx);
+        clear_bit(X86_FEATURE_PAE, &edx);
+        clear_bit(X86_FEATURE_PSE36, &edx);
+#else
         if ( v->domain->arch.ops->guest_paging_levels == PAGING_L2 )
-#endif
         {
             clear_bit(X86_FEATURE_PSE, &edx);
-            clear_bit(X86_FEATURE_PAE, &edx);
             clear_bit(X86_FEATURE_PSE36, &edx);
         }
+#endif
 
         /* Unsupportable for virtualised CPUs. */
         ecx &= ~VMX_VCPU_CPUID_L1_RESERVED; /* mask off reserved bits */
@@ -1006,11 +1024,11 @@ vmx_world_restore(struct vcpu *v, struct vmx_assist_context *c)
         v->arch.guest_table = mk_pagetable((u64)mfn << PAGE_SHIFT);
         if (old_base_mfn)
              put_page(mfn_to_page(old_base_mfn));
-        update_pagetables(v);
         /*
          * arch.shadow_table should now hold the next CR3 for shadow
          */
         v->arch.hvm_vmx.cpu_cr3 = c->cr3;
+        update_pagetables(v);
         HVM_DBG_LOG(DBG_LEVEL_VMMU, "Update CR3 value = %x", c->cr3);
         __vmwrite(GUEST_CR3, pagetable_get_paddr(v->arch.shadow_table));
     }
@@ -1153,13 +1171,13 @@ static int vmx_set_cr0(unsigned long value)
      */
     __vmread_vcpu(v, CR0_READ_SHADOW, &old_cr0);
     paging_enabled = (old_cr0 & X86_CR0_PE) && (old_cr0 & X86_CR0_PG);
-    /* If OS don't use clts to clear TS bit...*/
-    if((old_cr0 & X86_CR0_TS) && !(value & X86_CR0_TS))
-    {
-            clts();
-            setup_fpu(v);
-    }
 
+    /* TS cleared? Then initialise FPU now. */
+    if ( !(value & X86_CR0_TS) )
+    {
+        setup_fpu(v);
+        __vm_clear_bit(EXCEPTION_BITMAP, EXCEPTION_BITMAP_NM);
+    }
 
     __vmwrite(GUEST_CR0, value | X86_CR0_PE | X86_CR0_PG | X86_CR0_NE);
     __vmwrite(CR0_READ_SHADOW, value);
@@ -1226,9 +1244,7 @@ static int vmx_set_cr0(unsigned long value)
                 __vmwrite(GUEST_CR4, crn | X86_CR4_PAE);
             }
         }
-#if CONFIG_PAGING_LEVELS == 2
-        shadow_direct_map_clean(v);
-#endif
+
         /*
          * Now arch.guest_table points to machine physical.
          */
@@ -1403,11 +1419,16 @@ static int mov_to_cr(int gp, int cr, struct cpu_user_regs *regs)
             v->arch.guest_table = mk_pagetable((u64)mfn << PAGE_SHIFT);
             if (old_base_mfn)
                 put_page(mfn_to_page(old_base_mfn));
-            update_pagetables(v);
             /*
              * arch.shadow_table should now hold the next CR3 for shadow
              */
+#if CONFIG_PAGING_LEVELS >= 3
+            if ( v->domain->arch.ops->guest_paging_levels == PAGING_L3 )
+                shadow_sync_all(v->domain);
+#endif
+
             v->arch.hvm_vmx.cpu_cr3 = value;
+            update_pagetables(v);
             HVM_DBG_LOG(DBG_LEVEL_VMMU, "Update CR3 value = %lx",
                         value);
             __vmwrite(GUEST_CR3, pagetable_get_paddr(v->arch.shadow_table));
@@ -1416,18 +1437,81 @@ static int mov_to_cr(int gp, int cr, struct cpu_user_regs *regs)
     }
     case 4: /* CR4 */
     {
-        if (value & X86_CR4_PAE){
+        unsigned long old_cr4;
+
+        __vmread(CR4_READ_SHADOW, &old_cr4);
+
+        if ( value & X86_CR4_PAE && !(old_cr4 & X86_CR4_PAE) )
+        {
             set_bit(VMX_CPU_STATE_PAE_ENABLED, &v->arch.hvm_vmx.cpu_state);
-        } else {
-            if (test_bit(VMX_CPU_STATE_LMA_ENABLED,
-                         &v->arch.hvm_vmx.cpu_state)){
-                vmx_inject_exception(v, TRAP_gp_fault, 0);
+
+            if ( vmx_pgbit_test(v) ) 
+            {
+                /* The guest is 32 bit. */
+#if CONFIG_PAGING_LEVELS >= 4
+                unsigned long mfn, old_base_mfn;
+
+                if( !shadow_set_guest_paging_levels(v->domain, 3) )
+                {
+                    printk("Unsupported guest paging levels\n");
+                    domain_crash_synchronous(); /* need to take a clean path */
+                }
+
+                if ( !VALID_MFN(mfn = get_mfn_from_gpfn(
+                                    v->arch.hvm_vmx.cpu_cr3 >> PAGE_SHIFT)) ||
+                     !get_page(mfn_to_page(mfn), v->domain) ) 
+                {
+                    printk("Invalid CR3 value = %lx", v->arch.hvm_vmx.cpu_cr3);
+                    domain_crash_synchronous(); /* need to take a clean path */
+                }
+
+                old_base_mfn = pagetable_get_pfn(v->arch.guest_table);
+                if ( old_base_mfn )
+                    put_page(mfn_to_page(old_base_mfn));
+
+                /*
+                 * Now arch.guest_table points to machine physical.
+                 */
+
+                v->arch.guest_table = mk_pagetable((u64)mfn << PAGE_SHIFT);
+                update_pagetables(v);
+
+                HVM_DBG_LOG(DBG_LEVEL_VMMU, "New arch.guest_table = %lx",
+                            (unsigned long) (mfn << PAGE_SHIFT));
+
+                __vmwrite(GUEST_CR3, pagetable_get_paddr(v->arch.shadow_table));
+
+                /*
+                 * arch->shadow_table should hold the next CR3 for shadow
+                 */
+
+                HVM_DBG_LOG(DBG_LEVEL_VMMU, "Update CR3 value = %lx, mfn = %lx",
+                            v->arch.hvm_vmx.cpu_cr3, mfn);
+#endif
+            } 
+            else
+            {
+                /*  The guest is 64 bit. */
+#if CONFIG_PAGING_LEVELS >= 4
+                if ( !shadow_set_guest_paging_levels(v->domain, 4) ) 
+                {
+                    printk("Unsupported guest paging levels\n");
+                    domain_crash_synchronous(); /* need to take a clean path */
+                }
+#endif
             }
+        }
+        else if ( value & X86_CR4_PAE )
+            set_bit(VMX_CPU_STATE_PAE_ENABLED, &v->arch.hvm_vmx.cpu_state);
+        else
+        {
+            if ( test_bit(VMX_CPU_STATE_LMA_ENABLED, &v->arch.hvm_vmx.cpu_state) )
+                vmx_inject_exception(v, TRAP_gp_fault, 0);
+
             clear_bit(VMX_CPU_STATE_PAE_ENABLED, &v->arch.hvm_vmx.cpu_state);
         }
 
         __vmread(CR4_READ_SHADOW, &old_cr);
-
         __vmwrite(GUEST_CR4, value| VMX_CR4_HOST_MASK);
         __vmwrite(CR4_READ_SHADOW, value);
 
@@ -1435,9 +1519,9 @@ static int mov_to_cr(int gp, int cr, struct cpu_user_regs *regs)
          * Writing to CR4 to modify the PSE, PGE, or PAE flag invalidates
          * all TLB entries except global entries.
          */
-        if ((old_cr ^ value) & (X86_CR4_PSE | X86_CR4_PGE | X86_CR4_PAE)) {
+        if ( (old_cr ^ value) & (X86_CR4_PSE | X86_CR4_PGE | X86_CR4_PAE) )
             shadow_sync_all(v->domain);
-        }
+
         break;
     }
     default:
@@ -1511,8 +1595,10 @@ static int vmx_cr_access(unsigned long exit_qualification, struct cpu_user_regs 
         break;
     case TYPE_CLTS:
         TRACE_VMEXIT(1,TYPE_CLTS);
-        clts();
-        setup_fpu(current);
+
+        /* We initialise the FPU now, to avoid needing another vmexit. */
+        setup_fpu(v);
+        __vm_clear_bit(EXCEPTION_BITMAP, EXCEPTION_BITMAP_NM);
 
         __vmread_vcpu(v, GUEST_CR0, &value);
         value &= ~X86_CR0_TS; /* clear TS */
@@ -1569,7 +1655,7 @@ static inline void vmx_do_msr_read(struct cpu_user_regs *regs)
     default:
         if(long_mode_do_msr_read(regs))
             return;
-        rdmsr_user(regs->ecx, regs->eax, regs->edx);
+        rdmsr_safe(regs->ecx, regs->eax, regs->edx);
         break;
     }
 
@@ -1643,16 +1729,14 @@ void vmx_vmexit_do_hlt(void)
     struct hvm_virpit *vpit = &(v->domain->arch.hvm_domain.vpit);
     s_time_t   next_pit=-1,next_wakeup;
 
-    if ( !v->vcpu_id ) {
+    if ( !v->vcpu_id )
         next_pit = get_pit_scheduled(v,vpit);
-    }
     next_wakeup = get_apictime_scheduled(v);
-    if ( (next_pit != -1 && next_pit < next_wakeup) || next_wakeup == -1 ) {
+    if ( (next_pit != -1 && next_pit < next_wakeup) || next_wakeup == -1 )
         next_wakeup = next_pit;
-    }
     if ( next_wakeup != - 1 ) 
         set_timer(&current->arch.hvm_vmx.hlt_timer, next_wakeup);
-    do_sched_op(SCHEDOP_block, 0);
+    hvm_safe_block();
 }
 
 static inline void vmx_vmexit_do_extint(struct cpu_user_regs *regs)
@@ -1661,13 +1745,12 @@ static inline void vmx_vmexit_do_extint(struct cpu_user_regs *regs)
     int error;
 
     asmlinkage void do_IRQ(struct cpu_user_regs *);
-    void smp_apic_timer_interrupt(struct cpu_user_regs *);
-    void timer_interrupt(int, void *, struct cpu_user_regs *);
-    void smp_event_check_interrupt(void);
-    void smp_invalidate_interrupt(void);
-    void smp_call_function_interrupt(void);
-    void smp_spurious_interrupt(struct cpu_user_regs *regs);
-    void smp_error_interrupt(struct cpu_user_regs *regs);
+    fastcall void smp_apic_timer_interrupt(struct cpu_user_regs *);
+    fastcall void smp_event_check_interrupt(void);
+    fastcall void smp_invalidate_interrupt(void);
+    fastcall void smp_call_function_interrupt(void);
+    fastcall void smp_spurious_interrupt(struct cpu_user_regs *regs);
+    fastcall void smp_error_interrupt(struct cpu_user_regs *regs);
 
     if ((error = __vmread(VM_EXIT_INTR_INFO, &vector))
         && !(vector & INTR_INFO_VALID_MASK))
@@ -1849,7 +1932,6 @@ asmlinkage void vmx_vmexit_handler(struct cpu_user_regs regs)
             __vm_clear_bit(GUEST_PENDING_DBG_EXCEPTIONS, PENDING_DEBUG_EXC_BS);
 
             domain_pause_for_debugger();
-            do_sched_op(SCHEDOP_yield, 0);
 
             break;
         }

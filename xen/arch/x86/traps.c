@@ -901,7 +901,8 @@ static int emulate_privileged_op(struct cpu_user_regs *regs)
             break;
             
         case 3: /* Read CR3 */
-            *reg = pagetable_get_paddr(v->arch.guest_table);
+            *reg = pfn_to_paddr(mfn_to_gmfn(v->domain,
+                                    pagetable_get_pfn(v->arch.guest_table)));
             break;
 
         case 4: /* Read CR4 */
@@ -950,7 +951,7 @@ static int emulate_privileged_op(struct cpu_user_regs *regs)
             
         case 3: /* Write CR3 */
             LOCK_BIGLOCK(v->domain);
-            (void)new_guest_cr3(*reg);
+            (void)new_guest_cr3(gmfn_to_mfn(v->domain, paddr_to_pfn(*reg)));
             UNLOCK_BIGLOCK(v->domain);
             break;
 
@@ -981,26 +982,26 @@ static int emulate_privileged_op(struct cpu_user_regs *regs)
         {
 #ifdef CONFIG_X86_64
         case MSR_FS_BASE:
-            if ( wrmsr_user(MSR_FS_BASE, regs->eax, regs->edx) )
+            if ( wrmsr_safe(MSR_FS_BASE, regs->eax, regs->edx) )
                 goto fail;
             v->arch.guest_context.fs_base =
                 ((u64)regs->edx << 32) | regs->eax;
             break;
         case MSR_GS_BASE:
-            if ( wrmsr_user(MSR_GS_BASE, regs->eax, regs->edx) )
+            if ( wrmsr_safe(MSR_GS_BASE, regs->eax, regs->edx) )
                 goto fail;
             v->arch.guest_context.gs_base_kernel =
                 ((u64)regs->edx << 32) | regs->eax;
             break;
         case MSR_SHADOW_GS_BASE:
-            if ( wrmsr_user(MSR_SHADOW_GS_BASE, regs->eax, regs->edx) )
+            if ( wrmsr_safe(MSR_SHADOW_GS_BASE, regs->eax, regs->edx) )
                 goto fail;
             v->arch.guest_context.gs_base_user =
                 ((u64)regs->edx << 32) | regs->eax;
             break;
 #endif
         default:
-            if ( (rdmsr_user(regs->ecx, l, h) != 0) ||
+            if ( (rdmsr_safe(regs->ecx, l, h) != 0) ||
                  (regs->ecx != MSR_EFER) ||
                  (regs->eax != l) || (regs->edx != h) )
                 DPRINTK("Domain attempted WRMSR %p from "
@@ -1028,13 +1029,13 @@ static int emulate_privileged_op(struct cpu_user_regs *regs)
             break;
 #endif
         case MSR_EFER:
-            if ( rdmsr_user(regs->ecx, regs->eax, regs->edx) )
+            if ( rdmsr_safe(regs->ecx, regs->eax, regs->edx) )
                 goto fail;
             break;
         default:
             DPRINTK("Domain attempted RDMSR %p.\n", _p(regs->ecx));
             /* Everyone can read the MSR space. */
-            if ( rdmsr_user(regs->ecx, regs->eax, regs->edx) )
+            if ( rdmsr_safe(regs->ecx, regs->eax, regs->edx) )
                 goto fail;
             break;
         }
@@ -1260,9 +1261,6 @@ asmlinkage int math_state_restore(struct cpu_user_regs *regs)
 {
     struct trap_bounce *tb;
     struct trap_info *ti;
-
-    /* Prevent recursion. */
-    clts();
 
     setup_fpu(current);
 

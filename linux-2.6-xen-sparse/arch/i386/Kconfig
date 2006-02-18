@@ -476,6 +476,7 @@ config HIGHMEM4G
 
 config HIGHMEM64G
 	bool "64GB"
+	depends on X86_CMPXCHG64
 	help
 	  Select this if you have a 32-bit processor and more than 4
 	  gigabytes of physical RAM.
@@ -996,6 +997,13 @@ config PCI_GOMMCONFIG
 config PCI_GODIRECT
 	bool "Direct"
 
+config PCI_GOXEN_FE
+	bool "Xen PCI Frontend"
+	depends on X86_XEN
+	help
+	  The PCI device frontend driver allows the kernel to import arbitrary
+	  PCI devices from a PCI backend to support PCI driver domains.
+
 config PCI_GOANY
 	bool "Any"
 
@@ -1016,13 +1024,24 @@ config PCI_MMCONFIG
 	depends on PCI && ACPI && (PCI_GOMMCONFIG || PCI_GOANY)
 	default y
 
+config XEN_PCIDEV_FRONTEND
+	bool
+	depends on PCI && X86_XEN && (PCI_GOXEN_FE || PCI_GOANY)
+	default y
+
+config XEN_PCIDEV_FE_DEBUG
+	bool "Xen PCI Frontend Debugging"
+	depends on XEN_PCIDEV_FRONTEND
+	default n
+	help
+	  Enables some debug statements within the PCI Frontend.
+
 source "drivers/pci/pcie/Kconfig"
 
 source "drivers/pci/Kconfig"
 
 config ISA_DMA_API
 	bool
-	depends on !X86_XEN
 	default y
 
 config ISA

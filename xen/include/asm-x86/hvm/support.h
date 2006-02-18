@@ -133,7 +133,6 @@ extern unsigned int opt_hvm_debug_level;
     } while (0)
 
 extern int hvm_enabled;
-extern int hvm_switch_on;
 
 enum { HVM_COPY_IN = 0, HVM_COPY_OUT };
 extern int hvm_copy(void *buf, unsigned long vaddr, int size, int dir);
@@ -141,7 +140,6 @@ extern int hvm_copy(void *buf, unsigned long vaddr, int size, int dir);
 extern void hvm_setup_platform(struct domain* d);
 extern int hvm_mmio_intercept(ioreq_t *p);
 extern int hvm_io_intercept(ioreq_t *p, int type);
-extern void hvm_check_events(struct vcpu *v);
 extern void hvm_hooks_assist(struct vcpu *v);
 extern void hvm_print_line(struct vcpu *v, const char c);
 extern void hlt_timer_fn(void *data);

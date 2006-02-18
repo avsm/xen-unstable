@@ -1,5 +1,6 @@
 
 #include <xen/config.h>
+#include <xen/compile.h>
 #include <xen/domain_page.h>
 #include <xen/init.h>
 #include <xen/sched.h>
@@ -20,6 +21,7 @@ void show_registers(struct cpu_user_regs *regs)
 {
     struct cpu_user_regs fault_regs = *regs;
     unsigned long fault_crs[8];
+    char taint_str[TAINT_STRING_MAX_LEN];
     const char *context;
 
     if ( HVM_DOMAIN(current) && GUEST_MODE(regs) )
@@ -35,20 +37,20 @@ void show_registers(struct cpu_user_regs *regs)
         if ( !GUEST_MODE(regs) )
         {
             fault_regs.esp = (unsigned long)&regs->esp;
-            fault_regs.ss = __HYPERVISOR_DS;
-            fault_regs.ds = __HYPERVISOR_DS;
-            fault_regs.es = __HYPERVISOR_DS;
-            fault_regs.cs = __HYPERVISOR_CS;
+            fault_regs.ss = read_segment_register(ss);
+            fault_regs.ds = read_segment_register(ds);
+            fault_regs.es = read_segment_register(es);
+            fault_regs.fs = read_segment_register(fs);
+            fault_regs.gs = read_segment_register(gs);
         }
 
-        __asm__ (
-            "movw %%fs,%0 ; movw %%gs,%1"
-            : "=r" (fault_regs.fs), "=r" (fault_regs.gs) );
-        
         fault_crs[0] = read_cr0();
         fault_crs[3] = read_cr3();
     }
 
+    printk("----[ Xen-%d.%d%s    %s ]----\n",
+           XEN_VERSION, XEN_SUBVERSION, XEN_EXTRAVERSION,
+           print_tainted(taint_str));
     printk("CPU:    %d\nEIP:    %04x:[<%08x>]",
            smp_processor_id(), fault_regs.cs, fault_regs.eip);
     if ( !GUEST_MODE(regs) )
@@ -201,11 +203,11 @@ unsigned long do_iret(void)
 }
 
 BUILD_SMP_INTERRUPT(deferred_nmi, TRAP_deferred_nmi)
-asmlinkage void smp_deferred_nmi(struct cpu_user_regs regs)
+fastcall void smp_deferred_nmi(struct cpu_user_regs *regs)
 {
     asmlinkage void do_nmi(struct cpu_user_regs *);
     ack_APIC_irq();
-    do_nmi(&regs);
+    do_nmi(regs);
 }
 
 void __init percpu_traps_init(void)

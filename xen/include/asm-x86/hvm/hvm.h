@@ -50,7 +50,7 @@ struct hvm_function_table {
     void (*load_cpu_guest_regs)(struct vcpu *v, struct cpu_user_regs *r);
 #ifdef __x86_64__
     void (*save_segments)(struct vcpu *v);
-    void (*load_msrs)(struct vcpu *v);
+    void (*load_msrs)(void);
     void (*restore_msrs)(struct vcpu *v);
 #endif
     void (*store_cpu_guest_ctrl_regs)(struct vcpu *v, unsigned long crs[8]);
@@ -61,10 +61,12 @@ struct hvm_function_table {
      * 1) determine whether the guest is in real or vm8086 mode,
      * 2) determine whether paging is enabled,
      * 3) return the length of the instruction that caused an exit.
+     * 4) return the current guest control-register value
      */
     int (*realmode)(struct vcpu *v);
     int (*paging_enabled)(struct vcpu *v);
     int (*instruction_length)(struct vcpu *v);
+    unsigned long (*get_guest_ctrl_reg)(struct vcpu *v, unsigned int num);
 };
 
 extern struct hvm_function_table hvm_funcs;
@@ -116,10 +118,10 @@ hvm_save_segments(struct vcpu *v)
 }
 
 static inline void
-hvm_load_msrs(struct vcpu *v)
+hvm_load_msrs(void)
 {
     if (hvm_funcs.load_msrs)
-        hvm_funcs.load_msrs(v);
+        hvm_funcs.load_msrs();
 }
 
 static inline void
@@ -162,5 +164,13 @@ static inline int
 hvm_instruction_length(struct vcpu *v)
 {
     return hvm_funcs.instruction_length(v);
+}
+
+static inline unsigned long
+hvm_get_guest_ctrl_reg(struct vcpu *v, unsigned int num)
+{
+    if ( hvm_funcs.get_guest_ctrl_reg )
+        return hvm_funcs.get_guest_ctrl_reg(v, num);
+    return 0;                   /* force to fail */
 }
 #endif /* __ASM_X86_HVM_HVM_H__ */

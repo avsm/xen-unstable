@@ -25,7 +25,6 @@
 #include <xen/sched.h>
 #include <xen/irq.h>
 #include <xen/softirq.h>
-#include <xen/hypercall.h>
 #include <asm/current.h>
 #include <asm/io.h>
 #include <asm/shadow.h>
@@ -70,8 +69,6 @@ extern void do_nmi(struct cpu_user_regs *, unsigned long);
 extern int inst_copy_from_guest(unsigned char *buf, unsigned long guest_eip,
                                 int inst_len);
 extern asmlinkage void do_IRQ(struct cpu_user_regs *);
-extern void smp_apic_timer_interrupt(struct cpu_user_regs *);
-extern void timer_interrupt(int, void *, struct cpu_user_regs *);
 extern void send_pio_req(struct cpu_user_regs *regs, unsigned long port,
        unsigned long count, int size, long value, int dir, int pvalid);
 extern int svm_instrlen(struct cpu_user_regs *regs, int mode);
@@ -167,15 +164,21 @@ void asidpool_retire( struct vmcb_struct *vmcb, int core )
    spin_unlock(&ASIDpool[core].asid_lock);
 }
 
-static inline int svm_inject_exception(struct vcpu *v, int trap, int error_code)
+static inline void svm_inject_exception(struct vmcb_struct *vmcb, 
+                                        int trap, int error_code)
 {
-    void save_svm_cpu_user_regs(struct vcpu *, struct cpu_user_regs *);
-    struct cpu_user_regs regs;
+    eventinj_t event;
 
-    printf("svm_inject_exception(trap %d, error_code 0x%x)\n",
-           trap, error_code);
-    save_svm_cpu_user_regs(v, &regs);
-    __hvm_bug(&regs);
+    event.bytes = 0;            
+    event.fields.v = 1;
+    event.fields.type = EVENTTYPE_EXCEPTION;
+    event.fields.vector = trap;
+    event.fields.ev = 1;
+    event.fields.errorcode = error_code;
+
+    ASSERT(vmcb->eventinj.fields.v == 0);
+    
+    vmcb->eventinj = event;
 }
 
 void stop_svm(void)
@@ -254,13 +257,10 @@ void svm_save_segments(struct vcpu *v)
  * are not modified once set for generic domains, we don't save them,
  * but simply reset them to the values set at percpu_traps_init().
  */
-void svm_load_msrs(struct vcpu *n)
+void svm_load_msrs(void)
 {
     struct svm_msr_state *host_state = &percpu_msr[smp_processor_id()];
     int i;
-
-    if ( !hvm_switch_on )
-        return;
 
     while ( host_state->flags )
     {
@@ -374,7 +374,7 @@ static inline int long_mode_do_msr_write(struct cpu_user_regs *regs)
                     || !test_bit(SVM_CPU_STATE_PAE_ENABLED,
                                  &vc->arch.hvm_svm.cpu_state))
             {
-                svm_inject_exception(vc, TRAP_gp_fault, 0);
+                svm_inject_exception(vmcb, TRAP_gp_fault, 0);
             }
         }
 
@@ -404,7 +404,7 @@ static inline int long_mode_do_msr_write(struct cpu_user_regs *regs)
         if (!IS_CANO_ADDRESS(msr_content))
         {
             HVM_DBG_LOG(DBG_LEVEL_1, "Not cano address of msr write\n");
-            svm_inject_exception(vc, TRAP_gp_fault, 0);
+            svm_inject_exception(vmcb, TRAP_gp_fault, 0);
         }
 
         if (regs->ecx == MSR_FS_BASE)
@@ -704,12 +704,21 @@ void svm_stts(struct vcpu *v)
 {
     struct vmcb_struct *vmcb = v->arch.hvm_svm.vmcb;
 
-    ASSERT(vmcb);    
+    /* FPU state already dirty? Then no need to setup_fpu() lazily. */
+    if ( test_bit(_VCPUF_fpu_dirtied, &v->vcpu_flags) )
+        return;
 
-    vmcb->cr0 |= X86_CR0_TS;
-
-    if (!(v->arch.hvm_svm.cpu_shadow_cr0 & X86_CR0_TS))
+    /*
+     * If the guest does not have TS enabled then we must cause and handle an 
+     * exception on first use of the FPU. If the guest *does* have TS enabled 
+     * then this is not necessary: no FPU activity can occur until the guest 
+     * clears CR0.TS, and we will initialise the FPU when that happens.
+     */
+    if ( !(v->arch.hvm_svm.cpu_shadow_cr0 & X86_CR0_TS) )
+    {
         v->arch.hvm_svm.vmcb->exception_intercepts |= EXCEPTION_BITMAP_NM;
+        vmcb->cr0 |= X86_CR0_TS;
+    }
 }
 
 static void arch_svm_do_launch(struct vcpu *v) 
@@ -793,6 +802,7 @@ void svm_relinquish_resources(struct vcpu *v)
         struct domain *d = v->domain;
         if (d->arch.hvm_domain.shared_page_va)
             unmap_domain_page((void *)d->arch.hvm_domain.shared_page_va);
+        shadow_direct_map_clean(v);
     }
 
     destroy_vmcb(&v->arch.hvm_svm);
@@ -841,7 +851,6 @@ static int svm_do_page_fault(unsigned long va, struct cpu_user_regs *regs)
         return 1;
     }
 
-    update_pagetables(v);
 
     gpa = gva_to_gpa(va);
 
@@ -887,14 +896,11 @@ static void svm_do_no_device_fault(struct vmcb_struct *vmcb)
 {
     struct vcpu *v = current;
 
-    clts();
-
     setup_fpu(v);    
-
-    if (!(v->arch.hvm_svm.cpu_shadow_cr0 & X86_CR0_TS))
-        vmcb->cr0 &= ~X86_CR0_TS;
-    
     vmcb->exception_intercepts &= ~EXCEPTION_BITMAP_NM;
+
+    if ( !(v->arch.hvm_svm.cpu_shadow_cr0 & X86_CR0_TS) )
+        vmcb->cr0 &= ~X86_CR0_TS;
 }
 
 
@@ -903,7 +909,6 @@ static void svm_do_general_protection_fault(struct vcpu *v,
 {
     struct vmcb_struct *vmcb = v->arch.hvm_svm.vmcb;
     unsigned long eip, error_code;
-    eventinj_t event;
 
     ASSERT(vmcb);
 
@@ -922,14 +927,7 @@ static void svm_do_general_protection_fault(struct vcpu *v,
 
     
     /* Reflect it back into the guest */
-    event.bytes = 0;
-    event.fields.v = 1;
-    event.fields.type = EVENTTYPE_EXCEPTION;
-    event.fields.vector = 13;
-    event.fields.ev = 1;
-    event.fields.errorcode = error_code;
-
-    vmcb->eventinj = event;
+    svm_inject_exception(vmcb, TRAP_gp_fault, error_code);
 }
 
 /* Reserved bits: [31:14], [12:1] */
@@ -1353,10 +1351,11 @@ static int svm_set_cr0(unsigned long value)
     vmcb->cr0 = value | X86_CR0_PG;
     v->arch.hvm_svm.cpu_shadow_cr0 = value;
 
-    /* Check if FP Unit Trap need to be on */
-    if (value & X86_CR0_TS)
-    { 
-       vmcb->exception_intercepts |= EXCEPTION_BITMAP_NM;
+    /* TS cleared? Then initialise FPU now. */
+    if ( !(value & X86_CR0_TS) )
+    {
+        setup_fpu(v);
+        vmcb->exception_intercepts &= ~EXCEPTION_BITMAP_NM;
     }
 
     HVM_DBG_LOG(DBG_LEVEL_VMMU, "Update CR0 value = %lx\n", value);
@@ -1378,7 +1377,7 @@ static int svm_set_cr0(unsigned long value)
                     &v->arch.hvm_svm.cpu_state))
         {
             HVM_DBG_LOG(DBG_LEVEL_1, "Enable paging before PAE enable\n");
-            svm_inject_exception(v, TRAP_gp_fault, 0);
+            svm_inject_exception(vmcb, TRAP_gp_fault, 0);
         }
 
         if (test_bit(SVM_CPU_STATE_LME_ENABLED, &v->arch.hvm_svm.cpu_state))
@@ -1439,9 +1438,7 @@ static int svm_set_cr0(unsigned long value)
                 put_page(mfn_to_page(old_base_mfn));
 	}
 #endif
-#if CONFIG_PAGING_LEVELS == 2
-        shadow_direct_map_clean(v);
-#endif
+
         /* Now arch.guest_table points to machine physical. */
         v->arch.guest_table = mk_pagetable(mfn << PAGE_SHIFT);
         update_pagetables(v);
@@ -1464,9 +1461,9 @@ static int svm_set_cr0(unsigned long value)
      */
     if ((value & X86_CR0_PE) == 0) {
     	if (value & X86_CR0_PG) {
-            svm_inject_exception(v, TRAP_gp_fault, 0);
-	    return 0;
-	}
+            svm_inject_exception(vmcb, TRAP_gp_fault, 0);
+            return 0;
+        }
 
         set_bit(ARCH_SVM_VMCB_ASSIGN_ASID, &v->arch.hvm_svm.flags);
         vmcb->cr3 = pagetable_get_paddr(v->domain->arch.phys_table);
@@ -1672,11 +1669,11 @@ static int svm_cr_access(struct vcpu *v, unsigned int cr, unsigned int type,
         break;
 
     case INSTR_CLTS:
-        clts();
+        /* TS being cleared means that it's time to restore fpu state. */
         setup_fpu(current);
+        vmcb->exception_intercepts &= ~EXCEPTION_BITMAP_NM;
         vmcb->cr0 &= ~X86_CR0_TS; /* clear TS */
         v->arch.hvm_svm.cpu_shadow_cr0 &= ~X86_CR0_TS; /* clear TS */
-        vmcb->exception_intercepts &= ~EXCEPTION_BITMAP_NM;
         break;
 
     case INSTR_LMSW:
@@ -1762,7 +1759,7 @@ static inline void svm_do_msr_access(struct vcpu *v, struct cpu_user_regs *regs)
         default:
             if (long_mode_do_msr_read(regs))
                 goto done;
-            rdmsr_user(regs->ecx, regs->eax, regs->edx);
+            rdmsr_safe(regs->ecx, regs->eax, regs->edx);
             break;
         }
     }
@@ -1806,28 +1803,22 @@ static inline void svm_vmexit_do_hlt(struct vmcb_struct *vmcb)
     struct vcpu *v = current;
     struct hvm_virpit *vpit = &v->domain->arch.hvm_domain.vpit;
     s_time_t  next_pit = -1, next_wakeup;
-    unsigned int inst_len;
 
-    svm_stts(v);
-    inst_len = __get_instruction_length(vmcb, INSTR_HLT, NULL);
-    __update_guest_eip(vmcb, inst_len);
+    __update_guest_eip(vmcb, 1);
 
-    if ( !v->vcpu_id ) {
+    if ( !v->vcpu_id )
         next_pit = get_pit_scheduled(v, vpit);
-    }
     next_wakeup = get_apictime_scheduled(v);
-    if ( (next_pit != -1 && next_pit < next_wakeup) || next_wakeup == -1 ) {
+    if ( (next_pit != -1 && next_pit < next_wakeup) || next_wakeup == -1 )
         next_wakeup = next_pit;
-    }
     if ( next_wakeup != - 1 )
         set_timer(&current->arch.hvm_svm.hlt_timer, next_wakeup);
-    do_sched_op(SCHEDOP_block, 0);
+    hvm_safe_block();
 }
 
 
 static inline void svm_vmexit_do_mwait(void)
 {
-    return;
 }
 
 
@@ -2434,7 +2425,6 @@ asmlinkage void svm_vmexit_handler(struct cpu_user_regs regs)
 #else
         svm_store_cpu_user_regs(&regs, v);
         domain_pause_for_debugger();  
-        do_sched_op(SCHEDOP_yield, 0);
 #endif
     }
     break;
@@ -2480,12 +2470,8 @@ asmlinkage void svm_vmexit_handler(struct cpu_user_regs regs)
         {
             v->arch.hvm_svm.injecting_event = 1;
             /* Inject #PG using Interruption-Information Fields */
-            vmcb->eventinj.bytes = 0;
-            vmcb->eventinj.fields.v = 1;
-            vmcb->eventinj.fields.ev = 1;
-            vmcb->eventinj.fields.errorcode = regs.error_code;
-            vmcb->eventinj.fields.type = EVENTTYPE_EXCEPTION;
-            vmcb->eventinj.fields.vector = TRAP_page_fault;
+            svm_inject_exception(vmcb, TRAP_page_fault, regs.error_code);
+
             v->arch.hvm_svm.cpu_cr2 = va;
             vmcb->cr2 = va;
             TRACE_3D(TRC_VMX_INT, v->domain->domain_id, 
@@ -2500,7 +2486,6 @@ asmlinkage void svm_vmexit_handler(struct cpu_user_regs regs)
         break;
 
     case VMEXIT_INTR:
-        svm_stts(v);
         raise_softirq(SCHEDULE_SOFTIRQ);
         break;
 
@@ -2562,6 +2547,7 @@ asmlinkage void svm_vmexit_handler(struct cpu_user_regs regs)
 
     case VMEXIT_CR3_WRITE:
         svm_cr_access(v, 3, TYPE_MOV_TO_CR, &regs);
+        local_flush_tlb();
         break;
 
     case VMEXIT_CR4_WRITE:
@@ -2680,18 +2666,22 @@ asmlinkage void svm_asid(void)
     struct vcpu *v = current;
     struct vmcb_struct *vmcb = v->arch.hvm_svm.vmcb;
     int core = smp_processor_id();
+    int oldcore = v->arch.hvm_svm.core; 
     /* 
      * if need to assign new asid or if switching cores, 
      * then retire asid for old core, and assign new for new core.
      */
-    if( svm_dbg_on)
-        printk("old core %d new core %d\n",(int)v->arch.hvm_svm.core,(int)core);
-
+    if( v->arch.hvm_svm.core != core ) {
+        if (svm_dbg_on)
+            printk("old core %d new core %d\n",(int)v->arch.hvm_svm.core,(int)core);
+        v->arch.hvm_svm.core = core;
+    }
     if( test_bit(ARCH_SVM_VMCB_ASSIGN_ASID, &v->arch.hvm_svm.flags) ||
-          (v->arch.hvm_svm.core != core)) {
+          (oldcore != core)) {
         if(!asidpool_assign_next(vmcb, 1, 
-	            v->arch.hvm_svm.core, core)) {
-           BUG();        	
+	            oldcore, core)) {
+            /* If we get here, we have a major problem */
+            domain_crash_synchronous();
         }
     }
     clear_bit(ARCH_SVM_VMCB_ASSIGN_ASID, &v->arch.hvm_svm.flags);

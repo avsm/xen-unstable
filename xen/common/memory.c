@@ -20,6 +20,13 @@
 #include <asm/hardirq.h>
 #include <public/memory.h>
 
+/*
+ * To allow safe resume of do_memory_op() after preemption, we need to know 
+ * at what point in the page list to resume. For this purpose I steal the 
+ * high-order bits of the @cmd parameter, which are otherwise unused and zero.
+ */
+#define START_EXTENT_SHIFT 4 /* cmd[:4] == start_extent */
+
 static long
 increase_reservation(
     struct domain *d, 
@@ -30,7 +37,7 @@ increase_reservation(
     int           *preempted)
 {
     struct page_info *page;
-    unsigned long    i;
+    unsigned long     i, mfn;
 
     if ( (extent_list != NULL) &&
          !array_access_ok(extent_list, nr_extents, sizeof(*extent_list)) )
@@ -58,9 +65,12 @@ increase_reservation(
         }
 
         /* Inform the domain of the new page's machine address. */ 
-        if ( (extent_list != NULL) &&
-             (__put_user(page_to_mfn(page), &extent_list[i]) != 0) )
-            return i;
+        if ( extent_list != NULL )
+        {
+            mfn = page_to_mfn(page);
+            if ( unlikely(__copy_to_user(&extent_list[i], &mfn, sizeof(mfn))) )
+                return i;
+        }
     }
 
     return nr_extents;
@@ -93,6 +103,9 @@ populate_physmap(
             goto out;
         }
 
+        if ( unlikely(__copy_from_user(&gpfn, &extent_list[i], sizeof(gpfn))) )
+            goto out;
+
         if ( unlikely((page = alloc_domheap_pages(
             d, extent_order, flags)) == NULL) )
         {
@@ -103,9 +116,6 @@ populate_physmap(
         }
 
         mfn = page_to_mfn(page);
-
-        if ( unlikely(__get_user(gpfn, &extent_list[i]) != 0) )
-            goto out;
 
         if ( unlikely(shadow_mode_translate(d)) )
         {
@@ -118,7 +128,7 @@ populate_physmap(
                 set_gpfn_from_mfn(mfn + j, gpfn + j);
 
             /* Inform the domain of the new page's machine address. */ 
-            if ( __put_user(mfn, &extent_list[i]) != 0 )
+            if ( unlikely(__copy_to_user(&extent_list[i], &mfn, sizeof(mfn))) )
                 goto out;
         }
     }
@@ -150,7 +160,7 @@ decrease_reservation(
             return i;
         }
 
-        if ( unlikely(__get_user(gmfn, &extent_list[i]) != 0) )
+        if ( unlikely(__copy_from_user(&gmfn, &extent_list[i], sizeof(gmfn))) )
             return i;
 
         for ( j = 0; j < (1 << extent_order); j++ )
@@ -185,17 +195,74 @@ decrease_reservation(
     return nr_extents;
 }
 
-/*
- * To allow safe resume of do_memory_op() after preemption, we need to know 
- * at what point in the page list to resume. For this purpose I steal the 
- * high-order bits of the @cmd parameter, which are otherwise unused and zero.
- */
-#define START_EXTENT_SHIFT 4 /* cmd[:4] == start_extent */
+static long
+translate_gpfn_list(
+    struct xen_translate_gpfn_list *uop, unsigned long *progress)
+{
+    struct xen_translate_gpfn_list op;
+    unsigned long i, gpfn, mfn;
+    struct domain *d;
 
-long do_memory_op(int cmd, void *arg)
+    if ( copy_from_user(&op, uop, sizeof(op)) )
+        return -EFAULT;
+
+    /* Is size too large for us to encode a continuation? */
+    if ( op.nr_gpfns > (ULONG_MAX >> START_EXTENT_SHIFT) )
+        return -EINVAL;
+
+    if ( !array_access_ok(op.gpfn_list, op.nr_gpfns, sizeof(*op.gpfn_list)) ||
+         !array_access_ok(op.mfn_list, op.nr_gpfns, sizeof(*op.mfn_list)) )
+        return -EFAULT;
+
+    if ( op.domid == DOMID_SELF )
+        op.domid = current->domain->domain_id;
+    else if ( !IS_PRIV(current->domain) )
+        return -EPERM;
+
+    if ( (d = find_domain_by_id(op.domid)) == NULL )
+        return -ESRCH;
+
+    if ( !shadow_mode_translate(d) )
+    {
+        put_domain(d);
+        return -EINVAL;
+    }
+
+    for ( i = *progress; i < op.nr_gpfns; i++ )
+    {
+        if ( hypercall_preempt_check() )
+        {
+            put_domain(d);
+            *progress = i;
+            return -EAGAIN;
+        }
+
+        if ( unlikely(__copy_from_user(&gpfn, &op.gpfn_list[i],
+                                       sizeof(gpfn))) )
+        {
+            put_domain(d);
+            return -EFAULT;
+        }
+
+        mfn = gmfn_to_mfn(d, gpfn);
+
+        if ( unlikely(__copy_to_user(&op.mfn_list[i], &mfn,
+                                     sizeof(mfn))) )
+        {
+            put_domain(d);
+            return -EFAULT;
+        }
+    }
+
+    put_domain(d);
+    return 0;
+}
+
+long do_memory_op(unsigned long cmd, void *arg)
 {
     struct domain *d;
-    int rc, start_extent, op, flags = 0, preempted = 0;
+    int rc, op, flags = 0, preempted = 0;
+    unsigned long start_extent, progress;
     struct xen_memory_reservation reservation;
     domid_t domid;
 
@@ -208,6 +275,10 @@ long do_memory_op(int cmd, void *arg)
     case XENMEM_populate_physmap:
         if ( copy_from_user(&reservation, arg, sizeof(reservation)) )
             return -EFAULT;
+
+        /* Is size too large for us to encode a continuation? */
+        if ( reservation.nr_extents > (ULONG_MAX >> START_EXTENT_SHIFT) )
+            return -EINVAL;
 
         start_extent = cmd >> START_EXTENT_SHIFT;
         if ( unlikely(start_extent > reservation.nr_extents) )
@@ -282,7 +353,7 @@ long do_memory_op(int cmd, void *arg)
 
     case XENMEM_current_reservation:
     case XENMEM_maximum_reservation:
-        if ( get_user(domid, (domid_t *)arg) )
+        if ( copy_from_user(&domid, (domid_t *)arg, sizeof(domid)) )
             return -EFAULT;
 
         if ( likely((domid = (unsigned long)arg) == DOMID_SELF) )
@@ -297,6 +368,16 @@ long do_memory_op(int cmd, void *arg)
         if ( unlikely(domid != DOMID_SELF) )
             put_domain(d);
 
+        break;
+
+    case XENMEM_translate_gpfn_list:
+        progress = cmd >> START_EXTENT_SHIFT;
+        rc = translate_gpfn_list(arg, &progress);
+        if ( rc == -EAGAIN )
+            return hypercall2_create_continuation(
+                __HYPERVISOR_memory_op,
+                op | (progress << START_EXTENT_SHIFT),
+                arg);
         break;
 
     default:

@@ -1,7 +1,7 @@
 #
 # Automatically generated make config: don't edit
-# Linux kernel version: 2.6.16-rc2-xenU
-# Mon Feb  6 23:16:07 2006
+# Linux kernel version: 2.6.16-rc3-xen0
+# Thu Feb 16 22:53:43 2006
 #
 CONFIG_X86_32=y
 CONFIG_SEMAPHORE_SLEEPERS=y
@@ -16,7 +16,6 @@ CONFIG_DMI=y
 # Code maturity level options
 #
 CONFIG_EXPERIMENTAL=y
-CONFIG_CLEAN_COMPILE=y
 CONFIG_LOCK_KERNEL=y
 CONFIG_INIT_ENV_ARG_LIMIT=32
 
@@ -187,6 +186,7 @@ CONFIG_HOTPLUG_CPU=y
 # Bus options (PCI, PCMCIA, EISA, MCA, ISA)
 #
 # CONFIG_PCI is not set
+CONFIG_ISA_DMA_API=y
 # CONFIG_SCx200 is not set
 
 #
@@ -213,6 +213,7 @@ CONFIG_NET=y
 #
 # Networking options
 #
+# CONFIG_NETDEBUG is not set
 CONFIG_PACKET=y
 # CONFIG_PACKET_MMAP is not set
 CONFIG_UNIX=y
@@ -857,6 +858,7 @@ CONFIG_NO_IDLE_HZ=y
 #
 # CONFIG_XEN_PRIVILEGED_GUEST is not set
 CONFIG_XEN_UNPRIVILEGED_GUEST=y
+# CONFIG_XEN_PCIDEV_BACKEND is not set
 # CONFIG_XEN_BLKDEV_BACKEND is not set
 # CONFIG_XEN_NETDEV_BACKEND is not set
 # CONFIG_XEN_TPMDEV_BACKEND is not set
