@@ -18,6 +18,7 @@
 #include <xen/acpi.h>
 
 #include <asm/dom_fw.h>
+#include <public/sched.h>
 
 static struct ia64_boot_param *dom_fw_init(struct domain *, char *,int,char *,int);
 extern unsigned long domain_mpa_to_imva(struct domain *,unsigned long mpaddr);
@@ -78,7 +79,7 @@ static void dom_fw_pal_hypercall_patch(struct domain *d, unsigned long paddr)
 // FIXME: This is really a hack: Forcing the boot parameter block
 // at domain mpaddr 0 page, then grabbing only the low bits of the
 // Xen imva, which is the offset into the page
-unsigned long dom_fw_setup(struct domain *d, char *args, int arglen)
+unsigned long dom_fw_setup(struct domain *d, const char *args, int arglen)
 {
 	struct ia64_boot_param *bp;
 
@@ -106,12 +107,9 @@ sal_emulator (long index, unsigned long in1, unsigned long in2,
 	long r11 = 0;
 	long status;
 
-	/*
-	 * Don't do a "switch" here since that gives us code that
-	 * isn't self-relocatable.
-	 */
 	status = 0;
-	if (index == SAL_FREQ_BASE) {
+	switch (index) {
+	    case SAL_FREQ_BASE:
 		if (!running_on_sim)
 			status = ia64_sal_freq_base(in1,&r9,&r10);
 		else switch (in1) {
@@ -131,15 +129,18 @@ sal_emulator (long index, unsigned long in1, unsigned long in2,
 			status = -1;
 			break;
 		}
-	} else if (index == SAL_PCI_CONFIG_READ) {
+		break;
+	    case SAL_PCI_CONFIG_READ:
 		if (current->domain == dom0) {
 			u64 value;
 			// note that args 2&3 are swapped!!
 			status = ia64_sal_pci_config_read(in1,in3,in2,&value);
 			r9 = value;
 		}
-		else printf("NON-PRIV DOMAIN CALLED SAL_PCI_CONFIG_READ\n");
-	} else if (index == SAL_PCI_CONFIG_WRITE) {
+		else
+		     printf("NON-PRIV DOMAIN CALLED SAL_PCI_CONFIG_READ\n");
+		break;
+	    case SAL_PCI_CONFIG_WRITE:
 		if (current->domain == dom0) {
 			if (((in1 & ~0xffffffffUL) && (in4 == 0)) ||
 			    (in4 > 1) ||
@@ -149,28 +150,40 @@ sal_emulator (long index, unsigned long in1, unsigned long in2,
 			// note that args are in a different order!!
 			status = ia64_sal_pci_config_write(in1,in4,in2,in3);
 		}
-		else printf("NON-PRIV DOMAIN CALLED SAL_PCI_CONFIG_WRITE\n");
-	} else if (index == SAL_SET_VECTORS) {
+		else
+		     printf("NON-PRIV DOMAIN CALLED SAL_PCI_CONFIG_WRITE\n");
+		break;
+	    case SAL_SET_VECTORS:
 		printf("*** CALLED SAL_SET_VECTORS.  IGNORED...\n");
-	} else if (index == SAL_GET_STATE_INFO) {
+		break;
+	    case SAL_GET_STATE_INFO:
 		printf("*** CALLED SAL_GET_STATE_INFO.  IGNORED...\n");
-	} else if (index == SAL_GET_STATE_INFO_SIZE) {
+		break;
+	    case SAL_GET_STATE_INFO_SIZE:
 		printf("*** CALLED SAL_GET_STATE_INFO_SIZE.  IGNORED...\n");
-	} else if (index == SAL_CLEAR_STATE_INFO) {
+		break;
+	    case SAL_CLEAR_STATE_INFO:
 		printf("*** CALLED SAL_CLEAR_STATE_INFO.  IGNORED...\n");
-	} else if (index == SAL_MC_RENDEZ) {
+		break;
+	    case SAL_MC_RENDEZ:
 		printf("*** CALLED SAL_MC_RENDEZ.  IGNORED...\n");
-	} else if (index == SAL_MC_SET_PARAMS) {
+		break;
+	    case SAL_MC_SET_PARAMS:
 		printf("*** CALLED SAL_MC_SET_PARAMS.  IGNORED...\n");
-	} else if (index == SAL_CACHE_FLUSH) {
+		break;
+	    case SAL_CACHE_FLUSH:
 		printf("*** CALLED SAL_CACHE_FLUSH.  IGNORED...\n");
-	} else if (index == SAL_CACHE_INIT) {
+		break;
+	    case SAL_CACHE_INIT:
 		printf("*** CALLED SAL_CACHE_INIT.  IGNORED...\n");
-	} else if (index == SAL_UPDATE_PAL) {
+		break;
+	    case SAL_UPDATE_PAL:
 		printf("*** CALLED SAL_UPDATE_PAL.  IGNORED...\n");
-	} else {
+		break;
+	    default:
 		printf("*** CALLED SAL_ WITH UNKNOWN INDEX.  IGNORED...\n");
 		status = -1;
+		break;
 	}
 	return ((struct sal_ret_values) {status, r9, r10, r11});
 }
@@ -183,8 +196,9 @@ xen_pal_emulator(unsigned long index, u64 in1, u64 in2, u64 in3)
 	unsigned long r11 = 0;
 	long status = -1;
 
-	if (running_on_sim) return pal_emulator_static(index);
-	printk("xen_pal_emulator: index=%lu\n", index);
+	if (running_on_sim)
+		return pal_emulator_static(index);
+
 	// pal code must be mapped by a TR when pal is called, however
 	// calls are rare enough that we will map it lazily rather than
 	// at every context switch
@@ -311,7 +325,8 @@ xen_pal_emulator(unsigned long index, u64 in1, u64 in2, u64 in3)
 			    (*efi.reset_system)(EFI_RESET_SHUTDOWN,0,0,NULL);
 		    }
 		    else
-			    domain_shutdown (current->domain, 0);
+			    domain_shutdown (current->domain,
+					     SHUTDOWN_poweroff);
 		    break;
 	    default:
 		printk("xen_pal_emulator: UNIMPLEMENTED PAL CALL %lu!!!!\n",
@@ -334,28 +349,31 @@ static void print_md(efi_memory_desc_t *md)
 #endif
 }
 
-#define LSAPIC_NUM 16	// TEMP
-static u32 lsapic_flag=1;
 
-/* Provide only one LP to guest */
+static u32 lsapic_nbr;
+
+/* Modify lsapic table.  Provides LPs.  */
 static int 
 acpi_update_lsapic (acpi_table_entry_header *header, const unsigned long end)
 {
 	struct acpi_table_lsapic *lsapic;
+	int enable;
 
 	lsapic = (struct acpi_table_lsapic *) header;
 	if (!lsapic)
 		return -EINVAL;
 
-	if (lsapic->flags.enabled && lsapic_flag) {
+	if (lsapic_nbr < MAX_VIRT_CPUS && dom0->vcpu[lsapic_nbr] != NULL)
+		enable = 1;
+	else
+		enable = 0;
+	if (lsapic->flags.enabled && enable) {
 		printk("enable lsapic entry: 0x%lx\n", (u64)lsapic);
-		lsapic_flag = 0; /* disable all the following processros */
+		lsapic_nbr++;
 	} else if (lsapic->flags.enabled) {
 		printk("DISABLE lsapic entry: 0x%lx\n", (u64)lsapic);
 		lsapic->flags.enabled = 0;
-	} else
-		printk("lsapic entry is already disabled: 0x%lx\n", (u64)lsapic);
-
+	}
 	return 0;
 }
 
@@ -388,6 +406,7 @@ acpi_update_madt_checksum (unsigned long phys_addr, unsigned long size)
 /* base is physical address of acpi table */
 static void touch_acpi_table(void)
 {
+	lsapic_nbr = 0;
 	if (acpi_table_parse_madt(ACPI_MADT_LSAPIC, acpi_update_lsapic, 0) < 0)
 		printk("Error parsing MADT - no LAPIC entires\n");
 	acpi_table_parse(ACPI_APIC, acpi_update_madt_checksum);
