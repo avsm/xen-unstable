@@ -23,7 +23,6 @@
 extern void getreg(unsigned long regnum, unsigned long *val, int *nat, struct pt_regs *regs);
 extern void setreg(unsigned long regnum, unsigned long val, int nat, struct pt_regs *regs);
 extern void panic_domain(struct pt_regs *, const char *, ...);
-extern int set_metaphysical_rr0(void);
 extern unsigned long translate_domain_pte(UINT64,UINT64,UINT64);
 extern unsigned long translate_domain_mpaddr(unsigned long);
 extern void ia64_global_tlb_purge(UINT64 start, UINT64 end, UINT64 nbits);
@@ -172,10 +171,10 @@ void vcpu_set_metaphysical_mode(VCPU *vcpu, BOOLEAN newmode)
 {
 	/* only do something if mode changes */
 	if (!!newmode ^ !!PSCB(vcpu,metaphysical_mode)) {
+		PSCB(vcpu,metaphysical_mode) = newmode;
 		if (newmode) set_metaphysical_rr0();
 		else if (PSCB(vcpu,rrs[0]) != -1)
 			set_one_rr(0, PSCB(vcpu,rrs[0]));
-		PSCB(vcpu,metaphysical_mode) = newmode;
 	}
 }
 
@@ -197,7 +196,8 @@ IA64FAULT vcpu_reset_psr_sm(VCPU *vcpu, UINT64 imm24)
 	ipsr = (struct ia64_psr *)&regs->cr_ipsr;
 	imm = *(struct ia64_psr *)&imm24;
 	// interrupt flag
-	if (imm.i) PSCB(vcpu,interrupt_delivery_enabled) = 0;
+	if (imm.i)
+	    vcpu->vcpu_info->evtchn_upcall_mask = 1;
 	if (imm.ic)  PSCB(vcpu,interrupt_collection_enabled) = 0;
 	// interrupt collection flag
 	//if (imm.ic) PSCB(vcpu,interrupt_delivery_enabled) = 0;
@@ -232,7 +232,7 @@ IA64FAULT vcpu_set_psr_dt(VCPU *vcpu)
 
 IA64FAULT vcpu_set_psr_i(VCPU *vcpu)
 {
-	PSCB(vcpu,interrupt_delivery_enabled) = 1;
+	vcpu->vcpu_info->evtchn_upcall_mask = 0;
 	PSCB(vcpu,interrupt_collection_enabled) = 1;
 	return IA64_NO_FAULT;
 }
@@ -261,11 +261,11 @@ IA64FAULT vcpu_set_psr_sm(VCPU *vcpu, UINT64 imm24)
 	}
 	if (imm.sp) { ipsr->sp = 1; psr.sp = 1; }
 	if (imm.i) {
-		if (!PSCB(vcpu,interrupt_delivery_enabled)) {
+		if (vcpu->vcpu_info->evtchn_upcall_mask) {
 //printf("vcpu_set_psr_sm: psr.ic 0->1 ");
 			enabling_interrupts = 1;
 		}
-		PSCB(vcpu,interrupt_delivery_enabled) = 1;
+		vcpu->vcpu_info->evtchn_upcall_mask = 0;
 	}
 	if (imm.ic)  PSCB(vcpu,interrupt_collection_enabled) = 1;
 	// TODO: do this faster
@@ -312,9 +312,9 @@ IA64FAULT vcpu_set_psr_l(VCPU *vcpu, UINT64 val)
 	if (newpsr.up) { ipsr->up = 1; psr.up = 1; }
 	if (newpsr.sp) { ipsr->sp = 1; psr.sp = 1; }
 	if (newpsr.i) {
-		if (!PSCB(vcpu,interrupt_delivery_enabled))
+		if (vcpu->vcpu_info->evtchn_upcall_mask)
 			enabling_interrupts = 1;
-		PSCB(vcpu,interrupt_delivery_enabled) = 1;
+		vcpu->vcpu_info->evtchn_upcall_mask = 0;
 	}
 	if (newpsr.ic)  PSCB(vcpu,interrupt_collection_enabled) = 1;
 	if (newpsr.mfl) { ipsr->mfl = 1; psr.mfl = 1; }
@@ -340,7 +340,7 @@ IA64FAULT vcpu_get_psr(VCPU *vcpu, UINT64 *pval)
 
 	newpsr = *(struct ia64_psr *)&regs->cr_ipsr;
 	if (newpsr.cpl == 2) newpsr.cpl = 0;
-	if (PSCB(vcpu,interrupt_delivery_enabled)) newpsr.i = 1;
+	if (!vcpu->vcpu_info->evtchn_upcall_mask) newpsr.i = 1;
 	else newpsr.i = 0;
 	if (PSCB(vcpu,interrupt_collection_enabled)) newpsr.ic = 1;
 	else newpsr.ic = 0;
@@ -360,7 +360,7 @@ BOOLEAN vcpu_get_psr_ic(VCPU *vcpu)
 
 BOOLEAN vcpu_get_psr_i(VCPU *vcpu)
 {
-	return !!PSCB(vcpu,interrupt_delivery_enabled);
+	return !vcpu->vcpu_info->evtchn_upcall_mask;
 }
 
 UINT64 vcpu_get_ipsr_int_state(VCPU *vcpu,UINT64 prevpsr)
@@ -373,7 +373,7 @@ UINT64 vcpu_get_ipsr_int_state(VCPU *vcpu,UINT64 prevpsr)
 	psr.ia64_psr.be = 0; if (dcr & IA64_DCR_BE) psr.ia64_psr.be = 1;
 	psr.ia64_psr.pp = 0; if (dcr & IA64_DCR_PP) psr.ia64_psr.pp = 1;
 	psr.ia64_psr.ic = PSCB(vcpu,interrupt_collection_enabled);
-	psr.ia64_psr.i = PSCB(vcpu,interrupt_delivery_enabled);
+	psr.ia64_psr.i = !vcpu->vcpu_info->evtchn_upcall_mask;
 	psr.ia64_psr.bn = PSCB(vcpu,banknum);
 	psr.ia64_psr.dt = 1; psr.ia64_psr.it = 1; psr.ia64_psr.rt = 1;
 	if (psr.ia64_psr.cpl == 2) psr.ia64_psr.cpl = 0; // !!!! fool domain
@@ -822,46 +822,26 @@ IA64FAULT vcpu_get_eoi(VCPU *vcpu, UINT64 *pval)
 
 IA64FAULT vcpu_get_irr0(VCPU *vcpu, UINT64 *pval)
 {
-#ifndef IRR_USE_FIXED
-	printk("vcpu_get_irr: called, not implemented yet\n");
-	return IA64_ILLOP_FAULT;
-#else
-	*pval = vcpu->irr[0];
+	*pval = PSCBX(vcpu, irr[0]);
 	return (IA64_NO_FAULT);
-#endif
 }
 
 IA64FAULT vcpu_get_irr1(VCPU *vcpu, UINT64 *pval)
 {
-#ifndef IRR_USE_FIXED
-	printk("vcpu_get_irr: called, not implemented yet\n");
-	return IA64_ILLOP_FAULT;
-#else
-	*pval = vcpu->irr[1];
+	*pval = PSCBX(vcpu, irr[1]);
 	return (IA64_NO_FAULT);
-#endif
 }
 
 IA64FAULT vcpu_get_irr2(VCPU *vcpu, UINT64 *pval)
 {
-#ifndef IRR_USE_FIXED
-	printk("vcpu_get_irr: called, not implemented yet\n");
-	return IA64_ILLOP_FAULT;
-#else
-	*pval = vcpu->irr[2];
+	*pval = PSCBX(vcpu, irr[2]);
 	return (IA64_NO_FAULT);
-#endif
 }
 
 IA64FAULT vcpu_get_irr3(VCPU *vcpu, UINT64 *pval)
 {
-#ifndef IRR_USE_FIXED
-	printk("vcpu_get_irr: called, not implemented yet\n");
-	return IA64_ILLOP_FAULT;
-#else
-	*pval = vcpu->irr[3];
+	*pval = PSCBX(vcpu, irr[3]);
 	return (IA64_NO_FAULT);
-#endif
 }
 
 IA64FAULT vcpu_get_itv(VCPU *vcpu, UINT64 *pval)
@@ -931,7 +911,7 @@ IA64FAULT vcpu_set_eoi(VCPU *vcpu, UINT64 val)
 	bits &= ~(1L << bitnum);
 	*p = bits;
 	/* clearing an eoi bit may unmask another pending interrupt... */
-	if (PSCB(vcpu,interrupt_delivery_enabled)) { // but only if enabled...
+	if (!vcpu->vcpu_info->evtchn_upcall_mask) { // but only if enabled...
 		// worry about this later... Linux only calls eoi
 		// with interrupts disabled
 		printf("Trying to EOI interrupt with interrupts enabled\n");
@@ -1186,7 +1166,6 @@ IA64FAULT vcpu_rfi(VCPU *vcpu)
 
 	psr.i64 = PSCB(vcpu,ipsr);
 	if (psr.ia64_psr.cpl < 3) psr.ia64_psr.cpl = 2;
-	if (psr.ia64_psr.i) PSCB(vcpu,interrupt_delivery_enabled) = 1;
 	int_enable = psr.ia64_psr.i;
 	if (psr.ia64_psr.ic)  PSCB(vcpu,interrupt_collection_enabled) = 1;
 	if (psr.ia64_psr.dt && psr.ia64_psr.rt && psr.ia64_psr.it) vcpu_set_metaphysical_mode(vcpu,FALSE);
@@ -1218,7 +1197,7 @@ IA64FAULT vcpu_rfi(VCPU *vcpu)
 	}
 	PSCB(vcpu,interrupt_collection_enabled) = 1;
 	vcpu_bsw1(vcpu);
-	PSCB(vcpu,interrupt_delivery_enabled) = int_enable;
+	vcpu->vcpu_info->evtchn_upcall_mask = !int_enable;
 	return (IA64_NO_FAULT);
 }
 
@@ -1273,10 +1252,24 @@ unsigned long recover_to_break_fault_count = 0;
 
 int warn_region0_address = 0; // FIXME later: tie to a boot parameter?
 
+// FIXME: also need to check && (!trp->key || vcpu_pkr_match(trp->key))
+static inline int vcpu_match_tr_entry_no_p(TR_ENTRY *trp, UINT64 ifa, UINT64 rid)
+{
+	return trp->rid == rid 
+		&& ifa >= trp->vadr
+		&& ifa <= (trp->vadr + (1L << trp->ps) - 1);
+}
+
+static inline int vcpu_match_tr_entry(TR_ENTRY *trp, UINT64 ifa, UINT64 rid)
+{
+	return trp->pte.p && vcpu_match_tr_entry_no_p(trp, ifa, rid);
+}
+
 IA64FAULT vcpu_translate(VCPU *vcpu, UINT64 address, BOOLEAN is_data, BOOLEAN in_tpa, UINT64 *pteval, UINT64 *itir, UINT64 *iha)
 {
 	unsigned long region = address >> 61;
-	unsigned long pta, pte, rid, rr;
+	unsigned long pta, rid, rr;
+	union pte_flags pte;
 	int i;
 	TR_ENTRY *trp;
 
@@ -1296,6 +1289,7 @@ IA64FAULT vcpu_translate(VCPU *vcpu, UINT64 address, BOOLEAN is_data, BOOLEAN in
 			 */           
 			printk("vcpu_translate: bad physical address: 0x%lx\n",
 			       address);
+
 		} else {
 			*pteval = (address & _PAGE_PPN_MASK) | __DIRTY_BITS |
 			          _PAGE_PL_2 | _PAGE_AR_RWX;
@@ -1320,7 +1314,7 @@ IA64FAULT vcpu_translate(VCPU *vcpu, UINT64 address, BOOLEAN is_data, BOOLEAN in
 		if (vcpu_quick_region_check(vcpu->arch.dtr_regions,address)) {
 			for (trp = vcpu->arch.dtrs, i = NDTRS; i; i--, trp++) {
 				if (vcpu_match_tr_entry(trp,address,rid)) {
-					*pteval = trp->page_flags;
+					*pteval = trp->pte.val;
 					*itir = trp->itir;
 					tr_translate_count++;
 					return IA64_NO_FAULT;
@@ -1333,7 +1327,7 @@ IA64FAULT vcpu_translate(VCPU *vcpu, UINT64 address, BOOLEAN is_data, BOOLEAN in
 		if (vcpu_quick_region_check(vcpu->arch.itr_regions,address)) {
 			for (trp = vcpu->arch.itrs, i = NITRS; i; i--, trp++) {
 				if (vcpu_match_tr_entry(trp,address,rid)) {
-					*pteval = trp->page_flags;
+					*pteval = trp->pte.val;
 					*itir = trp->itir;
 					tr_translate_count++;
 					return IA64_NO_FAULT;
@@ -1345,12 +1339,14 @@ IA64FAULT vcpu_translate(VCPU *vcpu, UINT64 address, BOOLEAN is_data, BOOLEAN in
 	/* check 1-entry TLB */
 	// FIXME?: check dtlb for inst accesses too, else bad things happen?
 	trp = &vcpu->arch.dtlb;
-	if (/* is_data && */ vcpu_match_tr_entry(trp,address,rid)) {
-		if (vcpu->domain==dom0 && !in_tpa) *pteval = trp->page_flags;
+	pte = trp->pte;
+	if (/* is_data && */ pte.p
+	    && vcpu_match_tr_entry_no_p(trp,address,rid)) {
+		if (vcpu->domain==dom0 && !in_tpa) *pteval = pte.val;
 		else *pteval = vcpu->arch.dtlb_pte;
 		*itir = trp->itir;
 		dtlb_translate_count++;
-		return IA64_NO_FAULT;
+		return IA64_USE_TLB;
 	}
 
 	/* check guest VHPT */
@@ -1371,7 +1367,8 @@ IA64FAULT vcpu_translate(VCPU *vcpu, UINT64 address, BOOLEAN is_data, BOOLEAN in
 	if (((address ^ pta) & ((itir_mask(pta) << 3) >> 3)) == 0)
 		return (is_data ? IA64_DATA_TLB_VECTOR : IA64_INST_TLB_VECTOR);
 
-	if (__copy_from_user(&pte, (void *)(*iha), sizeof(pte)) != 0)
+	if (!__access_ok (*iha)
+	    || __copy_from_user(&pte, (void *)(*iha), sizeof(pte)) != 0)
 		// virtual VHPT walker "missed" in TLB
 		return IA64_VHPT_FAULT;
 
@@ -1380,12 +1377,12 @@ IA64FAULT vcpu_translate(VCPU *vcpu, UINT64 address, BOOLEAN is_data, BOOLEAN in
 	* instead of inserting a not-present translation, this allows
 	* vectoring directly to the miss handler.
 	*/
-	if (!(pte & _PAGE_P))
+	if (!pte.p)
 		return (is_data ? IA64_DATA_TLB_VECTOR : IA64_INST_TLB_VECTOR);
 
 	/* found mapping in guest VHPT! */
 	*itir = rr & RR_PS_MASK;
-	*pteval = pte;
+	*pteval = pte.val;
 	vhpt_translate_count++;
 	return IA64_NO_FAULT;
 }
@@ -1396,7 +1393,7 @@ IA64FAULT vcpu_tpa(VCPU *vcpu, UINT64 vadr, UINT64 *padr)
 	IA64FAULT fault;
 
 	fault = vcpu_translate(vcpu, vadr, TRUE, TRUE, &pteval, &itir, &iha);
-	if (fault == IA64_NO_FAULT)
+	if (fault == IA64_NO_FAULT || fault == IA64_USE_TLB)
 	{
 		mask = itir_mask(itir);
 		*padr = (pteval & _PAGE_PPN_MASK & mask) | (vadr & ~mask);
@@ -1683,24 +1680,27 @@ IA64FAULT vcpu_set_pkr(VCPU *vcpu, UINT64 reg, UINT64 val)
 
 static inline void vcpu_purge_tr_entry(TR_ENTRY *trp)
 {
-	trp->p = 0;
+	trp->pte.val = 0;
 }
 
 static void vcpu_set_tr_entry(TR_ENTRY *trp, UINT64 pte, UINT64 itir, UINT64 ifa)
 {
 	UINT64 ps;
+	union pte_flags new_pte;
 
 	trp->itir = itir;
 	trp->rid = VCPU(current,rrs[ifa>>61]) & RR_RID_MASK;
-	trp->p = 1;
 	ps = trp->ps;
-	trp->page_flags = pte;
-	if (trp->pl < 2) trp->pl = 2;
+	new_pte.val = pte;
+	if (new_pte.pl < 2) new_pte.pl = 2;
 	trp->vadr = ifa & ~0xfff;
 	if (ps > 12) { // "ignore" relevant low-order bits
-		trp->ppn &= ~((1UL<<(ps-12))-1);
+		new_pte.ppn &= ~((1UL<<(ps-12))-1);
 		trp->vadr &= ~((1UL<<ps)-1);
 	}
+
+	/* Atomic write.  */
+	trp->pte.val = new_pte.val;
 }
 
 IA64FAULT vcpu_itr_d(VCPU *vcpu, UINT64 slot, UINT64 pte,
@@ -1871,10 +1871,32 @@ IA64FAULT vcpu_ptc_ga(VCPU *vcpu,UINT64 vadr,UINT64 addr_range)
 	// if (Xen address) return(IA64_ILLOP_FAULT);
 	// FIXME: ??breaks if domain PAGE_SIZE < Xen PAGE_SIZE
 //printf("######## vcpu_ptc_ga(%p,%p) ##############\n",vadr,addr_range);
+
+#ifdef CONFIG_XEN_SMP
+	struct domain *d = vcpu->domain;
+	struct vcpu *v;
+
+	for_each_vcpu (d, v) {
+		if (v == vcpu)
+			continue;
+
+		/* Purge TC entries.
+		   FIXME: clear only if match.  */
+		vcpu_purge_tr_entry(&PSCBX(vcpu,dtlb));
+		vcpu_purge_tr_entry(&PSCBX(vcpu,itlb));
+
+#ifdef VHPT_GLOBAL
+		/* Invalidate VHPT entries.  */
+		vhpt_flush_address_remote (v->processor, vadr, addr_range);
+#endif
+	}
+#endif
+
 #ifdef VHPT_GLOBAL
 	vhpt_flush_address(vadr,addr_range);
 #endif
 	ia64_global_tlb_purge(vadr,vadr+addr_range,PAGE_SHIFT);
+	/* Purge tc.  */
 	vcpu_purge_tr_entry(&PSCBX(vcpu,dtlb));
 	vcpu_purge_tr_entry(&PSCBX(vcpu,itlb));
 	return IA64_NO_FAULT;

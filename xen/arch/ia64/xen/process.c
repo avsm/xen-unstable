@@ -30,21 +30,19 @@
 #include <asm/vcpu.h>
 #include <asm/ia64_int.h>
 #include <asm/dom_fw.h>
+#include <asm/vhpt.h>
 #include "hpsim_ssc.h"
 #include <xen/multicall.h>
 #include <asm/debugger.h>
 
 extern void die_if_kernel(char *str, struct pt_regs *regs, long err);
 /* FIXME: where these declarations shold be there ? */
-extern void load_region_regs(struct vcpu *);
 extern void panic_domain(struct pt_regs *, const char *, ...);
 extern long platform_is_hp_ski(void);
 extern int ia64_hyperprivop(unsigned long, REGS *);
 extern int ia64_hypercall(struct pt_regs *regs);
 extern void vmx_do_launch(struct vcpu *);
 extern unsigned long lookup_domain_mpa(struct domain *,unsigned long);
-
-extern unsigned long dom0_start, dom0_size;
 
 #define IA64_PSR_CPL1	(__IA64_UL(1) << IA64_PSR_CPL1_BIT)
 // note IA64_PSR_PK removed from following, why is this necessary?
@@ -63,11 +61,15 @@ extern unsigned long dom0_start, dom0_size;
 
 void schedule_tail(struct vcpu *prev)
 {
+	extern char ia64_ivt;
 	context_saved(prev);
 
 	if (VMX_DOMAIN(current)) {
 		vmx_do_launch(current);
 	} else {
+		ia64_set_iva(&ia64_ivt);
+        	ia64_set_pta(VHPT_ADDR | (1 << 8) | (VHPT_SIZE_LOG2 << 2) |
+		        VHPT_ENABLED);
 		load_region_regs(current);
 		vcpu_load_kernel_regs(current);
 	}
@@ -98,9 +100,16 @@ unsigned long translate_domain_pte(unsigned long pteval,
 		}
 	}
 	else if ((mpaddr >> PAGE_SHIFT) > d->max_pages) {
-		if ((mpaddr & ~0x1fffL ) != (1L << 40))
-		printf("translate_domain_pte: bad mpa=0x%lx (> 0x%lx),vadr=0x%lx,pteval=0x%lx,itir=0x%lx\n",
-			mpaddr, (unsigned long) d->max_pages<<PAGE_SHIFT, address, pteval, itir);
+		/* Address beyond the limit.  However the grant table is
+		   also beyond the limit.  Display a message if not in the
+		   grant table.  */
+		if (mpaddr >= IA64_GRANT_TABLE_PADDR
+		    && mpaddr < (IA64_GRANT_TABLE_PADDR 
+				 + (ORDER_GRANT_FRAMES << PAGE_SHIFT)))
+			printf("translate_domain_pte: bad mpa=0x%lx (> 0x%lx),"
+			       "vadr=0x%lx,pteval=0x%lx,itir=0x%lx\n",
+			       mpaddr, (unsigned long)d->max_pages<<PAGE_SHIFT,
+			       address, pteval, itir);
 		tdpfoo();
 	}
 	pteval2 = lookup_domain_mpa(d,mpaddr);
@@ -199,9 +208,9 @@ void reflect_interruption(unsigned long isr, struct pt_regs *regs, unsigned long
 #ifdef CONFIG_SMP
 #warning "SMP FIXME: sharedinfo doesn't handle smp yet, need page per vcpu"
 #endif
-	regs->r31 = (unsigned long) &(((mapped_regs_t *)SHARED_ARCHINFO_ADDR)->ipsr);
+	regs->r31 = XSI_IPSR;
 
-	PSCB(v,interrupt_delivery_enabled) = 0;
+	v->vcpu_info->evtchn_upcall_mask = 1;
 	PSCB(v,interrupt_collection_enabled) = 0;
 
 	inc_slow_reflect_count(vector);
@@ -278,12 +287,24 @@ void ia64_do_page_fault (unsigned long address, unsigned long isr, struct pt_reg
 		return;
 	}
 
+ again:
 	fault = vcpu_translate(current,address,is_data,0,&pteval,&itir,&iha);
-	if (fault == IA64_NO_FAULT) {
+	if (fault == IA64_NO_FAULT || fault == IA64_USE_TLB) {
 		pteval = translate_domain_pte(pteval,address,itir);
 		vcpu_itc_no_srlz(current,is_data?2:1,address,pteval,-1UL,(itir>>2)&0x3f);
+		if (fault == IA64_USE_TLB && !current->arch.dtlb.pte.p) {
+			/* dtlb has been purged in-between.  This dtlb was
+			   matching.  Undo the work.  */
+#ifdef VHPT_GLOBAL
+			vhpt_flush_address (address, 1);
+#endif
+			ia64_ptcl(address, 1<<2);
+			ia64_srlz_i();
+			goto again;
+		}
 		return;
 	}
+
 	if (!user_mode (regs)) {
 		/* The fault occurs inside Xen.  */
 		if (!ia64_done_with_exception(regs)) {

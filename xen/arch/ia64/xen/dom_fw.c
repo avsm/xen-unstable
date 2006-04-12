@@ -20,7 +20,7 @@
 #include <asm/dom_fw.h>
 #include <public/sched.h>
 
-static struct ia64_boot_param *dom_fw_init(struct domain *, char *,int,char *,int);
+static struct ia64_boot_param *dom_fw_init(struct domain *, const char *,int,char *,int);
 extern unsigned long domain_mpa_to_imva(struct domain *,unsigned long mpaddr);
 extern struct domain *dom0;
 extern unsigned long dom0_start;
@@ -157,13 +157,17 @@ sal_emulator (long index, unsigned long in1, unsigned long in2,
 		printf("*** CALLED SAL_SET_VECTORS.  IGNORED...\n");
 		break;
 	    case SAL_GET_STATE_INFO:
-		printf("*** CALLED SAL_GET_STATE_INFO.  IGNORED...\n");
+		/* No more info.  */
+		status = -5;
+		r9 = 0;
 		break;
 	    case SAL_GET_STATE_INFO_SIZE:
-		printf("*** CALLED SAL_GET_STATE_INFO_SIZE.  IGNORED...\n");
+		/* Return a dummy size.  */
+		status = 0;
+		r9 = 128;
 		break;
 	    case SAL_CLEAR_STATE_INFO:
-		printf("*** CALLED SAL_CLEAR_STATE_INFO.  IGNORED...\n");
+		/* Noop.  */
 		break;
 	    case SAL_MC_RENDEZ:
 		printf("*** CALLED SAL_MC_RENDEZ.  IGNORED...\n");
@@ -172,7 +176,9 @@ sal_emulator (long index, unsigned long in1, unsigned long in2,
 		printf("*** CALLED SAL_MC_SET_PARAMS.  IGNORED...\n");
 		break;
 	    case SAL_CACHE_FLUSH:
-		printf("*** CALLED SAL_CACHE_FLUSH.  IGNORED...\n");
+	        /*  The best we can do is to flush with fc all the domain.  */
+	        domain_cache_flush (current->domain, in1 == 4 ? 1 : 0);
+		status = 0;
 		break;
 	    case SAL_CACHE_INIT:
 		printf("*** CALLED SAL_CACHE_INIT.  IGNORED...\n");
@@ -553,7 +559,7 @@ dom_fw_fake_acpi(struct domain *d, struct fake_acpi_tables *tables)
 }
 
 static struct ia64_boot_param *
-dom_fw_init (struct domain *d, char *args, int arglen, char *fw_mem, int fw_mem_size)
+dom_fw_init (struct domain *d, const char *args, int arglen, char *fw_mem, int fw_mem_size)
 {
 	efi_system_table_t *efi_systab;
 	efi_runtime_services_t *efi_runtime;

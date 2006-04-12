@@ -157,40 +157,45 @@ long arch_do_dom0_op(dom0_op_t *op, GUEST_HANDLE(dom0_op_t) u_dom0_op)
      */
     case DOM0_GETMEMLIST:
     {
-        unsigned long i;
+        unsigned long i = 0;
         struct domain *d = find_domain_by_id(op->u.getmemlist.domain);
         unsigned long start_page = op->u.getmemlist.max_pfns >> 32;
         unsigned long nr_pages = op->u.getmemlist.max_pfns & 0xffffffff;
         unsigned long mfn;
+        struct list_head *list_ent;
 
         ret = -EINVAL;
         if ( d != NULL )
         {
             ret = 0;
 
-            /* A temp trick here. When max_pfns == -1, we assume
-             * the request is for  machine contiguous pages, so request
-             * all pages at first query
-             */
-            if ( (op->u.getmemlist.max_pfns == -1UL) &&
-                 !test_bit(ARCH_VMX_CONTIG_MEM,
-                           &d->vcpu[0]->arch.arch_vmx.flags) ) {
-                ret = (long) vmx_alloc_contig_pages(d);
-                put_domain(d);
-                return ret ? (-ENOMEM) : 0;
+            list_ent = d->page_list.next;
+            while ( (i != start_page) && (list_ent != &d->page_list)) {
+                mfn = page_to_mfn(list_entry(
+                    list_ent, struct page_info, list));
+                i++;
+                list_ent = mfn_to_page(mfn)->list.next;
             }
 
-            for ( i = start_page; i < (start_page + nr_pages); i++ )
+            if (i == start_page)
             {
-                mfn = gmfn_to_mfn_foreign(d, i);
-
-                if ( copy_to_guest_offset(op->u.getmemlist.buffer,
-                                          i - start_page, &mfn, 1) )
+                while((i < (start_page + nr_pages)) &&
+                      (list_ent != &d->page_list))
                 {
-                    ret = -EFAULT;
-                    break;
+                    mfn = page_to_mfn(list_entry(
+                        list_ent, struct page_info, list));
+
+                    if ( copy_to_guest_offset(op->u.getmemlist.buffer,
+                                          i - start_page, &mfn, 1) )
+                    {
+                        ret = -EFAULT;
+                        break;
+                    }
+                    i++;
+                    list_ent = mfn_to_page(mfn)->list.next;
                 }
-            }
+            } else
+                ret = -ENOMEM;
 
             op->u.getmemlist.num_pfns = i - start_page;
             copy_to_guest(u_dom0_op, op, 1);
@@ -204,14 +209,16 @@ long arch_do_dom0_op(dom0_op_t *op, GUEST_HANDLE(dom0_op_t) u_dom0_op)
     {
         dom0_physinfo_t *pi = &op->u.physinfo;
 
-        pi->threads_per_core = smp_num_siblings;
-        pi->cores_per_socket = 1; // FIXME
+        pi->threads_per_core =
+            cpus_weight(cpu_sibling_map[0]);
+        pi->cores_per_socket =
+            cpus_weight(cpu_core_map[0]) / pi->threads_per_core;
         pi->sockets_per_node = 
-            num_online_cpus() / (pi->threads_per_core * pi->cores_per_socket);
+            num_online_cpus() / cpus_weight(cpu_core_map[0]);
         pi->nr_nodes         = 1;
         pi->total_pages      = 99;  // FIXME
         pi->free_pages       = avail_domheap_pages();
-        pi->cpu_khz          = 100;  // FIXME cpu_khz;
+        pi->cpu_khz          = local_cpu_data->proc_freq / 1000;
         memset(pi->hw_cap, 0, sizeof(pi->hw_cap));
         //memcpy(pi->hw_cap, boot_cpu_data.x86_capability, NCAPINTS*4);
         ret = 0;

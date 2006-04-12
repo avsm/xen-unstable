@@ -48,6 +48,7 @@
 #include <asm/unistd.h>
 #include <asm/mca.h>
 #ifdef XEN
+#include <asm/vhpt.h>
 #include <asm/hw_irq.h>
 #endif
 
@@ -290,6 +291,14 @@ smp_flush_tlb_all (void)
 {
 	on_each_cpu((void (*)(void *))local_flush_tlb_all, NULL, 1, 1);
 }
+
+#ifdef XEN
+void
+smp_vhpt_flush_all(void)
+{
+	on_each_cpu((void (*)(void *))vhpt_flush, NULL, 1, 1);
+}
+#endif
 
 #ifndef XEN
 void

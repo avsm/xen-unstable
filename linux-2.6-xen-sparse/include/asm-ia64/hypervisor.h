@@ -43,6 +43,7 @@
 #include <xen/interface/sched.h>
 #include <asm/ptrace.h>
 #include <asm/page.h>
+#include <asm/xen/privop.h> // for running_on_xen
 
 extern shared_info_t *HYPERVISOR_shared_info;
 extern start_info_t *xen_start_info;
