@@ -32,7 +32,7 @@ typedef unsigned long page_flags_t;
  */
 #define PFN_ORDER(_pfn)	((_pfn)->u.free.order)
 
-#define PRtype_info "08x"
+#define PRtype_info "016lx"
 
 struct page_info
 {
@@ -139,11 +139,7 @@ extern spinlock_t free_list_lock;
 extern unsigned int free_pfns;
 extern unsigned long max_page;
 
-#ifdef CONFIG_VIRTUAL_MEM_MAP
-void __init init_frametable(void *frametable_vstart, unsigned long nr_pages);
-#else
 extern void __init init_frametable(void);
-#endif
 void add_to_domain_alloc_list(unsigned long ps, unsigned long pe);
 
 extern unsigned long gmfn_to_mfn_foreign(struct domain *d, unsigned long gpfn);
@@ -175,9 +171,10 @@ static inline int get_page(struct page_info *page,
 	if (unlikely((x & PGC_count_mask) == 0) ||	/* Not allocated? */
 	    unlikely((nx & PGC_count_mask) == 0) ||	/* Count overflow? */
 	    unlikely((x >> 32) != _domain)) {		/* Wrong owner? */
-	    DPRINTK("Error pfn %lx: rd=%p, od=%p, caf=%08x, taf=%08x\n",
-		page_to_mfn(page), domain, unpickle_domptr(domain),
-		x, page->u.inuse.type_info);
+
+	    DPRINTK("Error pfn %lx: rd=%p, od=%p, caf=%016lx, taf=%"
+		PRtype_info "\n", page_to_mfn(page), domain,
+		unpickle_domptr(x >> 32), x, page->u.inuse.type_info);
 	    return 0;
 	}
     }

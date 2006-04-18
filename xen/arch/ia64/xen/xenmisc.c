@@ -29,7 +29,6 @@ int phys_proc_id[NR_CPUS];
 unsigned long loops_per_jiffy = (1<<12);	// from linux/init/main.c
 
 /* FIXME: where these declarations should be there ? */
-extern void load_region_regs(struct vcpu *);
 extern void show_registers(struct pt_regs *regs);
 
 void ia64_mca_init(void) { printf("ia64_mca_init() skipped (Machine check abort handling)\n"); }
@@ -347,11 +346,7 @@ void panic_domain(struct pt_regs *regs, const char *fmt, ...)
 	va_list args;
 	char buf[128];
 	struct vcpu *v = current;
-//	static volatile int test = 1;	// so can continue easily in debug
-//	extern spinlock_t console_lock;
-//	unsigned long flags;
     
-loop:
 	printf("$$$$$ PANIC in domain %d (k6=0x%lx): ",
 		v->domain->domain_id, 
 		__get_cpu_var(cpu_kr)._kr[IA64_KR_CURRENT]);
@@ -365,36 +360,7 @@ loop:
 	} else {
 		debugger_trap_immediate();
 	}
-	domain_pause_by_systemcontroller(current->domain);
-	v->domain->shutdown_code = SHUTDOWN_crash;
-	set_bit(_DOMF_shutdown, &v->domain->domain_flags);
-	if (v->domain->domain_id == 0) {
-		int i = 1000000000L;
-		// if domain0 crashes, just periodically print out panic
-		// message to make post-mortem easier
-		while(i--);
-		goto loop;
-	}
-}
-
-/* FIXME: for the forseeable future, all cpu's that enable VTi have split
- *  caches and all cpu's that have split caches enable VTi.  This may
- *  eventually be untrue though. */
-#define cpu_has_split_cache	vmx_enabled
-extern unsigned int vmx_enabled;
-
-void sync_split_caches(void)
-{
-	unsigned long ret, progress = 0;
-
-	if (cpu_has_split_cache) {
-		/* Sync d/i cache conservatively */
-		ret = ia64_pal_cache_flush(4, 0, &progress, NULL);
-		if ((ret!=PAL_STATUS_SUCCESS)&& (ret!=PAL_STATUS_UNIMPLEMENTED))
-			printk("PAL CACHE FLUSH failed\n");
-		else printk("Sync i/d cache for guest SUCC\n");
-	}
-	else printk("sync_split_caches ignored for CPU with no split cache\n");
+	domain_crash_synchronous ();
 }
 
 ///////////////////////////////
@@ -539,9 +505,8 @@ int get_page_type(struct page_info *page, u32 type)
                     }
                     if ( ((x & PGT_type_mask) != PGT_l2_page_table) ||
                          ((type & PGT_type_mask) != PGT_l1_page_table) )
-                        MEM_LOG("Bad type (saw %" PRtype_info
-                                " != exp %" PRtype_info ") "
-                                "for mfn %lx (pfn %lx)",
+                        MEM_LOG("Bad type (saw %08x != exp %08x) "
+                                "for mfn %016lx (pfn %016lx)",
                                 x, type, page_to_mfn(page),
                                 get_gpfn_from_mfn(page_to_mfn(page)));
                     return 0;
@@ -581,8 +546,8 @@ int get_page_type(struct page_info *page, u32 type)
         /* Try to validate page type; drop the new reference on failure. */
         if ( unlikely(!alloc_page_type(page, type)) )
         {
-            MEM_LOG("Error while validating mfn %lx (pfn %lx) for type %"
-                    PRtype_info ": caf=%08x taf=%" PRtype_info,
+            MEM_LOG("Error while validating mfn %lx (pfn %lx) for type %08x"
+                    ": caf=%08x taf=%" PRtype_info,
                     page_to_mfn(page), get_gpfn_from_mfn(page_to_mfn(page)),
                     type, page->count_info, page->u.inuse.type_info);
             /* Noone else can get a reference. We hold the only ref. */

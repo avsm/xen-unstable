@@ -48,6 +48,12 @@ xc_plan9_build(int xc_handle,
     PERROR("xc_plan9_build not implemented\n");
     return -1;
 }
+/*  
+    VMM uses put_user to copy pfn_list to guest buffer, this maybe fail,
+    VMM don't handle this now.
+    This method will touch guest buffer to make sure the buffer's mapping
+    is tracked by VMM,
+ */
 
 int xc_ia64_get_pfn_list(int xc_handle,
                          uint32_t domid,
@@ -56,27 +62,48 @@ int xc_ia64_get_pfn_list(int xc_handle,
                          unsigned int nr_pages)
 {
     dom0_op_t op;
-    int ret;
-    unsigned long max_pfns = ((unsigned long)start_page << 32) | nr_pages;
+    int num_pfns,ret;
+    unsigned int __start_page, __nr_pages;
+    unsigned long max_pfns;
+    unsigned long *__pfn_buf;
+    __start_page = start_page;
+    __nr_pages = nr_pages;
+    __pfn_buf = pfn_buf;
+  
+    while(__nr_pages){
+        max_pfns = ((unsigned long)__start_page << 32) | __nr_pages;
+        op.cmd = DOM0_GETMEMLIST;
+        op.u.getmemlist.domain   = (domid_t)domid;
+        op.u.getmemlist.max_pfns = max_pfns;
+        op.u.getmemlist.buffer   = __pfn_buf;
 
-    op.cmd = DOM0_GETMEMLIST;
-    op.u.getmemlist.domain   = (domid_t)domid;
-    op.u.getmemlist.max_pfns = max_pfns;
-    op.u.getmemlist.buffer   = pfn_buf;
+        if ( (max_pfns != -1UL)
+            && mlock(__pfn_buf, __nr_pages * sizeof(unsigned long)) != 0 )
+        {
+            PERROR("Could not lock pfn list buffer");
+            return -1;
+        }
 
-    if ( (max_pfns != -1UL)
-        && mlock(pfn_buf, nr_pages * sizeof(unsigned long)) != 0 )
-    {
-        PERROR("Could not lock pfn list buffer");
-        return -1;
+        ret = do_dom0_op(xc_handle, &op);
+
+        if (max_pfns != -1UL)
+            (void)munlock(__pfn_buf, __nr_pages * sizeof(unsigned long));
+
+        if (max_pfns == -1UL)
+            return 0;
+        
+        num_pfns = op.u.getmemlist.num_pfns;
+        __start_page += num_pfns;
+        __nr_pages -= num_pfns;
+        __pfn_buf += num_pfns;
+
+        if (ret < 0)
+            // dummy write to make sure this tlb mapping is tracked by VMM
+            *__pfn_buf = 0;
+        else
+            return nr_pages;
     }
-
-    ret = do_dom0_op(xc_handle, &op);
-
-    if (max_pfns != -1UL)
-        (void)munlock(pfn_buf, nr_pages * sizeof(unsigned long));
-
-    return (ret < 0) ? -1 : op.u.getmemlist.num_pfns;
+    return nr_pages;
 }
 
 long xc_get_max_pages(int xc_handle, uint32_t domid)
@@ -101,7 +128,7 @@ int xc_ia64_copy_to_domain_pages(int xc_handle, uint32_t domid,
         goto error_out;
     }
     if ( xc_ia64_get_pfn_list(xc_handle, domid, page_array,
-                dst_pfn>>PAGE_SHIFT, nr_pages) != nr_pages ){
+                dst_pfn, nr_pages) != nr_pages ){
         PERROR("Could not get the page frame list");
         goto error_out;
     }
@@ -120,11 +147,18 @@ error_out:
 }
 
 
-#define HOB_SIGNATURE 0x3436474953424f48 // "HOBSIG64"
-#define GFW_HOB_START    ((4UL<<30)-(14UL<<20))    //4G -14M
-#define GFW_HOB_SIZE     (1UL<<20)              //1M
-#define MEM_G   (1UL << 30)
-#define MEM_M   (1UL << 20)
+#define HOB_SIGNATURE         0x3436474953424f48        // "HOBSIG64"
+#define GFW_HOB_START         ((4UL<<30)-(14UL<<20))    // 4G - 14M
+#define GFW_HOB_SIZE          (1UL<<20)                 // 1M
+#define RAW_GFW_START_NR(s)   ((s) >> PAGE_SHIFT)
+#define RAW_GFW_HOB_START_NR(s)                \
+        (RAW_GFW_START_NR(s) + ((GFW_HOB_START - GFW_START) >> PAGE_SHIFT))
+#define RAW_GFW_IMAGE_START_NR(s,i)            \
+        (RAW_GFW_START_NR(s) + (((GFW_SIZE - (i))) >> PAGE_SHIFT))
+#define RAW_IO_PAGE_START_NR(s)                \
+        (RAW_GFW_START_NR(s) + (GFW_SIZE >> PAGE_SHIFT))
+#define RAW_STORE_PAGE_START_NR(s)             \
+        (RAW_IO_PAGE_START_NR(s) + (IO_PAGE_SIZE >> PAGE_SHFIT))
 
 typedef struct {
     unsigned long signature;
@@ -179,7 +213,8 @@ static int add_pal_hob(void* hob_buf);
 static int add_mem_hob(void* hob_buf, unsigned long dom_mem_size);
 static int build_hob (void* hob_buf, unsigned long hob_buf_size,
                   unsigned long dom_mem_size);
-static int load_hob(int xc_handle,uint32_t dom, void *hob_buf);
+static int load_hob(int xc_handle,uint32_t dom, void *hob_buf,
+		unsigned long dom_mem_size);
 
 int xc_ia64_build_hob(int xc_handle, uint32_t dom, unsigned long memsize){
 
@@ -191,13 +226,13 @@ int xc_ia64_build_hob(int xc_handle, uint32_t dom, unsigned long memsize){
         return -1;
     }
 
-    if ( build_hob( hob_buf, GFW_HOB_SIZE, memsize<<20) < 0){
+    if ( build_hob( hob_buf, GFW_HOB_SIZE, memsize) < 0){
         free (hob_buf);
         PERROR("Could not build hob");
         return -1;
     }
 
-    if ( load_hob( xc_handle, dom, hob_buf) <0){
+    if ( load_hob( xc_handle, dom, hob_buf, memsize) < 0){
         free (hob_buf);
         PERROR("Could not load hob");
        return -1;
@@ -317,7 +352,8 @@ err_out:
 }
 
 static int
-load_hob(int xc_handle, uint32_t dom, void *hob_buf)
+load_hob(int xc_handle, uint32_t dom, void *hob_buf,
+         unsigned long dom_mem_size)
 {
     // hob_buf should be page aligned
     int hob_size;
@@ -336,7 +372,7 @@ load_hob(int xc_handle, uint32_t dom, void *hob_buf)
     nr_pages = (hob_size + PAGE_SIZE -1) >> PAGE_SHIFT;
 
     return xc_ia64_copy_to_domain_pages(xc_handle, dom,
-            hob_buf, GFW_HOB_START, nr_pages );
+            hob_buf, RAW_GFW_HOB_START_NR(dom_mem_size), nr_pages );
 }
 
 #define MIN(x, y) ((x) < (y)) ? (x) : (y)
@@ -576,12 +612,7 @@ static int setup_guest(  int xc_handle,
     unsigned long page_array[2];
     shared_iopage_t *sp;
     int i;
-
-    // FIXME: initialize pfn list for a temp hack
-    if (xc_ia64_get_pfn_list(xc_handle, dom, NULL, -1, -1) == -1) {
-        PERROR("Could not allocate continuous memory");
-        goto error_out;
-    }
+    unsigned long dom_memsize = (memsize << 20);
 
     if ((image_size > 12 * MEM_M) || (image_size & (PAGE_SIZE - 1))) {
         PERROR("Guest firmware size is incorrect [%ld]?", image_size);
@@ -590,19 +621,21 @@ static int setup_guest(  int xc_handle,
 
     /* Load guest firmware */
     if( xc_ia64_copy_to_domain_pages( xc_handle, dom,
-            image, 4*MEM_G-image_size, image_size>>PAGE_SHIFT)) {
+            image, RAW_GFW_IMAGE_START_NR(dom_memsize, image_size),
+            image_size>>PAGE_SHIFT)) {
         PERROR("Could not load guest firmware into domain");
         goto error_out;
     }
 
     /* Hand-off state passed to guest firmware */
-    if (xc_ia64_build_hob(xc_handle, dom, memsize) < 0){
+    if (xc_ia64_build_hob(xc_handle, dom, dom_memsize) < 0){
         PERROR("Could not build hob\n");
        goto error_out;
     }
 
     /* Retrieve special pages like io, xenstore, etc. */
-    if ( xc_ia64_get_pfn_list(xc_handle, dom, page_array, IO_PAGE_START>>PAGE_SHIFT, 2) != 2 )
+    if ( xc_ia64_get_pfn_list(xc_handle, dom, page_array,
+                              RAW_IO_PAGE_START_NR(dom_memsize), 2) != 2 )
     {
         PERROR("Could not get the page frame list");
         goto error_out;

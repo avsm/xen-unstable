@@ -18,6 +18,9 @@
 #define	CONFIG_IA64_PAGE_SIZE_16KB	// 4KB doesn't work?!?
 #define	CONFIG_IA64_GRANULE_16MB
 
+// this needs to be on to run on system with large memory hole
+#define	CONFIG_VIRTUAL_FRAME_TABLE
+
 #define CONFIG_EFI_PCDP
 #define CONFIG_SERIAL_SGI_L1_CONSOLE
 
@@ -25,17 +28,12 @@
 
 #ifdef CONFIG_XEN_SMP
 #define CONFIG_SMP 1
-#define NR_CPUS 8
-#define CONFIG_NR_CPUS 8
+#define NR_CPUS 64
 #else
 #undef CONFIG_SMP
 #define NR_CPUS 1
-#define CONFIG_NR_CPUS 1
 #endif
-//#define NR_CPUS 16
-//#define CONFIG_NR_CPUS 16
-//leave SMP for a later time
-//#undef CONFIG_SMP
+#define CONFIG_NR_CPUS NR_CPUS
 
 #define supervisor_mode_kernel (0)
 
@@ -121,9 +119,6 @@ extern char _end[]; /* standard ELF symbol */
 #define CMPXCHG_BUGCHECK_DECL
 
 // from include/asm-ia64/smp.h
-#ifdef CONFIG_SMP
-//#warning "Lots of things to fix to enable CONFIG_SMP!"
-#endif
 #define	get_cpu()	smp_processor_id()
 #define put_cpu()	do {} while(0)
 
@@ -270,10 +265,6 @@ extern int ht_per_core;
 #undef CONFIG_X86_IO_APIC
 #undef CONFIG_X86_L1_CACHE_SHIFT
 
-// this needs to be on to run on hp zx1 with more than 4GB
-// it is hacked around for now though
-//#define	CONFIG_VIRTUAL_MEM_MAP
-
 //#ifndef CONFIG_IA64_HP_SIM
 // looks like this is hard to turn off for Xen
 #define CONFIG_ACPI 1
@@ -283,13 +274,6 @@ extern int ht_per_core;
 #define CONFIG_XEN_ATTENTION_KEY 1
 #endif /* __ASSEMBLY__ */
 #endif /* __XEN_IA64_CONFIG_H__ */
-
-// needed for include/xen/smp.h
-//#ifdef CONFIG_SMP
-//#define raw_smp_processor_id()	current->processor
-//#else
-//#define raw_smp_processor_id()	0
-//#endif
 
 #ifndef __ASSEMBLY__
 #include <linux/linkage.h>

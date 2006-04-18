@@ -116,6 +116,9 @@ ia64_ivt:
 // 0x0000 Entry 0 (size 64 bundles) VHPT Translation (8,20,47)
 ENTRY(vhpt_miss)
 	DBG_FAULT(0)
+#ifdef XEN
+	FAULT(0)
+#else
 	/*
 	 * The VHPT vector is invoked when the TLB entry for the virtual page table
 	 * is missing.  This happens only as a result of a previous
@@ -141,11 +144,7 @@ ENTRY(vhpt_miss)
 	;;
 	rsm psr.dt				// use physical addressing for data
 	mov r31=pr				// save the predicate registers
-#ifdef XEN
-	movl r19=THIS_CPU(cpu_kr)+IA64_KR_PT_BASE_OFFSET;;
-#else
 	mov r19=IA64_KR(PT_BASE)		// get page table base address
-#endif
 	shl r21=r16,3				// shift bit 60 into sign bit
 	shr.u r17=r16,61			// get the region number into r17
 	;;
@@ -241,6 +240,7 @@ ENTRY(vhpt_miss)
 
 	mov pr=r31,-1				// restore predicate registers
 	rfi
+#endif
 END(vhpt_miss)
 
 	.org ia64_ivt+0x400
@@ -320,17 +320,6 @@ ENTRY(dtlb_miss)
 	tbit.nz p7,p0=r17,IA64_ISR_SP_BIT	
 	;; 
 (p7)	br.cond.spnt 2f
-
-	// is non-access bit on?
-	tbit.nz p8,p0=r17,IA64_ISR_NA_BIT	
-	;;
-(p8)	br.cond.spnt 2f
-
-	// cr.isr.code == IA64_ISR_CODE_LFETCH?
-	and r18=IA64_ISR_CODE_MASK,r17		// get the isr.code field
-	;; 
-	cmp.eq p9,p0=IA64_ISR_CODE_LFETCH,r18	// check isr.code field
-(p9)	br.cond.spnt 2f
 
 	// Is the faulted iip in vmm area?
 	// check [59:58] bit
@@ -540,6 +529,12 @@ late_alt_dtlb_miss:
 (p8)	br.cond.spnt page_fault
 #ifdef XEN
 	;;
+#ifdef CONFIG_VIRTUAL_FRAME_TABLE
+	// Test for the address of virtual frame_table
+	shr r22=r16,56;;
+	cmp.eq p8,p0=((VIRT_FRAME_TABLE_ADDR>>56)&0xff)-0x100,r22
+(p8)	br.cond.sptk frametable_miss ;;
+#endif
 	// Test for Xen address, if not handle via page_fault
 	// note that 0xf000 (cached) and 0xe800 (uncached) addresses
 	// should be OK.
@@ -561,6 +556,65 @@ late_alt_dtlb_miss:
 	mov pr=r31,-1
 	rfi
 END(alt_dtlb_miss)
+#ifdef CONFIG_VIRTUAL_FRAME_TABLE	
+GLOBAL_ENTRY(frametable_miss)
+	rsm psr.dt		// switch to using physical data addressing
+	movl r24=(frametable_pg_dir-PAGE_OFFSET)	// r24=__pa(frametable_pg_dir)
+	;;
+	srlz.d
+	extr.u r17=r16,PGDIR_SHIFT,(PAGE_SHIFT-3)
+	;;
+	shladd r24=r17,3,r24	// r24=&pgd[pgd_offset(addr)]
+	;;
+	ld8 r24=[r24]		// r24=pgd[pgd_offset(addr)]
+	extr.u r18=r16,PMD_SHIFT,(PAGE_SHIFT-3)	// r18=pmd_offset
+	;;
+	cmp.eq p6,p7=0,r24	// pgd present?
+	shladd r24=r18,3,r24	// r24=&pmd[pmd_offset(addr)]
+	;;
+(p7)	ld8 r24=[r24]		// r24=pmd[pmd_offset(addr)]
+	extr.u r19=r16,PAGE_SHIFT,(PAGE_SHIFT-3)// r19=pte_offset
+(p6)	br.spnt.few frametable_fault
+	;;
+	cmp.eq p6,p7=0,r24	// pmd present?
+	shladd r24=r19,3,r24	// r24=&pte[pte_offset(addr)]
+	;;
+(p7)	ld8 r24=[r24]		// r24=pte[pte_offset(addr)]
+	mov r25=0x700|(_PAGE_SIZE_16K<<2) // key=7
+(p6)	br.spnt.few frametable_fault
+	;;
+	mov cr.itir=r25
+	ssm psr.dt		// switch to using virtual data addressing
+	tbit.z p6,p7=r24,_PAGE_P_BIT	// pte present? 
+	;;
+(p7)	itc.d r24		// install updated PTE
+(p6)	br.spnt.few frametable_fault	// page present bit cleared?
+	;;
+	mov pr=r31,-1		// restore predicate registers
+	rfi
+END(frametable_miss)
+ENTRY(frametable_fault)
+	ssm psr.dt		// switch to using virtual data addressing
+	mov r18=cr.iip
+	movl r19=ia64_frametable_probe
+	;;
+	cmp.eq p6,p7=r18,r19	// is faulting addrress ia64_frametable_probe?
+	mov r8=0		// assumes that 'probe.r' uses r8
+	dep r21=-1,r21,IA64_PSR_RI_BIT+1,1 // return to next instrucition in bundle 2
+	;;
+(p6)	mov cr.ipsr=r21
+	mov r19=4		// FAULT(4)
+(p7)	br.spnt.few dispatch_to_fault_handler
+	;;
+	mov pr=r31,-1
+	rfi
+END(frametable_fault)
+GLOBAL_ENTRY(ia64_frametable_probe)
+	probe.r	r8=r32,0	// destination register must be r8
+	nop.f 0x0
+	br.ret.sptk.many b0	// this instruction must be in bundle 2
+END(ia64_frametable_probe)
+#endif /* CONFIG_VIRTUAL_FRAME_TABLE */
 
 	.org ia64_ivt+0x1400
 /////////////////////////////////////////////////////////////////////////////////////////
@@ -571,7 +625,7 @@ ENTRY(nested_dtlb_miss)
 	mov b0=r30
 	br.sptk.many b0				// return to continuation point
 	;;
-#endif
+#else
 	/*
 	 * In the absence of kernel bugs, we get here when the virtually mapped linear
 	 * page table is accessed non-speculatively (e.g., in the Dirty-bit, Instruction
@@ -595,11 +649,7 @@ ENTRY(nested_dtlb_miss)
 	 * Clobbered:	b0, r18, r19, r21, psr.dt (cleared)
 	 */
 	rsm psr.dt				// switch to using physical data addressing
-#ifdef XEN
-	movl r19=THIS_CPU(cpu_kr)+IA64_KR_PT_BASE_OFFSET;;
-#else
 	mov r19=IA64_KR(PT_BASE)		// get the page table base address
-#endif
 	shl r21=r16,3				// shift bit 60 into sign bit
 	;;
 	shr.u r17=r16,61			// get the region number into r17
@@ -634,6 +684,7 @@ ENTRY(nested_dtlb_miss)
 (p6)	br.cond.spnt page_fault
 	mov b0=r30
 	br.sptk.many b0				// return to continuation point
+#endif
 END(nested_dtlb_miss)
 
 	.org ia64_ivt+0x1800
@@ -930,7 +981,7 @@ ENTRY(break_fault)
 #endif
 	movl r18=XSI_PSR_IC
 	;;
-	ld8 r19=[r18]
+	ld4 r19=[r18]
 	;;
 	cmp.eq p7,p0=r0,r17			// is this a psuedo-cover?
 (p7)	br.spnt.many dispatch_privop_fault

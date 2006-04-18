@@ -16,6 +16,12 @@
 
 #define	VHPT_PAGE_SHIFT			VHPT_SIZE_LOG2
 
+
+#ifdef CONFIG_SMP
+# define vhpt_flush_all()	smp_vhpt_flush_all()
+#else
+# define vhpt_flush_all()	vhpt_flush()
+#endif
 // FIXME: These should be automatically generated
 
 #define	VLE_PGFLAGS_OFFSET		0
@@ -116,11 +122,14 @@ extern void vhpt_init (void);
 extern void zero_vhpt_stats(void);
 extern int dump_vhpt_stats(char *buf);
 extern void vhpt_flush_address(unsigned long vadr, unsigned long addr_range);
+extern void vhpt_flush_address_remote(int cpu, unsigned long vadr,
+				      unsigned long addr_range);
 extern void vhpt_multiple_insert(unsigned long vaddr, unsigned long pte,
 				 unsigned long logps);
 extern void vhpt_insert (unsigned long vadr, unsigned long ptr,
 			 unsigned logps);
 extern void vhpt_flush(void);
+extern void smp_vhpt_flush_all(void);
 
 /* Currently the VHPT is allocated per CPU.  */
 DECLARE_PER_CPU (unsigned long, vhpt_paddr);

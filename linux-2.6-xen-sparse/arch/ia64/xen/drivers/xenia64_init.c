@@ -5,6 +5,7 @@
 #include <asm/sal.h>
 #include <asm/hypervisor.h>
 /* #include <asm-xen/evtchn.h> */
+#include <xen/interface/arch-ia64.h>
 #include <linux/vmalloc.h>
 
 shared_info_t *HYPERVISOR_shared_info = (shared_info_t *)0xf100000000000000;
@@ -25,7 +26,7 @@ int xen_init(void)
 
 	xen_start_info = __va(s->arch.start_info_pfn << PAGE_SHIFT);
 	xen_start_info->flags = s->arch.flags;
-	printk("Running on Xen! start_info_pfn=0x%lx nr_pages=%d flags=0x%x\n",
+	printk("Running on Xen! start_info_pfn=0x%lx nr_pages=%ld flags=0x%x\n",
 		s->arch.start_info_pfn, xen_start_info->nr_pages,
 		xen_start_info->flags);
 

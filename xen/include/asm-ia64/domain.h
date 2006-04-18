@@ -13,15 +13,30 @@
 
 extern void domain_relinquish_resources(struct domain *);
 
+/* Flush cache of domain d.
+   If sync_only is true, only synchronize I&D caches,
+   if false, flush and invalidate caches.  */
+extern void domain_cache_flush (struct domain *d, int sync_only);
+
 struct arch_domain {
     struct mm_struct *mm;
     unsigned long metaphysical_rr0;
     unsigned long metaphysical_rr4;
+
+    /* There are two ranges of RID for a domain:
+       one big range, used to virtualize domain RID,
+       one small range for internal Xen use (metaphysical).  */
+    /* Big range.  */
     int starting_rid;		/* first RID assigned to domain */
     int ending_rid;		/* one beyond highest RID assigned to domain */
     int rid_bits;		/* number of virtual rid bits (default: 18) */
-    int breakimm;
+    /* Metaphysical range.  */
+    int starting_mp_rid;
+    int ending_mp_rid;
 
+    int breakimm;     /* The imm value for hypercalls.  */
+
+    int physmap_built;		/* Whether is physmap built or not */
     int imp_va_msb;
     /* System pages out of guest memory, like for xenstore/console */
     unsigned long sys_pgnr;
@@ -39,6 +54,9 @@ struct arch_domain {
 #define xen_vastart arch.xen_vastart
 #define xen_vaend arch.xen_vaend
 #define shared_info_va arch.shared_info_va
+#define INT_ENABLE_OFFSET(v) 		  \
+    (sizeof(vcpu_info_t) * (v)->vcpu_id + \
+    offsetof(vcpu_info_t, evtchn_upcall_mask))
 
 struct arch_vcpu {
 #if 1
