@@ -17,6 +17,7 @@
 #include <asm/vmx_vcpu.h>
 #include <asm/vhpt.h>
 #include <asm/tlbflush.h>
+#include <asm/privop.h>
 #include <xen/event.h>
 #include <asm/vmx_phy_mode.h>
 
@@ -29,6 +30,7 @@ extern void setfpreg (unsigned long regnum, struct ia64_fpreg *fpval, struct pt_
 
 extern void panic_domain(struct pt_regs *, const char *, ...);
 extern unsigned long translate_domain_mpaddr(unsigned long);
+extern IA64_BUNDLE __get_domain_bundle(UINT64);
 
 typedef	union {
 	struct ia64_psr ia64_psr;
@@ -141,6 +143,45 @@ vcpu_set_gr(VCPU *vcpu, unsigned long reg, UINT64 value)
 }
 
 #endif
+
+void vcpu_init_regs (struct vcpu *v)
+{
+	struct pt_regs *regs;
+
+	regs = vcpu_regs (v);
+	if (VMX_DOMAIN(v)) {
+		/* dt/rt/it:1;i/ic:1, si:1, vm/bn:1, ac:1 */
+		/* Need to be expanded as macro */
+		regs->cr_ipsr = 0x501008826008;
+	} else {
+		regs->cr_ipsr = ia64_getreg(_IA64_REG_PSR)
+		  | IA64_PSR_BITS_TO_SET | IA64_PSR_BN;
+		regs->cr_ipsr &= ~(IA64_PSR_BITS_TO_CLEAR
+				   | IA64_PSR_RI | IA64_PSR_IS);
+		// domain runs at PL2
+		regs->cr_ipsr |= 2UL << IA64_PSR_CPL0_BIT;
+	}
+	regs->cr_ifs = 1UL << 63; /* or clear? */
+	regs->ar_fpsr = FPSR_DEFAULT;
+
+	if (VMX_DOMAIN(v)) {
+		vmx_init_all_rr(v);
+		/* Virtual processor context setup */
+		VCPU(v, vpsr) = IA64_PSR_BN;
+		VCPU(v, dcr) = 0;
+	} else {
+		init_all_rr(v);
+		regs->ar_rsc |= (2 << 2); /* force PL2/3 */
+		VCPU(v, banknum) = 1;
+		VCPU(v, metaphysical_mode) = 1;
+		VCPU(v, interrupt_mask_addr) =
+		    (uint64_t)SHAREDINFO_ADDR + INT_ENABLE_OFFSET(v);
+		VCPU(v, itv) = (1 << 16); /* timer vector masked */
+	}
+
+	v->arch.domain_itm_last = -1L;
+}
+
 /**************************************************************************
  VCPU privileged application register access routines
 **************************************************************************/
@@ -282,7 +323,7 @@ IA64FAULT vcpu_set_psr_sm(VCPU *vcpu, UINT64 imm24)
 	if (imm.sp) { ipsr->sp = 1; psr.sp = 1; }
 	if (imm.i) {
 		if (vcpu->vcpu_info->evtchn_upcall_mask) {
-//printf("vcpu_set_psr_sm: psr.ic 0->1 ");
+//printf("vcpu_set_psr_sm: psr.ic 0->1\n");
 			enabling_interrupts = 1;
 		}
 		vcpu->vcpu_info->evtchn_upcall_mask = 0;
@@ -388,7 +429,7 @@ UINT64 vcpu_get_ipsr_int_state(VCPU *vcpu,UINT64 prevpsr)
 	UINT64 dcr = PSCBX(vcpu,dcr);
 	PSR psr;
 
-	//printf("*** vcpu_get_ipsr_int_state (0x%016lx)...",prevpsr);
+	//printf("*** vcpu_get_ipsr_int_state (0x%016lx)...\n",prevpsr);
 	psr.i64 = prevpsr;
 	psr.ia64_psr.be = 0; if (dcr & IA64_DCR_BE) psr.ia64_psr.be = 1;
 	psr.ia64_psr.pp = 0; if (dcr & IA64_DCR_PP) psr.ia64_psr.pp = 1;
@@ -398,7 +439,7 @@ UINT64 vcpu_get_ipsr_int_state(VCPU *vcpu,UINT64 prevpsr)
 	psr.ia64_psr.dt = 1; psr.ia64_psr.it = 1; psr.ia64_psr.rt = 1;
 	if (psr.ia64_psr.cpl == 2) psr.ia64_psr.cpl = 0; // !!!! fool domain
 	// psr.pk = 1;
-	//printf("returns 0x%016lx...",psr.i64);
+	//printf("returns 0x%016lx...\n",psr.i64);
 	return psr.i64;
 }
 
@@ -707,7 +748,7 @@ check_start:
 	}
 	// have a pending,deliverable interrupt... see if it is masked
 	bitnum = ia64_fls(bits);
-//printf("XXXXXXX vcpu_check_pending_interrupts: got bitnum=%p...",bitnum);
+//printf("XXXXXXX vcpu_check_pending_interrupts: got bitnum=%p...\n",bitnum);
 	vector = bitnum+(i*64);
 	mask = 1L << bitnum;
 	/* sanity check for guest timer interrupt */
@@ -719,7 +760,7 @@ check_start:
 			goto check_start;
 		}
 	}
-//printf("XXXXXXX vcpu_check_pending_interrupts: got vector=%p...",vector);
+//printf("XXXXXXX vcpu_check_pending_interrupts: got vector=%p...\n",vector);
 	if (*r >= mask) {
 		// masked by equal inservice
 //printf("but masked by equal inservice\n");
@@ -1184,14 +1225,25 @@ UINT64 vcpu_timer_pending_early(VCPU *vcpu)
 Privileged operation emulation routines
 **************************************************************************/
 
-IA64FAULT vcpu_force_data_miss(VCPU *vcpu, UINT64 ifa)
+static void
+vcpu_force_tlb_miss(VCPU* vcpu, UINT64 ifa)
 {
-	PSCB(vcpu,ifa) = ifa;
-	PSCB(vcpu,itir) = vcpu_get_itir_on_fault(vcpu,ifa);
-	vcpu_thash(current, ifa, &PSCB(current,iha));
-	return (vcpu_get_rr_ve(vcpu,ifa) ? IA64_DATA_TLB_VECTOR : IA64_ALT_DATA_TLB_VECTOR);
+	PSCB(vcpu, ifa) = ifa;
+	PSCB(vcpu, itir) = vcpu_get_itir_on_fault(vcpu, ifa);
+	vcpu_thash(current, ifa, &PSCB(current, iha));
 }
 
+IA64FAULT vcpu_force_inst_miss(VCPU *vcpu, UINT64 ifa)
+{
+	vcpu_force_tlb_miss(vcpu, ifa);
+	return (vcpu_get_rr_ve(vcpu, ifa)? IA64_INST_TLB_VECTOR: IA64_ALT_INST_TLB_VECTOR);
+}
+
+IA64FAULT vcpu_force_data_miss(VCPU *vcpu, UINT64 ifa)
+{
+	vcpu_force_tlb_miss(vcpu, ifa);
+	return (vcpu_get_rr_ve(vcpu, ifa)? IA64_DATA_TLB_VECTOR: IA64_ALT_DATA_TLB_VECTOR);
+}
 
 IA64FAULT vcpu_rfi(VCPU *vcpu)
 {
@@ -1290,6 +1342,12 @@ unsigned long recover_to_break_fault_count = 0;
 
 int warn_region0_address = 0; // FIXME later: tie to a boot parameter?
 
+/* Return TRUE iff [b1,e1] and [b2,e2] partially or fully overlaps.  */
+static inline int range_overlap (u64 b1, u64 e1, u64 b2, u64 e2)
+{
+	return (b1 <= e2) && (e1 >= b2);
+}
+
 // FIXME: also need to check && (!trp->key || vcpu_pkr_match(trp->key))
 static inline int vcpu_match_tr_entry_no_p(TR_ENTRY *trp, UINT64 ifa, UINT64 rid)
 {
@@ -1303,12 +1361,127 @@ static inline int vcpu_match_tr_entry(TR_ENTRY *trp, UINT64 ifa, UINT64 rid)
 	return trp->pte.p && vcpu_match_tr_entry_no_p(trp, ifa, rid);
 }
 
+static inline int
+vcpu_match_tr_entry_range(TR_ENTRY *trp, UINT64 rid, u64 b, u64 e)
+{
+	return trp->rid == rid
+		&& trp->pte.p
+		&& range_overlap (b, e,
+				  trp->vadr, trp->vadr + (1L << trp->ps) - 1);
+
+}
+
+static TR_ENTRY*
+vcpu_tr_lookup(VCPU* vcpu, unsigned long va, UINT64 rid, BOOLEAN is_data)
+{
+	unsigned int* regions;
+	TR_ENTRY *trp;
+	int tr_max;
+	int i;
+
+	if (is_data) {
+		// data
+		regions = &vcpu->arch.dtr_regions;
+		trp = vcpu->arch.dtrs;
+		tr_max = sizeof(vcpu->arch.dtrs)/sizeof(vcpu->arch.dtrs[0]);
+	} else {
+		// instruction
+		regions = &vcpu->arch.itr_regions;
+		trp = vcpu->arch.itrs;
+		tr_max = sizeof(vcpu->arch.itrs)/sizeof(vcpu->arch.itrs[0]);
+	}
+
+	if (!vcpu_quick_region_check(*regions, va)) {
+		return NULL;
+	}
+	for (i = 0; i < tr_max; i++, trp++) {
+		if (vcpu_match_tr_entry(trp, va, rid)) {
+			return trp;
+		}
+	}
+	return NULL;
+}
+
+// return value
+// 0: failure
+// 1: success
+int
+vcpu_get_domain_bundle(VCPU* vcpu, REGS* regs, UINT64 gip, IA64_BUNDLE* bundle)
+{
+	UINT64 gpip;// guest pseudo phyiscal ip
+
+#if 0
+	// Currently xen doesn't track psr.it bits.
+	// it assumes always psr.it = 1.
+	if (!(VCPU(vcpu, vpsr) & IA64_PSR_IT)) {
+		gpip = gip;
+	} else
+#endif
+	{
+		unsigned long region = REGION_NUMBER(gip);
+		unsigned long rr = PSCB(vcpu, rrs)[region];
+		unsigned long rid = rr & RR_RID_MASK;
+		BOOLEAN swap_rr0;
+		TR_ENTRY* trp;
+
+		// vcpu->arch.{i, d}tlb are volatile,
+		// copy its value to the variable, tr, before use.
+		TR_ENTRY tr;
+
+		trp = vcpu_tr_lookup(vcpu, gip, rid, 0);
+		if (trp != NULL) {
+			tr = *trp;
+			goto found;
+		}
+		// When it failed to get a bundle, itlb miss is reflected.
+		// Last itc.i value is cached to PSCBX(vcpu, itlb).
+		tr = PSCBX(vcpu, itlb);
+		if (vcpu_match_tr_entry(&tr, gip, rid)) {
+			//DPRINTK("%s gip 0x%lx gpip 0x%lx\n", __func__, gip, gpip);
+			goto found;
+		}
+		trp = vcpu_tr_lookup(vcpu, gip, rid, 1);
+		if (trp != NULL) {
+			tr = *trp;
+			goto found;
+		}
+#if 0
+		tr = PSCBX(vcpu, dtlb);
+		if (vcpu_match_tr_entry(&tr, gip, rid)) {
+			goto found;
+		}
+#endif
+
+		// try to access gip with guest virtual address
+		// This may cause tlb miss. see vcpu_translate(). Be careful!
+		swap_rr0 = (!region && PSCB(vcpu, metaphysical_mode));
+		if (swap_rr0) {
+			set_one_rr(0x0, PSCB(vcpu, rrs[0]));
+		}
+		*bundle = __get_domain_bundle(gip);
+		if (swap_rr0) {
+			set_metaphysical_rr0();
+		}
+		if (bundle->i64[0] == 0 && bundle->i64[1] == 0) {
+			DPRINTK("%s gip 0x%lx\n", __func__, gip);
+			return 0;
+		}
+		return 1;
+        
+	found:
+		gpip = ((tr.pte.ppn >> (tr.ps - 12)) << tr.ps) |
+			(gip & ((1 << tr.ps) - 1));
+	}
+
+	*bundle = *((IA64_BUNDLE*)__va(__gpa_to_mpa(vcpu->domain, gpip)));
+	return 1;
+}
+
 IA64FAULT vcpu_translate(VCPU *vcpu, UINT64 address, BOOLEAN is_data, UINT64 *pteval, UINT64 *itir, UINT64 *iha)
 {
 	unsigned long region = address >> 61;
 	unsigned long pta, rid, rr;
 	union pte_flags pte;
-	int i;
 	TR_ENTRY *trp;
 
 	if (PSCB(vcpu,metaphysical_mode) && !(!is_data && region)) {
@@ -1325,8 +1498,8 @@ IA64FAULT vcpu_translate(VCPU *vcpu, UINT64 address, BOOLEAN is_data, UINT64 *pt
 			 * region=5,VMM need to handle this tlb miss as if
 			 * PSCB(vcpu,metaphysical_mode)=0
 			 */           
-			printk("vcpu_translate: bad physical address: 0x%lx\n",
-			       address);
+			printk("vcpu_translate: bad physical address: 0x%lx at %lx\n",
+			       address, vcpu_regs (vcpu)->cr_iip);
 
 		} else {
 			*pteval = (address & _PAGE_PPN_MASK) | __DIRTY_BITS |
@@ -1349,28 +1522,22 @@ IA64FAULT vcpu_translate(VCPU *vcpu, UINT64 address, BOOLEAN is_data, UINT64 *pt
 	rr = PSCB(vcpu,rrs)[region];
 	rid = rr & RR_RID_MASK;
 	if (is_data) {
-		if (vcpu_quick_region_check(vcpu->arch.dtr_regions,address)) {
-			for (trp = vcpu->arch.dtrs, i = NDTRS; i; i--, trp++) {
-				if (vcpu_match_tr_entry(trp,address,rid)) {
-					*pteval = trp->pte.val;
-					*itir = trp->itir;
-					tr_translate_count++;
-					return IA64_NO_FAULT;
-				}
-			}
+		trp = vcpu_tr_lookup(vcpu, address, rid, 1);
+		if (trp != NULL) {
+			*pteval = trp->pte.val;
+			*itir = trp->itir;
+			tr_translate_count++;
+			return IA64_NO_FAULT;
 		}
 	}
 	// FIXME?: check itr's for data accesses too, else bad things happen?
 	/* else */ {
-		if (vcpu_quick_region_check(vcpu->arch.itr_regions,address)) {
-			for (trp = vcpu->arch.itrs, i = NITRS; i; i--, trp++) {
-				if (vcpu_match_tr_entry(trp,address,rid)) {
-					*pteval = trp->pte.val;
-					*itir = trp->itir;
-					tr_translate_count++;
-					return IA64_NO_FAULT;
-				}
-			}
+		trp = vcpu_tr_lookup(vcpu, address, rid, 0);
+		if (trp != NULL) {
+			*pteval = trp->pte.val;
+			*itir = trp->itir;
+			tr_translate_count++;
+			return IA64_NO_FAULT;
 		}
 	}
 
@@ -1765,8 +1932,6 @@ IA64FAULT vcpu_itr_i(VCPU *vcpu, UINT64 slot, UINT64 pte,
  VCPU translation cache access routines
 **************************************************************************/
 
-void foobar(void) { /*vcpu_verbose = 1;*/ }
-
 void vcpu_itc_no_srlz(VCPU *vcpu, UINT64 IorD, UINT64 vaddr, UINT64 pte, UINT64 mp_pte, UINT64 logps)
 {
 	unsigned long psr;
@@ -1851,15 +2016,18 @@ IA64FAULT vcpu_itc_i(VCPU *vcpu, UINT64 pte, UINT64 itir, UINT64 ifa)
 
 IA64FAULT vcpu_ptc_l(VCPU *vcpu, UINT64 vadr, UINT64 log_range)
 {
+	BUG_ON(vcpu != current);
+
 	/* Purge TC  */
 	vcpu_purge_tr_entry(&PSCBX(vcpu,dtlb));
 	vcpu_purge_tr_entry(&PSCBX(vcpu,itlb));
 	
-	/*Purge all tlb and vhpt*/
+	/* Purge all tlb and vhpt */
 	vcpu_flush_tlb_vhpt_range (vadr, log_range);
 
 	return IA64_NO_FAULT;
 }
+
 // At privlvl=0, fc performs no access rights or protection key checks, while
 // at privlvl!=0, fc performs access rights checks as if it were a 1-byte
 // read but no protection key check.  Thus in order to avoid an unexpected
@@ -1909,16 +2077,61 @@ IA64FAULT vcpu_ptc_ga(VCPU *vcpu,UINT64 vadr,UINT64 addr_range)
 	return IA64_NO_FAULT;
 }
 
-IA64FAULT vcpu_ptr_d(VCPU *vcpu,UINT64 vadr,UINT64 addr_range)
+IA64FAULT vcpu_ptr_d(VCPU *vcpu,UINT64 vadr,UINT64 log_range)
 {
-	printf("vcpu_ptr_d: Purging TLB is unsupported\n");
-	// don't forget to recompute dtr_regions
-	return (IA64_ILLOP_FAULT);
+	unsigned long region = vadr >> 61;
+	u64 addr_range = 1UL << log_range;
+	unsigned long rid, rr;
+	int i;
+	TR_ENTRY *trp;
+	BUG_ON(vcpu != current);
+
+	rr = PSCB(vcpu,rrs)[region];
+	rid = rr & RR_RID_MASK;
+
+	/* Purge TC  */
+	vcpu_purge_tr_entry(&PSCBX(vcpu,dtlb));
+
+	/* Purge tr and recompute dtr_regions.  */
+	vcpu->arch.dtr_regions = 0;
+	for (trp = vcpu->arch.dtrs, i = NDTRS; i; i--, trp++)
+		if (vcpu_match_tr_entry_range (trp,rid, vadr, vadr+addr_range))
+			vcpu_purge_tr_entry(trp);
+		else if (trp->pte.p)
+			vcpu_quick_region_set(vcpu->arch.dtr_regions,
+					      trp->vadr);
+
+	vcpu_flush_tlb_vhpt_range (vadr, log_range);
+
+	return IA64_NO_FAULT;
 }
 
-IA64FAULT vcpu_ptr_i(VCPU *vcpu,UINT64 vadr,UINT64 addr_range)
+IA64FAULT vcpu_ptr_i(VCPU *vcpu,UINT64 vadr,UINT64 log_range)
 {
-	printf("vcpu_ptr_i: Purging TLB is unsupported\n");
-	// don't forget to recompute itr_regions
-	return (IA64_ILLOP_FAULT);
+	unsigned long region = vadr >> 61;
+	u64 addr_range = 1UL << log_range;
+	unsigned long rid, rr;
+	int i;
+	TR_ENTRY *trp;
+	BUG_ON(vcpu != current);
+
+	rr = PSCB(vcpu,rrs)[region];
+	rid = rr & RR_RID_MASK;
+
+	/* Purge TC  */
+	vcpu_purge_tr_entry(&PSCBX(vcpu,itlb));
+
+	/* Purge tr and recompute itr_regions.  */
+	vcpu->arch.itr_regions = 0;
+	for (trp = vcpu->arch.itrs, i = NITRS; i; i--, trp++)
+		if (vcpu_match_tr_entry_range (trp,rid, vadr, vadr+addr_range))
+			vcpu_purge_tr_entry(trp);
+		else if (trp->pte.p)
+			vcpu_quick_region_set(vcpu->arch.itr_regions,
+					      trp->vadr);
+
+
+	vcpu_flush_tlb_vhpt_range (vadr, log_range);
+
+	return IA64_NO_FAULT;
 }

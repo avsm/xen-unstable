@@ -8,6 +8,10 @@
  *	Kun Tian (Kevin Tian) <kevin.tian@intel.com>
  *
  * 05/04/29 Kun Tian (Kevin Tian) <kevin.tian@intel.com> Add VTI domain support
+ *
+ * Copyright (c) 2006 Isaku Yamahata <yamahata at valinux co jp>
+ *                    VA Linux Systems Japan K.K.
+ *                    dom0 vp model support
  */
 
 #include <xen/config.h>
@@ -66,56 +70,112 @@ unsigned long dom0_align = 64*1024*1024;
 static unsigned int dom0_max_vcpus = 1;
 integer_param("dom0_max_vcpus", dom0_max_vcpus); 
 
-// initialized by arch/ia64/setup.c:find_initrd()
-unsigned long initrd_start = 0, initrd_end = 0;
 extern unsigned long running_on_sim;
 
-#define IS_XEN_ADDRESS(d,a) ((a >= d->xen_vastart) && (a <= d->xen_vaend))
+extern char dom0_command_line[];
 
 /* FIXME: where these declarations should be there ? */
-extern long platform_is_hp_ski(void);
 extern void serial_input_init(void);
 static void init_switch_stack(struct vcpu *v);
+extern void vmx_do_launch(struct vcpu *);
 void build_physmap_table(struct domain *d);
 
-static void try_to_clear_PGC_allocate(struct domain* d,
-                                      struct page_info* page);
-
-#ifdef CONFIG_XEN_IA64_DOM0_VP
-static struct domain *dom_xen, *dom_io;
-
-// followings are stolen from arch_init_memory() @ xen/arch/x86/mm.c
-void
-alloc_dom_xen_and_dom_io(void)
-{
-    /*
-     * Initialise our DOMID_XEN domain.
-     * Any Xen-heap pages that we will allow to be mapped will have
-     * their domain field set to dom_xen.
-     */
-    dom_xen = alloc_domain(DOMID_XEN);
-    BUG_ON(dom_xen == NULL);
-
-    /*
-     * Initialise our DOMID_IO domain.
-     * This domain owns I/O pages that are within the range of the page_info
-     * array. Mappings occur at the priv of the caller.
-     */
-    dom_io = alloc_domain(DOMID_IO);
-    BUG_ON(dom_io == NULL);
-}
-#endif
-
 /* this belongs in include/asm, but there doesn't seem to be a suitable place */
-void arch_domain_destroy(struct domain *d)
+unsigned long context_switch_count = 0;
+
+extern struct vcpu *ia64_switch_to (struct vcpu *next_task);
+
+/* Address of vpsr.i (in fact evtchn_upcall_mask) of current vcpu.
+   This is a Xen virtual address.  */
+DEFINE_PER_CPU(uint8_t *, current_psr_i_addr);
+
+#include <xen/sched-if.h>
+
+void schedule_tail(struct vcpu *prev)
 {
-	BUG_ON(d->arch.mm.pgd != NULL);
-	if (d->shared_info != NULL)
-		free_xenheap_page(d->shared_info);
+	extern char ia64_ivt;
+	context_saved(prev);
 
-	domain_flush_destroy (d);
+	if (VMX_DOMAIN(current)) {
+		vmx_do_launch(current);
+	} else {
+		ia64_set_iva(&ia64_ivt);
+        	ia64_set_pta(VHPT_ADDR | (1 << 8) | (VHPT_SIZE_LOG2 << 2) |
+		        VHPT_ENABLED);
+		load_region_regs(current);
+		vcpu_load_kernel_regs(current);
+		__ia64_per_cpu_var(current_psr_i_addr) = &current->domain->
+		  shared_info->vcpu_info[current->vcpu_id].evtchn_upcall_mask;
+	}
+}
 
-	deallocate_rid_range(d);
+void context_switch(struct vcpu *prev, struct vcpu *next)
+{
+    uint64_t spsr;
+    uint64_t pta;
+
+    local_irq_save(spsr);
+    context_switch_count++;
+
+    __ia64_save_fpu(prev->arch._thread.fph);
+    __ia64_load_fpu(next->arch._thread.fph);
+    if (VMX_DOMAIN(prev))
+	    vmx_save_state(prev);
+    if (VMX_DOMAIN(next))
+	    vmx_load_state(next);
+    /*ia64_psr(ia64_task_regs(next))->dfh = !ia64_is_local_fpu_owner(next);*/
+    prev = ia64_switch_to(next);
+
+    /* Note: ia64_switch_to does not return here at vcpu initialization.  */
+
+    //cpu_set(smp_processor_id(), current->domain->domain_dirty_cpumask);
+
+// leave this debug for now: it acts as a heartbeat when more than
+// one domain is active
+{
+static long cnt[16] = { 50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50};
+static int i = 100;
+int id = ((struct vcpu *)current)->domain->domain_id & 0xf;
+if (!cnt[id]--) { cnt[id] = 500000; printk("%x",id); }
+if (!i--) { i = 1000000; printk("+"); }
+}
+ 
+    if (VMX_DOMAIN(current)){
+	vmx_load_all_rr(current);
+    } else {
+	struct domain *nd;
+    	extern char ia64_ivt;
+
+    	ia64_set_iva(&ia64_ivt);
+
+	nd = current->domain;
+    	if (!is_idle_domain(nd)) {
+        	ia64_set_pta(VHPT_ADDR | (1 << 8) | (VHPT_SIZE_LOG2 << 2) |
+			     VHPT_ENABLED);
+	    	load_region_regs(current);
+	    	vcpu_load_kernel_regs(current);
+		vcpu_set_next_timer(current);
+		if (vcpu_timer_expired(current))
+			vcpu_pend_timer(current);
+		__ia64_per_cpu_var(current_psr_i_addr) = &nd->shared_info->
+		  vcpu_info[current->vcpu_id].evtchn_upcall_mask;
+    	} else {
+		/* When switching to idle domain, only need to disable vhpt
+		 * walker. Then all accesses happen within idle context will
+		 * be handled by TR mapping and identity mapping.
+		 */
+		pta = ia64_get_pta();
+		ia64_set_pta(pta & ~VHPT_ENABLED);
+		__ia64_per_cpu_var(current_psr_i_addr) = NULL;
+        }
+    }
+    local_irq_restore(spsr);
+    context_saved(prev);
+}
+
+void continue_running(struct vcpu *same)
+{
+	/* nothing to do */
 }
 
 static void default_idle(void)
@@ -149,7 +209,7 @@ static void continue_cpu_idle_loop(void)
 void startup_cpu_idle_loop(void)
 {
 	/* Just some sanity to ensure that the scheduler is set up okay. */
-	ASSERT(current->domain == IDLE_DOMAIN_ID);
+	ASSERT(current->domain->domain_id == IDLE_DOMAIN_ID);
 	raise_softirq(SCHEDULE_SOFTIRQ);
 
 	continue_cpu_idle_loop();
@@ -236,8 +296,7 @@ static void init_switch_stack(struct vcpu *v)
 	sw->ar_fpsr = FPSR_DEFAULT;
 	v->arch._thread.ksp = (unsigned long) sw - 16;
 	// stay on kernel stack because may get interrupts!
-	// ia64_ret_from_clone (which b0 gets in new_thread) switches
-	// to user stack
+	// ia64_ret_from_clone switches to user stack
 	v->arch._thread.on_ustack = 0;
 	memset(v->arch._thread.fph,0,sizeof(struct ia64_fpreg)*96);
 }
@@ -245,10 +304,9 @@ static void init_switch_stack(struct vcpu *v)
 int arch_domain_create(struct domain *d)
 {
 	// the following will eventually need to be negotiated dynamically
-	d->xen_vastart = XEN_START_ADDR;
-	d->xen_vaend = XEN_END_ADDR;
 	d->arch.shared_info_va = SHAREDINFO_ADDR;
 	d->arch.breakimm = 0x1000;
+	seqlock_init(&d->arch.vtlb_lock);
 
 	if (is_idle_domain(d))
 	    return 0;
@@ -283,6 +341,17 @@ fail_nomem:
 	return -ENOMEM;
 }
 
+void arch_domain_destroy(struct domain *d)
+{
+	BUG_ON(d->arch.mm.pgd != NULL);
+	if (d->shared_info != NULL)
+		free_xenheap_page(d->shared_info);
+
+	domain_flush_destroy (d);
+
+	deallocate_rid_range(d);
+}
+
 void arch_getdomaininfo_ctxt(struct vcpu *v, struct vcpu_guest_context *c)
 {
 	c->regs = *vcpu_regs (v);
@@ -293,6 +362,7 @@ int arch_set_info_guest(struct vcpu *v, struct vcpu_guest_context *c)
 {
 	struct pt_regs *regs = vcpu_regs (v);
 	struct domain *d = v->domain;
+	unsigned long cmdline_addr;
 
 	if ( test_bit(_VCPUF_initialised, &v->vcpu_flags) )
             return 0;
@@ -310,6 +380,7 @@ int arch_set_info_guest(struct vcpu *v, struct vcpu_guest_context *c)
 	    build_physmap_table(d);
 
 	*regs = c->regs;
+	cmdline_addr = 0;
 	if (v == d->vcpu[0]) {
 	    /* Only for first vcpu.  */
 	    d->arch.sys_pgnr = c->sys_pgnr;
@@ -318,11 +389,28 @@ int arch_set_info_guest(struct vcpu *v, struct vcpu_guest_context *c)
 	    d->arch.cmdline      = c->cmdline;
 	    d->shared_info->arch = c->shared;
 
+	    if (!VMX_DOMAIN(v)) {
+		    const char *cmdline = d->arch.cmdline;
+		    int len;
+
+		    if (*cmdline == 0) {
+#define DEFAULT_CMDLINE "nomca nosmp xencons=tty0 console=tty0 root=/dev/hda1"
+			    cmdline = DEFAULT_CMDLINE;
+			    len = sizeof (DEFAULT_CMDLINE);
+			    printf("domU command line defaulted to"
+				   DEFAULT_CMDLINE "\n");
+		    }
+		    else
+			    len = IA64_COMMAND_LINE_SIZE;
+		    cmdline_addr = dom_fw_setup (d, cmdline, len);
+	    }
+
 	    /* Cache synchronization seems to be done by the linux kernel
 	       during mmap/unmap operation.  However be conservative.  */
 	    domain_cache_flush (d, 1);
 	}
-	new_thread(v, regs->cr_iip, 0, 0);
+	vcpu_init_regs (v);
+	regs->r28 = cmdline_addr;
 
 	if ( c->privregs && copy_from_user(v->arch.privregs,
 			   c->privregs, sizeof(mapped_regs_t))) {
@@ -330,8 +418,6 @@ int arch_set_info_guest(struct vcpu *v, struct vcpu_guest_context *c)
 		   c->privregs);
 	    return -EFAULT;
 	}
-
-	v->arch.domain_itm_last = -1L;
 
 	/* Don't redo final setup */
 	set_bit(_VCPUF_initialised, &v->vcpu_flags);
@@ -393,118 +479,12 @@ static void relinquish_memory(struct domain *d, struct list_head *list)
         /* Follow the list chain and /then/ potentially free the page. */
         ent = ent->next;
 #ifdef CONFIG_XEN_IA64_DOM0_VP
-#if 1
         BUG_ON(get_gpfn_from_mfn(page_to_mfn(page)) != INVALID_M2P_ENTRY);
-#else
-        //XXX this should be done at traversing the P2M table.
-        if (page_get_owner(page) == d)
-            set_gpfn_from_mfn(page_to_mfn(page), INVALID_M2P_ENTRY);
-#endif
 #endif
         put_page(page);
     }
 
     spin_unlock_recursive(&d->page_alloc_lock);
-}
-
-static void
-relinquish_pte(struct domain* d, pte_t* pte)
-{
-    unsigned long mfn = pte_pfn(*pte);
-    struct page_info* page;
-
-    // vmx domain use bit[58:56] to distinguish io region from memory.
-    // see vmx_build_physmap_table() in vmx_init.c
-    if (((mfn << PAGE_SHIFT) & GPFN_IO_MASK) != GPFN_MEM)
-        return;
-
-    // domain might map IO space or acpi table pages. check it.
-    if (!mfn_valid(mfn))
-        return;
-    page = mfn_to_page(mfn);
-    // struct page_info corresponding to mfn may exist or not depending
-    // on CONFIG_VIRTUAL_FRAME_TABLE.
-    // This check is too easy.
-    // The right way is to check whether this page is of io area or acpi pages
-    if (page_get_owner(page) == NULL) {
-        BUG_ON(page->count_info != 0);
-        return;
-    }
-
-#ifdef CONFIG_XEN_IA64_DOM0_VP
-    if (page_get_owner(page) == d) {
-        BUG_ON(get_gpfn_from_mfn(mfn) == INVALID_M2P_ENTRY);
-        set_gpfn_from_mfn(mfn, INVALID_M2P_ENTRY);
-    }
-#endif
-    try_to_clear_PGC_allocate(d, page);
-    put_page(page);
-}
-
-static void
-relinquish_pmd(struct domain* d, pmd_t* pmd, unsigned long offset)
-{
-    unsigned long i;
-    pte_t* pte = pte_offset_map(pmd, offset);
-
-    for (i = 0; i < PTRS_PER_PTE; i++, pte++) {
-        if (!pte_present(*pte))
-            continue;
-        
-        relinquish_pte(d, pte);
-    }
-    pte_free_kernel(pte_offset_map(pmd, offset));
-}
-
-static void
-relinquish_pud(struct domain* d, pud_t *pud, unsigned long offset)
-{
-    unsigned long i;
-    pmd_t *pmd = pmd_offset(pud, offset);
-    
-    for (i = 0; i < PTRS_PER_PMD; i++, pmd++) {
-        if (!pmd_present(*pmd))
-            continue;
-        
-        relinquish_pmd(d, pmd, offset + (i << PMD_SHIFT));
-    }
-    pmd_free(pmd_offset(pud, offset));
-}
-
-static void
-relinquish_pgd(struct domain* d, pgd_t *pgd, unsigned long offset)
-{
-    unsigned long i;
-    pud_t *pud = pud_offset(pgd, offset);
-
-    for (i = 0; i < PTRS_PER_PUD; i++, pud++) {
-        if (!pud_present(*pud))
-            continue;
-
-        relinquish_pud(d, pud, offset + (i << PUD_SHIFT));
-    }
-    pud_free(pud_offset(pgd, offset));
-}
-
-static void
-relinquish_mm(struct domain* d)
-{
-    struct mm_struct* mm = &d->arch.mm;
-    unsigned long i;
-    pgd_t* pgd;
-
-    if (mm->pgd == NULL)
-        return;
-
-    pgd = pgd_offset(mm, 0);
-    for (i = 0; i < PTRS_PER_PGD; i++, pgd++) {
-        if (!pgd_present(*pgd))
-            continue;
-
-        relinquish_pgd(d, pgd, i << PGDIR_SHIFT);
-    }
-    pgd_free(mm->pgd);
-    mm->pgd = NULL;
 }
 
 void domain_relinquish_resources(struct domain *d)
@@ -517,524 +497,6 @@ void domain_relinquish_resources(struct domain *d)
     relinquish_memory(d, &d->xenpage_list);
     relinquish_memory(d, &d->page_list);
 }
-
-// heavily leveraged from linux/arch/ia64/kernel/process.c:copy_thread()
-// and linux/arch/ia64/kernel/process.c:kernel_thread()
-void new_thread(struct vcpu *v,
-                unsigned long start_pc,
-                unsigned long start_stack,
-                unsigned long start_info)
-{
-	struct domain *d = v->domain;
-	struct pt_regs *regs;
-	extern char dom0_command_line[];
-
-#ifdef CONFIG_DOMAIN0_CONTIGUOUS
-	if (d == dom0 && v->vcpu_id == 0) start_pc += dom0_start;
-#endif
-
-	regs = vcpu_regs (v);
-	if (VMX_DOMAIN(v)) {
-		/* dt/rt/it:1;i/ic:1, si:1, vm/bn:1, ac:1 */
-		regs->cr_ipsr = 0x501008826008; /* Need to be expanded as macro */
-	} else {
-		regs->cr_ipsr = ia64_getreg(_IA64_REG_PSR)
-		  | IA64_PSR_BITS_TO_SET | IA64_PSR_BN;
-		regs->cr_ipsr &= ~(IA64_PSR_BITS_TO_CLEAR
-				   | IA64_PSR_RI | IA64_PSR_IS);
-		regs->cr_ipsr |= 2UL << IA64_PSR_CPL0_BIT; // domain runs at PL2
-	}
-	regs->cr_iip = start_pc;
-	regs->cr_ifs = 1UL << 63; /* or clear? */
-	regs->ar_fpsr = FPSR_DEFAULT;
-
-	if (VMX_DOMAIN(v)) {
-		vmx_init_all_rr(v);
-		if (d == dom0)
-		    regs->r28 = dom_fw_setup(d,dom0_command_line,
-					     COMMAND_LINE_SIZE);
-		/* Virtual processor context setup */
-		VCPU(v, vpsr) = IA64_PSR_BN;
-		VCPU(v, dcr) = 0;
-	} else {
-		init_all_rr(v);
-		if (v->vcpu_id == 0) {
-			/* Build the firmware.  */
-			if (d == dom0) 
-				regs->r28 = dom_fw_setup(d,dom0_command_line,
-							 COMMAND_LINE_SIZE);
-			else {
-				const char *cmdline = d->arch.cmdline;
-				int len;
-
-				if (*cmdline == 0) {
-#define DEFAULT_CMDLINE "nomca nosmp xencons=tty0 console=tty0 root=/dev/hda1"
-					cmdline = DEFAULT_CMDLINE;
-					len = sizeof (DEFAULT_CMDLINE);
-					printf("domU command line defaulted to"
-					       DEFAULT_CMDLINE "\n");
-				}
-				else
-					len = IA64_COMMAND_LINE_SIZE;
-
-				regs->r28 = dom_fw_setup (d, cmdline, len);
-			}
-			d->shared_info->arch.flags = (d == dom0) ?
-				(SIF_INITDOMAIN|SIF_PRIVILEGED) : 0;
-		}
-		regs->ar_rsc |= (2 << 2); /* force PL2/3 */
-		VCPU(v, banknum) = 1;
-		VCPU(v, metaphysical_mode) = 1;
-		VCPU(v, interrupt_mask_addr) =
-		    (uint64_t)SHAREDINFO_ADDR + INT_ENABLE_OFFSET(v);
-		VCPU(v, itv) = (1 << 16); /* timer vector masked */
-	}
-}
-
-// stolen from share_xen_page_with_guest() in xen/arch/x86/mm.c
-void
-share_xen_page_with_guest(struct page_info *page,
-                          struct domain *d, int readonly)
-{
-    if ( page_get_owner(page) == d )
-        return;
-
-#if 1
-    if (readonly) {
-        printk("%s:%d readonly is not supported yet\n", __func__, __LINE__);
-    }
-#endif
-
-    // alloc_xenheap_pages() doesn't initialize page owner.
-    //BUG_ON(page_get_owner(page) != NULL);
-#if 0
-    if (get_gpfn_from_mfn(page_to_mfn(page)) != INVALID_M2P_ENTRY) {
-        printk("%s:%d page 0x%p mfn 0x%lx gpfn 0x%lx\n", __func__, __LINE__,
-               page, page_to_mfn(page), get_gpfn_from_mfn(page_to_mfn(page)));
-    }
-#endif
-    // grant_table_destroy() release these pages.
-    // but it doesn't clear m2p entry. So there might remain stale entry.
-    // We clear such a stale entry here.
-    set_gpfn_from_mfn(page_to_mfn(page), INVALID_M2P_ENTRY);
-
-    spin_lock(&d->page_alloc_lock);
-
-#ifndef __ia64__
-    /* The incremented type count pins as writable or read-only. */
-    page->u.inuse.type_info  = (readonly ? PGT_none : PGT_writable_page);
-    page->u.inuse.type_info |= PGT_validated | 1;
-#endif
-
-    page_set_owner(page, d);
-    wmb(); /* install valid domain ptr before updating refcnt. */
-    ASSERT(page->count_info == 0);
-    page->count_info |= PGC_allocated | 1;
-
-    if ( unlikely(d->xenheap_pages++ == 0) )
-        get_knownalive_domain(d);
-    list_add_tail(&page->list, &d->xenpage_list);
-
-    spin_unlock(&d->page_alloc_lock);
-}
-
-void
-share_xen_page_with_privileged_guests(struct page_info *page, int readonly)
-{
-    share_xen_page_with_guest(page, dom_xen, readonly);
-}
-
-//XXX !xxx_present() should be used instread of !xxx_none()?
-static pte_t*
-lookup_alloc_domain_pte(struct domain* d, unsigned long mpaddr)
-{
-    struct mm_struct *mm = &d->arch.mm;
-    pgd_t *pgd;
-    pud_t *pud;
-    pmd_t *pmd;
-
-    BUG_ON(mm->pgd == NULL);
-    pgd = pgd_offset(mm, mpaddr);
-    if (pgd_none(*pgd)) {
-        pgd_populate(mm, pgd, pud_alloc_one(mm,mpaddr));
-    }
-
-    pud = pud_offset(pgd, mpaddr);
-    if (pud_none(*pud)) {
-        pud_populate(mm, pud, pmd_alloc_one(mm,mpaddr));
-    }
-
-    pmd = pmd_offset(pud, mpaddr);
-    if (pmd_none(*pmd)) {
-        pmd_populate_kernel(mm, pmd, pte_alloc_one_kernel(mm, mpaddr));
-    }
-
-    return pte_offset_map(pmd, mpaddr);
-}
-
-//XXX xxx_none() should be used instread of !xxx_present()?
-static pte_t*
-lookup_noalloc_domain_pte(struct domain* d, unsigned long mpaddr)
-{
-    struct mm_struct *mm = &d->arch.mm;
-    pgd_t *pgd;
-    pud_t *pud;
-    pmd_t *pmd;
-
-    BUG_ON(mm->pgd == NULL);
-    pgd = pgd_offset(mm, mpaddr);
-    if (!pgd_present(*pgd))
-        goto not_present;
-
-    pud = pud_offset(pgd, mpaddr);
-    if (!pud_present(*pud))
-        goto not_present;
-
-    pmd = pmd_offset(pud, mpaddr);
-    if (!pmd_present(*pmd))
-        goto not_present;
-
-    return pte_offset_map(pmd, mpaddr);
-
-not_present:
-    return NULL;
-}
-
-#ifdef CONFIG_XEN_IA64_DOM0_VP
-static pte_t*
-lookup_noalloc_domain_pte_none(struct domain* d, unsigned long mpaddr)
-{
-    struct mm_struct *mm = &d->arch.mm;
-    pgd_t *pgd;
-    pud_t *pud;
-    pmd_t *pmd;
-
-    BUG_ON(mm->pgd == NULL);
-    pgd = pgd_offset(mm, mpaddr);
-    if (pgd_none(*pgd))
-        goto not_present;
-
-    pud = pud_offset(pgd, mpaddr);
-    if (pud_none(*pud))
-        goto not_present;
-
-    pmd = pmd_offset(pud, mpaddr);
-    if (pmd_none(*pmd))
-        goto not_present;
-
-    return pte_offset_map(pmd, mpaddr);
-
-not_present:
-    return NULL;
-}
-#endif
-
-/* Allocate a new page for domain and map it to the specified metaphysical 
-   address.  */
-struct page_info *
-__assign_new_domain_page(struct domain *d, unsigned long mpaddr, pte_t* pte)
-{
-    struct page_info *p = NULL;
-    unsigned long maddr;
-    int ret;
-
-    BUG_ON(!pte_none(*pte));
-
-#ifdef CONFIG_DOMAIN0_CONTIGUOUS
-    if (d == dom0) {
-#if 0
-        if (mpaddr < dom0_start || mpaddr >= dom0_start + dom0_size) {
-            /* FIXME: is it true ?
-               dom0 memory is not contiguous!  */
-            panic("assign_new_domain_page: bad domain0 "
-                  "mpaddr=%lx, start=%lx, end=%lx!\n",
-                  mpaddr, dom0_start, dom0_start+dom0_size);
-        }
-#endif
-        p = mfn_to_page((mpaddr >> PAGE_SHIFT));
-        return p;
-    }
-#endif
-
-    p = alloc_domheap_page(d);
-    if (unlikely(!p)) {
-        printf("assign_new_domain_page: Can't alloc!!!! Aaaargh!\n");
-        return(p);
-    }
-
-    // zero out pages for security reasons
-    clear_page(page_to_virt(p));
-    maddr = page_to_maddr (p);
-    if (unlikely(maddr > __get_cpu_var(vhpt_paddr)
-                 && maddr < __get_cpu_var(vhpt_pend))) {
-        /* FIXME: how can this happen ?
-           vhpt is allocated by alloc_domheap_page.  */
-        printf("assign_new_domain_page: reassigned vhpt page %lx!!\n",
-               maddr);
-    }
-
-    ret = get_page(p, d);
-    BUG_ON(ret == 0);
-    set_pte(pte, pfn_pte(maddr >> PAGE_SHIFT,
-                         __pgprot(__DIRTY_BITS | _PAGE_PL_2 | _PAGE_AR_RWX)));
-
-    mb ();
-    //XXX CONFIG_XEN_IA64_DOM0_VP
-    //    TODO racy
-    set_gpfn_from_mfn(page_to_mfn(p), mpaddr >> PAGE_SHIFT);
-    return p;
-}
-
-struct page_info *
-assign_new_domain_page(struct domain *d, unsigned long mpaddr)
-{
-#ifdef CONFIG_DOMAIN0_CONTIGUOUS
-    pte_t dummy_pte = __pte(0);
-    return __assign_new_domain_page(d, mpaddr, &dummy_pte);
-#else
-    struct page_info *p = NULL;
-    pte_t *pte;
-
-    pte = lookup_alloc_domain_pte(d, mpaddr);
-    if (pte_none(*pte)) {
-        p = __assign_new_domain_page(d, mpaddr, pte);
-    } else {
-        DPRINTK("%s: d 0x%p mpaddr %lx already mapped!\n",
-                __func__, d, mpaddr);
-    }
-
-    return p;
-#endif
-}
-
-void
-assign_new_domain0_page(struct domain *d, unsigned long mpaddr)
-{
-#ifndef CONFIG_DOMAIN0_CONTIGUOUS
-    pte_t *pte;
-
-    BUG_ON(d != dom0);
-    pte = lookup_alloc_domain_pte(d, mpaddr);
-    if (pte_none(*pte)) {
-        struct page_info *p = __assign_new_domain_page(d, mpaddr, pte);
-        if (p == NULL) {
-            panic("%s: can't allocate page for dom0", __func__);
-        }
-    }
-#endif
-}
-
-/* map a physical address to the specified metaphysical addr */
-// flags: currently only ASSIGN_readonly
-void
-__assign_domain_page(struct domain *d,
-                     unsigned long mpaddr, unsigned long physaddr,
-                     unsigned long flags)
-{
-    pte_t *pte;
-    unsigned long arflags = (flags & ASSIGN_readonly)? _PAGE_AR_R: _PAGE_AR_RWX;
-
-    pte = lookup_alloc_domain_pte(d, mpaddr);
-    if (pte_none(*pte)) {
-        set_pte(pte, pfn_pte(physaddr >> PAGE_SHIFT,
-                             __pgprot(__DIRTY_BITS | _PAGE_PL_2 | arflags)));
-        mb ();
-    } else
-        printk("%s: mpaddr %lx already mapped!\n", __func__, mpaddr);
-}
-
-/* get_page() and map a physical address to the specified metaphysical addr */
-void
-assign_domain_page(struct domain *d,
-                   unsigned long mpaddr, unsigned long physaddr)
-{
-    struct page_info* page = mfn_to_page(physaddr >> PAGE_SHIFT);
-    int ret;
-
-    BUG_ON((physaddr & GPFN_IO_MASK) != GPFN_MEM);
-    ret = get_page(page, d);
-    BUG_ON(ret == 0);
-    __assign_domain_page(d, mpaddr, physaddr, ASSIGN_writable);
-
-    //XXX CONFIG_XEN_IA64_DOM0_VP
-    //    TODO racy
-    set_gpfn_from_mfn(physaddr >> PAGE_SHIFT, mpaddr >> PAGE_SHIFT);
-}
-
-#ifdef CONFIG_XEN_IA64_DOM0_VP
-static void
-assign_domain_same_page(struct domain *d,
-                        unsigned long mpaddr, unsigned long size,
-                        unsigned long flags)
-{
-    //XXX optimization
-    unsigned long end = mpaddr + size;
-    for (; mpaddr < end; mpaddr += PAGE_SIZE) {
-        __assign_domain_page(d, mpaddr, mpaddr, flags);
-    }
-}
-
-static int
-efi_mmio(unsigned long physaddr, unsigned long size)
-{
-    void *efi_map_start, *efi_map_end;
-    u64 efi_desc_size;
-    void* p;
-
-    efi_map_start = __va(ia64_boot_param->efi_memmap);
-    efi_map_end   = efi_map_start + ia64_boot_param->efi_memmap_size;
-    efi_desc_size = ia64_boot_param->efi_memdesc_size;
-
-    for (p = efi_map_start; p < efi_map_end; p += efi_desc_size) {
-        efi_memory_desc_t* md = (efi_memory_desc_t *)p;
-        unsigned long start = md->phys_addr;
-        unsigned long end = md->phys_addr + (md->num_pages << EFI_PAGE_SHIFT);
-        
-        if (start <= physaddr && physaddr < end) {
-            if ((physaddr + size) > end) {
-                DPRINTK("%s:%d physaddr 0x%lx size = 0x%lx\n",
-                        __func__, __LINE__, physaddr, size);
-                return 0;
-            }
-
-            // for io space
-            if (md->type == EFI_MEMORY_MAPPED_IO ||
-                md->type == EFI_MEMORY_MAPPED_IO_PORT_SPACE) {
-                return 1;
-            }
-
-            // for runtime
-            // see efi_enter_virtual_mode(void)
-            // in linux/arch/ia64/kernel/efi.c
-            if ((md->attribute & EFI_MEMORY_RUNTIME) &&
-                !(md->attribute & EFI_MEMORY_WB)) {
-                return 1;
-            }
-
-            DPRINTK("%s:%d physaddr 0x%lx size = 0x%lx\n",
-                    __func__, __LINE__, physaddr, size);
-            return 0;
-        }
-
-        if (physaddr < start) {
-            break;
-        }
-    }
-
-    return 1;
-}
-
-unsigned long
-assign_domain_mmio_page(struct domain *d,
-                        unsigned long mpaddr, unsigned long size)
-{
-    if (size == 0) {
-        DPRINTK("%s: domain %p mpaddr 0x%lx size = 0x%lx\n",
-                __func__, d, mpaddr, size);
-    }
-    if (!efi_mmio(mpaddr, size)) {
-        DPRINTK("%s:%d domain %p mpaddr 0x%lx size = 0x%lx\n",
-                __func__, __LINE__, d, mpaddr, size);
-        return -EINVAL;
-    }
-    assign_domain_same_page(d, mpaddr, size, ASSIGN_writable);
-    return mpaddr;
-}
-
-unsigned long
-assign_domain_mach_page(struct domain *d,
-                        unsigned long mpaddr, unsigned long size,
-                        unsigned long flags)
-{
-    assign_domain_same_page(d, mpaddr, size, flags);
-    return mpaddr;
-}
-
-//XXX selege hammer.
-//    flush finer range.
-void
-domain_page_flush(struct domain* d, unsigned long mpaddr,
-                  unsigned long old_mfn, unsigned long new_mfn)
-{
-    domain_flush_vtlb_all();
-}
-#endif
-
-//XXX heavily depends on the struct page_info layout.
-//
-// if (page_get_owner(page) == d &&
-//     test_and_clear_bit(_PGC_allocated, &page->count_info)) {
-//     put_page(page);
-// }
-static void
-try_to_clear_PGC_allocate(struct domain* d, struct page_info* page)
-{
-    u32 _d, _nd;
-    u64 x, nx, y;
-
-    _d = pickle_domptr(d);
-    y = *((u64*)&page->count_info);
-    do {
-        x = y;
-        _nd = x >> 32;
-        nx = x - 1;
-        __clear_bit(_PGC_allocated, &nx);
-
-        if (unlikely(!(x & PGC_allocated)) || unlikely(_nd != _d)) {
-            struct domain* nd = unpickle_domptr(_nd);
-            if (nd == NULL) {
-                DPRINTK("gnttab_transfer: Bad page %p: ed=%p(%u) 0x%x, "
-                        "sd=%p 0x%x,"
-                        " caf=%016lx, taf=%" PRtype_info "\n",
-                        (void *) page_to_mfn(page),
-                        d, d->domain_id, _d,
-                        nd, _nd,
-                        x,
-                        page->u.inuse.type_info);
-            }
-            break;
-        }
-
-        BUG_ON((nx & PGC_count_mask) < 1);
-        y = cmpxchg((u64*)&page->count_info, x, nx);
-    } while (unlikely(y != x));
-}
-
-#ifdef CONFIG_XEN_IA64_DOM0_VP
-static void
-zap_domain_page_one(struct domain *d, unsigned long mpaddr, int do_put_page)
-{
-    struct mm_struct *mm = &d->arch.mm;
-    pte_t *pte;
-    pte_t old_pte;
-    unsigned long mfn;
-    struct page_info *page;
-
-    pte = lookup_noalloc_domain_pte_none(d, mpaddr);
-    if (pte == NULL)
-        return;
-    if (pte_none(*pte))
-        return;
-
-    // update pte
-    old_pte = ptep_get_and_clear(mm, mpaddr, pte);
-    mfn = pte_pfn(old_pte);
-    page = mfn_to_page(mfn);
-    BUG_ON((page->count_info & PGC_count_mask) == 0);
-
-    if (page_get_owner(page) == d) {
-        BUG_ON(get_gpfn_from_mfn(mfn) != (mpaddr >> PAGE_SHIFT));
-        set_gpfn_from_mfn(mfn, INVALID_M2P_ENTRY);
-    }
-
-    domain_page_flush(d, mpaddr, mfn, INVALID_MFN);
-
-    if (do_put_page) {
-        try_to_clear_PGC_allocate(d, page);
-        put_page(page);
-    }
-}
-#endif
 
 void build_physmap_table(struct domain *d)
 {
@@ -1053,439 +515,6 @@ void build_physmap_table(struct domain *d)
 	d->arch.physmap_built = 1;
 }
 
-void mpafoo(unsigned long mpaddr)
-{
-	extern unsigned long privop_trace;
-	if (mpaddr == 0x3800)
-		privop_trace = 1;
-}
-
-#ifdef CONFIG_XEN_IA64_DOM0_VP
-unsigned long
-____lookup_domain_mpa(struct domain *d, unsigned long mpaddr)
-{
-    pte_t *pte;
-
-    pte = lookup_noalloc_domain_pte(d, mpaddr);
-    if (pte == NULL)
-        goto not_present;
-
-    if (pte_present(*pte))
-        return (pte->pte & _PFN_MASK);
-    else if (VMX_DOMAIN(d->vcpu[0]))
-        return GPFN_INV_MASK;
-
-not_present:
-    return INVALID_MFN;
-}
-
-unsigned long
-__lookup_domain_mpa(struct domain *d, unsigned long mpaddr)
-{
-    unsigned long machine = ____lookup_domain_mpa(d, mpaddr);
-    if (machine != INVALID_MFN)
-        return machine;
-
-    printk("%s: d 0x%p id %d current 0x%p id %d\n",
-           __func__, d, d->domain_id, current, current->vcpu_id);
-    printk("%s: bad mpa 0x%lx (max_pages 0x%lx)\n",
-           __func__, mpaddr, (unsigned long)d->max_pages << PAGE_SHIFT);
-    return INVALID_MFN;
-}
-#endif
-
-unsigned long lookup_domain_mpa(struct domain *d, unsigned long mpaddr)
-{
-	pte_t *pte;
-
-#ifdef CONFIG_DOMAIN0_CONTIGUOUS
-	if (d == dom0) {
-		pte_t pteval;
-		if (mpaddr < dom0_start || mpaddr >= dom0_start + dom0_size) {
-			//printk("lookup_domain_mpa: bad dom0 mpaddr 0x%lx!\n",mpaddr);
-			//printk("lookup_domain_mpa: start=0x%lx,end=0x%lx!\n",dom0_start,dom0_start+dom0_size);
-			mpafoo(mpaddr);
-		}
-		pteval = pfn_pte(mpaddr >> PAGE_SHIFT,
-			__pgprot(__DIRTY_BITS | _PAGE_PL_2 | _PAGE_AR_RWX));
-		return pte_val(pteval);
-	}
-#endif
-	pte = lookup_noalloc_domain_pte(d, mpaddr);
-	if (pte != NULL) {
-		if (pte_present(*pte)) {
-//printk("lookup_domain_page: found mapping for %lx, pte=%lx\n",mpaddr,pte_val(*pte));
-			return pte_val(*pte);
-		} else if (VMX_DOMAIN(d->vcpu[0]))
-			return GPFN_INV_MASK;
-	}
-
-	printk("%s: d 0x%p id %d current 0x%p id %d\n",
-	       __func__, d, d->domain_id, current, current->vcpu_id);
-	if ((mpaddr >> PAGE_SHIFT) < d->max_pages)
-		printk("%s: non-allocated mpa 0x%lx (< 0x%lx)\n", __func__,
-		       mpaddr, (unsigned long)d->max_pages << PAGE_SHIFT);
-	else
-		printk("%s: bad mpa 0x%lx (=> 0x%lx)\n", __func__,
-		       mpaddr, (unsigned long)d->max_pages << PAGE_SHIFT);
-	mpafoo(mpaddr);
-
-	//XXX This is a work around until the emulation memory access to a region
-	//    where memory or device are attached is implemented.
-	return pte_val(pfn_pte(0, __pgprot(__DIRTY_BITS | _PAGE_PL_2 | _PAGE_AR_RWX)));
-}
-
-#ifdef CONFIG_XEN_IA64_DOM0_VP
-//XXX SMP
-unsigned long
-dom0vp_zap_physmap(struct domain *d, unsigned long gpfn,
-                   unsigned int extent_order)
-{
-    unsigned long ret = 0;
-    if (extent_order != 0) {
-        //XXX
-        ret = -ENOSYS;
-        goto out;
-    }
-
-    zap_domain_page_one(d, gpfn << PAGE_SHIFT, 1);
-
-out:
-    return ret;
-}
-
-// caller must get_page(mfn_to_page(mfn)) before
-// caller must call set_gpfn_from_mfn().
-// flags: currently only ASSIGN_readonly
-static void
-assign_domain_page_replace(struct domain *d, unsigned long mpaddr,
-                           unsigned long mfn, unsigned long flags)
-{
-    struct mm_struct *mm = &d->arch.mm;
-    pte_t* pte;
-    pte_t old_pte;
-    pte_t npte;
-    unsigned long arflags = (flags & ASSIGN_readonly)? _PAGE_AR_R: _PAGE_AR_RWX;
-
-    pte = lookup_alloc_domain_pte(d, mpaddr);
-
-    // update pte
-    npte = pfn_pte(mfn, __pgprot(__DIRTY_BITS | _PAGE_PL_2 | arflags));
-    old_pte = ptep_xchg(mm, mpaddr, pte, npte);
-    if (pte_mem(old_pte)) {
-        unsigned long old_mfn;
-        struct page_info* old_page;
-
-        // XXX should previous underlying page be removed?
-        //  or should error be returned because it is a due to a domain?
-        old_mfn = pte_pfn(old_pte);//XXX
-        old_page = mfn_to_page(old_mfn);
-
-        if (page_get_owner(old_page) == d) {
-            BUG_ON(get_gpfn_from_mfn(old_mfn) != (mpaddr >> PAGE_SHIFT));
-            set_gpfn_from_mfn(old_mfn, INVALID_M2P_ENTRY);
-        }
-
-        domain_page_flush(d, mpaddr, old_mfn, mfn);
-
-        try_to_clear_PGC_allocate(d, old_page);
-        put_page(old_page);
-    } else {
-        BUG_ON(!mfn_valid(mfn));
-        BUG_ON(page_get_owner(mfn_to_page(mfn)) == d &&
-               get_gpfn_from_mfn(mfn) != INVALID_M2P_ENTRY);
-    }
-}
-
-unsigned long
-dom0vp_add_physmap(struct domain* d, unsigned long gpfn, unsigned long mfn,
-                   unsigned long flags, domid_t domid)
-{
-    int error = 0;
-    struct domain* rd;
-
-    rd = find_domain_by_id(domid);
-    if (unlikely(rd == NULL)) {
-        switch (domid) {
-        case DOMID_XEN:
-            rd = dom_xen;
-            break;
-        case DOMID_IO:
-            rd = dom_io;
-            break;
-        default:
-            DPRINTK("d 0x%p domid %d "
-                    "pgfn 0x%lx mfn 0x%lx flags 0x%lx domid %d\n",
-                    d, d->domain_id, gpfn, mfn, flags, domid);
-            error = -ESRCH;
-            goto out0;
-        }
-        BUG_ON(rd == NULL);
-        get_knownalive_domain(rd);
-    }
-
-    if (unlikely(rd == d)) {
-        error = -EINVAL;
-        goto out1;
-    }
-    if (unlikely(get_page(mfn_to_page(mfn), rd) == 0)) {
-        error = -EINVAL;
-        goto out1;
-    }
-
-    assign_domain_page_replace(d, gpfn << PAGE_SHIFT, mfn, flags);
-    //don't update p2m table because this page belongs to rd, not d.
-out1:
-    put_domain(rd);
-out0:
-    return error;
-}
-
-// grant table host mapping
-// mpaddr: host_addr: pseudo physical address
-// mfn: frame: machine page frame
-// flags: GNTMAP_readonly | GNTMAP_application_map | GNTMAP_contains_pte
-int
-create_grant_host_mapping(unsigned long gpaddr,
-			  unsigned long mfn, unsigned int flags)
-{
-    struct domain* d = current->domain;
-    struct page_info* page;
-    int ret;
-
-    if (flags & (GNTMAP_device_map | 
-                 GNTMAP_application_map | GNTMAP_contains_pte)) {
-        DPRINTK("%s: flags 0x%x\n", __func__, flags);
-        return GNTST_general_error;
-    }
-
-    page = mfn_to_page(mfn);
-    ret = get_page(page, page_get_owner(page));
-    BUG_ON(ret == 0);
-
-    assign_domain_page_replace(d, gpaddr, mfn, (flags & GNTMAP_readonly)?
-                                              ASSIGN_readonly: ASSIGN_writable);
-    return GNTST_okay;
-}
-
-// grant table host unmapping
-int
-destroy_grant_host_mapping(unsigned long gpaddr,
-			   unsigned long mfn, unsigned int flags)
-{
-    struct domain* d = current->domain;
-    pte_t* pte;
-    pte_t old_pte;
-    unsigned long old_mfn = INVALID_MFN;
-    struct page_info* old_page;
-
-    if (flags & (GNTMAP_application_map | GNTMAP_contains_pte)) {
-        DPRINTK("%s: flags 0x%x\n", __func__, flags);
-        return GNTST_general_error;
-    }
-
-    pte = lookup_noalloc_domain_pte(d, gpaddr);
-    if (pte == NULL || !pte_present(*pte) || pte_pfn(*pte) != mfn)
-        return GNTST_general_error;
-
-    // update pte
-    old_pte = ptep_get_and_clear(&d->arch.mm, gpaddr, pte);
-    if (pte_present(old_pte)) {
-        old_mfn = pte_pfn(old_pte);
-    } else {
-        return GNTST_general_error;
-    }
-    domain_page_flush(d, gpaddr, old_mfn, INVALID_MFN);
-
-    old_page = mfn_to_page(old_mfn);
-    BUG_ON(page_get_owner(old_page) == d);//try_to_clear_PGC_allocate(d, page) is not needed.
-    put_page(old_page);
-
-    return GNTST_okay;
-}
-
-//XXX needs refcount patch
-//XXX heavily depends on the struct page layout.
-//XXX SMP
-int
-steal_page(struct domain *d, struct page_info *page, unsigned int memflags)
-{
-#if 0 /* if big endian */
-# error "implement big endian version of steal_page()"
-#endif
-    u32 _d, _nd;
-    u64 x, nx, y;
-    unsigned long mpaddr = get_gpfn_from_mfn(page_to_mfn(page)) << PAGE_SHIFT;
-    struct page_info *new;
-
-    zap_domain_page_one(d, mpaddr, 0);
-    put_page(page);
-
-    spin_lock(&d->page_alloc_lock);
-
-    /*
-     * The tricky bit: atomically release ownership while there is just one
-     * benign reference to the page (PGC_allocated). If that reference
-     * disappears then the deallocation routine will safely spin.
-     */
-    _d  = pickle_domptr(d);
-    y = *((u64*)&page->count_info);
-    do {
-        x = y;
-        nx = x & 0xffffffff;
-        // page->count_info: untouched
-        // page->u.inused._domain = 0;
-        _nd = x >> 32;
-
-        if (unlikely((x & (PGC_count_mask | PGC_allocated)) !=
-                     (1 | PGC_allocated)) ||
-            unlikely(_nd != _d)) {
-            struct domain* nd = unpickle_domptr(_nd);
-            if (nd == NULL) {
-                DPRINTK("gnttab_transfer: Bad page %p: ed=%p(%u) 0x%x, "
-                        "sd=%p 0x%x,"
-                        " caf=%016lx, taf=%" PRtype_info "\n",
-                        (void *) page_to_mfn(page),
-                        d, d->domain_id, _d,
-                        nd, _nd,
-                        x,
-                        page->u.inuse.type_info);
-            } else {
-                DPRINTK("gnttab_transfer: Bad page %p: ed=%p(%u) 0x%x, "
-                        "sd=%p(%u) 0x%x,"
-                        " caf=%016lx, taf=%" PRtype_info "\n",
-                        (void *) page_to_mfn(page),
-                        d, d->domain_id, _d,
-                        nd, nd->domain_id, _nd,
-                        x,
-                        page->u.inuse.type_info);
-            }
-            spin_unlock(&d->page_alloc_lock);
-            return -1;
-        }
-
-        y = cmpxchg((u64*)&page->count_info, x, nx);
-    } while (unlikely(y != x));
-
-    /*
-     * Unlink from 'd'. At least one reference remains (now anonymous), so
-     * noone else is spinning to try to delete this page from 'd'.
-     */
-    if ( !(memflags & MEMF_no_refcount) )
-        d->tot_pages--;
-    list_del(&page->list);
-
-    spin_unlock(&d->page_alloc_lock);
-
-#if 1
-    //XXX Until net_rx_action() fix
-    // assign new page for this mpaddr
-    new = assign_new_domain_page(d, mpaddr);
-    BUG_ON(new == NULL);//XXX
-#endif
-
-    return 0;
-}
-
-void
-guest_physmap_add_page(struct domain *d, unsigned long gpfn,
-                       unsigned long mfn)
-{
-    int ret;
-
-    ret = get_page(mfn_to_page(mfn), d);
-    BUG_ON(ret == 0);
-    assign_domain_page_replace(d, gpfn << PAGE_SHIFT, mfn, ASSIGN_writable);
-    set_gpfn_from_mfn(mfn, gpfn);//XXX SMP
-
-    //BUG_ON(mfn != ((lookup_domain_mpa(d, gpfn << PAGE_SHIFT) & _PFN_MASK) >> PAGE_SHIFT));
-}
-
-void
-guest_physmap_remove_page(struct domain *d, unsigned long gpfn,
-                          unsigned long mfn)
-{
-    BUG_ON(mfn == 0);//XXX
-    zap_domain_page_one(d, gpfn << PAGE_SHIFT, 1);
-}
-#endif
-
-/* Flush cache of domain d.  */
-void domain_cache_flush (struct domain *d, int sync_only)
-{
-	struct mm_struct *mm = &d->arch.mm;
-	pgd_t *pgd = mm->pgd;
-	unsigned long maddr;
-	int i,j,k, l;
-	int nbr_page = 0;
-	void (*flush_func)(unsigned long start, unsigned long end);
-	extern void flush_dcache_range (unsigned long, unsigned long);
-
-	if (sync_only)
-		flush_func = &flush_icache_range;
-	else
-		flush_func = &flush_dcache_range;
-
-#ifdef CONFIG_DOMAIN0_CONTIGUOUS
-	if (d == dom0) {
-		/* This is not fully correct (because of hole), but it should
-		   be enough for now.  */
-		(*flush_func)(__va_ul (dom0_start),
-			      __va_ul (dom0_start + dom0_size));
-		return;
-	}
-#endif
-	for (i = 0; i < PTRS_PER_PGD; pgd++, i++) {
-		pud_t *pud;
-		if (!pgd_present(*pgd))
-			continue;
-		pud = pud_offset(pgd, 0);
-		for (j = 0; j < PTRS_PER_PUD; pud++, j++) {
-			pmd_t *pmd;
-			if (!pud_present(*pud))
-				continue;
-			pmd = pmd_offset(pud, 0);
-			for (k = 0; k < PTRS_PER_PMD; pmd++, k++) {
-				pte_t *pte;
-				if (!pmd_present(*pmd))
-					continue;
-				pte = pte_offset_map(pmd, 0);
-				for (l = 0; l < PTRS_PER_PTE; pte++, l++) {
-					if (!pte_present(*pte))
-						continue;
-					/* Convert PTE to maddr.  */
-					maddr = __va_ul (pte_val(*pte)
-							 & _PAGE_PPN_MASK);
-					(*flush_func)(maddr, maddr+ PAGE_SIZE);
-					nbr_page++;
-				}
-			}
-		}
-	}
-	//printf ("domain_cache_flush: %d %d pages\n", d->domain_id, nbr_page);
-}
-
-// FIXME: ONLY USE FOR DOMAIN PAGE_SIZE == PAGE_SIZE
-#if 1
-unsigned long domain_mpa_to_imva(struct domain *d, unsigned long mpaddr)
-{
-	unsigned long pte = lookup_domain_mpa(d,mpaddr);
-	unsigned long imva;
-
-	pte &= _PAGE_PPN_MASK;
-	imva = (unsigned long) __va(pte);
-	imva |= mpaddr & ~PAGE_MASK;
-	return(imva);
-}
-#else
-unsigned long domain_mpa_to_imva(struct domain *d, unsigned long mpaddr)
-{
-    unsigned long imva = __gpa_to_mpa(d, mpaddr);
-
-    return __va(imva);
-}
-#endif
-
 // remove following line if not privifying in memory
 //#define HAVE_PRIVIFY_MEMORY
 #ifndef HAVE_PRIVIFY_MEMORY
@@ -1503,40 +532,20 @@ int elf_sanity_check(Elf_Ehdr *ehdr)
 	return 1;
 }
 
-static void copy_memory(void *dst, void *src, int size)
-{
-	int remain;
-
-	if (IS_XEN_ADDRESS(dom0,(unsigned long) src)) {
-		memcpy(dst,src,size);
-	}
-	else {
-		printf("About to call __copy_from_user(%p,%p,%d)\n",
-			dst,src,size);
-		while ((remain = __copy_from_user(dst,src,size)) != 0) {
-			printf("incomplete user copy, %d remain of %d\n",
-				remain,size);
-			dst += size - remain; src += size - remain;
-			size -= remain;
-		}
-	}
-}
-
 static void loaddomainelfimage(struct domain *d, unsigned long image_start)
 {
 	char *elfbase = (char *) image_start;
-	//Elf_Ehdr *ehdr = (Elf_Ehdr *)image_start;
 	Elf_Ehdr ehdr;
 	Elf_Phdr phdr;
 	int h, filesz, memsz;
 	unsigned long elfaddr, dom_mpaddr, dom_imva;
 	struct page_info *p;
   
-	copy_memory(&ehdr, (void *) image_start, sizeof(Elf_Ehdr));
+	memcpy(&ehdr, (void *) image_start, sizeof(Elf_Ehdr));
 	for ( h = 0; h < ehdr.e_phnum; h++ ) {
-		copy_memory(&phdr,
-			    elfbase + ehdr.e_phoff + (h*ehdr.e_phentsize),
-			    sizeof(Elf_Phdr));
+		memcpy(&phdr,
+		       elfbase + ehdr.e_phoff + (h*ehdr.e_phentsize),
+		       sizeof(Elf_Phdr));
 		if ((phdr.p_type != PT_LOAD))
 		    continue;
 
@@ -1551,7 +560,7 @@ static void loaddomainelfimage(struct domain *d, unsigned long image_start)
 			if (dom_mpaddr+memsz>dom0_size)
 				panic("Dom0 doesn't fit in memory space!\n");
 			dom_imva = __va_ul(dom_mpaddr + dom0_start);
-			copy_memory((void *)dom_imva, (void *)elfaddr, filesz);
+			memcpy((void *)dom_imva, (void *)elfaddr, filesz);
 			if (memsz > filesz)
 				memset((void *)dom_imva+filesz, 0,
 				       memsz-filesz);
@@ -1569,13 +578,13 @@ static void loaddomainelfimage(struct domain *d, unsigned long image_start)
 			dom_imva = __va_ul(page_to_maddr(p));
 			if (filesz > 0) {
 				if (filesz >= PAGE_SIZE)
-					copy_memory((void *) dom_imva,
-						    (void *) elfaddr,
-						    PAGE_SIZE);
+					memcpy((void *) dom_imva,
+					       (void *) elfaddr,
+					       PAGE_SIZE);
 				else {
 					// copy partial page
-					copy_memory((void *) dom_imva,
-						    (void *) elfaddr, filesz);
+					memcpy((void *) dom_imva,
+					       (void *) elfaddr, filesz);
 					// zero the rest of page
 					memset((void *) dom_imva+filesz, 0,
 					       PAGE_SIZE-filesz);
@@ -1601,7 +610,30 @@ static void loaddomainelfimage(struct domain *d, unsigned long image_start)
 
 void alloc_dom0(void)
 {
-	if (platform_is_hp_ski()) {
+	/* Check dom0 size.  */
+	if (dom0_size < 4 * 1024 * 1024) {
+		panic("dom0_mem is too small, boot aborted"
+			" (try e.g. dom0_mem=256M or dom0_mem=65536K)\n");
+	}
+
+	/* Check dom0 align.  */
+	if ((dom0_align - 1) & dom0_align) { /* not a power of two */
+		panic("dom0_align (%lx) must be power of two, boot aborted"
+		      " (try e.g. dom0_align=256M or dom0_align=65536K)\n",
+		      dom0_align);
+	}
+	if (dom0_align < PAGE_SIZE) {
+		panic("dom0_align must be >= %ld, boot aborted"
+		      " (try e.g. dom0_align=256M or dom0_align=65536K)\n",
+		      PAGE_SIZE);
+	}
+	if (dom0_size % dom0_align) {
+		dom0_size = (dom0_size / dom0_align + 1) * dom0_align;
+		printf("dom0_size rounded up to %ld, due to dom0_align=%lx\n",
+		     dom0_size,dom0_align);
+	}
+
+	if (running_on_sim) {
 		dom0_size = 128*1024*1024; //FIXME: Should be configurable
 	}
 #ifdef CONFIG_DOMAIN0_CONTIGUOUS
@@ -1642,7 +674,6 @@ static void physdev_init_dom0(struct domain *d)
 		BUG();
 }
 
-static unsigned int vmx_dom0 = 0;
 int construct_dom0(struct domain *d, 
 	               unsigned long image_start, unsigned long image_len, 
 	               unsigned long initrd_start, unsigned long initrd_len,
@@ -1661,9 +692,11 @@ int construct_dom0(struct domain *d,
 	unsigned long pkern_end;
 	unsigned long pinitrd_start = 0;
 	unsigned long pstart_info;
+	unsigned long cmdline_addr;
 	struct page_info *start_info_page;
 
 #ifdef VALIDATE_VT
+	unsigned int vmx_dom0 = 0;
 	unsigned long mfn;
 	struct page_info *page = NULL;
 #endif
@@ -1810,6 +843,7 @@ int construct_dom0(struct domain *d,
 	//if ( initrd_len != 0 )
 	//    memcpy((void *)vinitrd_start, initrd_start, initrd_len);
 
+	d->shared_info->arch.flags = SIF_INITDOMAIN|SIF_PRIVILEGED;
 
 	/* Set up start info area. */
 	d->shared_info->arch.start_info_pfn = pstart_info >> PAGE_SHIFT;
@@ -1825,25 +859,29 @@ int construct_dom0(struct domain *d,
 	if (cmdline != NULL)
 	    console_endboot(strstr(cmdline, "tty0") != NULL);
 
+	printk("Dom0: 0x%lx\n", (u64)dom0);
+
+#ifdef VALIDATE_VT
 	/* VMX specific construction for Dom0, if hardware supports VMX
 	 * and Dom0 is unmodified image
 	 */
-	printk("Dom0: 0x%lx, domain: 0x%lx\n", (u64)dom0, (u64)d);
 	if (vmx_dom0)
 	    vmx_final_setup_guest(v);
+#endif
 
 	set_bit(_VCPUF_initialised, &v->vcpu_flags);
 
-	new_thread(v, pkern_entry, 0, 0);
-	physdev_init_dom0(d);
+	cmdline_addr = dom_fw_setup(d, dom0_command_line, COMMAND_LINE_SIZE);
 
-	// dom0 doesn't need build_physmap_table()
-	// see arch_set_info_guest()
-	// instead we allocate pages manually.
-	for (i = 0; i < max_pages; i++) {
-		assign_new_domain0_page(d, i << PAGE_SHIFT);
-	}
-	d->arch.physmap_built = 1;
+	vcpu_init_regs (v);
+
+#ifdef CONFIG_DOMAIN0_CONTIGUOUS
+	pkern_entry += dom0_start;
+#endif
+	vcpu_regs (v)->cr_iip = pkern_entry;
+	vcpu_regs (v)->r28 = cmdline_addr;
+
+	physdev_init_dom0(d);
 
 	// FIXME: Hack for keyboard input
 	//serial_input_init();
@@ -1853,28 +891,20 @@ int construct_dom0(struct domain *d,
 
 void machine_restart(char * __unused)
 {
-	if (platform_is_hp_ski()) dummy();
-	printf("machine_restart called: spinning....\n");
+	if (running_on_sim)
+		printf ("machine_restart called.  spinning...\n");
+	else
+		(*efi.reset_system)(EFI_RESET_WARM,0,0,NULL);
 	while(1);
 }
 
 void machine_halt(void)
 {
-	if (platform_is_hp_ski()) dummy();
-	printf("machine_halt called: spinning....\n");
+	if (running_on_sim)
+		printf ("machine_halt called.  spinning...\n");
+	else
+		(*efi.reset_system)(EFI_RESET_SHUTDOWN,0,0,NULL);
 	while(1);
-}
-
-void dummy_called(char *function)
-{
-	if (platform_is_hp_ski()) asm("break 0;;");
-	printf("dummy called in %s: spinning....\n", function);
-	while(1);
-}
-
-void domain_pend_keyboard_interrupt(int irq)
-{
-	vcpu_pend_interrupt(dom0->vcpu[0],irq);
 }
 
 void sync_vcpu_execstate(struct vcpu *v)
@@ -1885,53 +915,15 @@ void sync_vcpu_execstate(struct vcpu *v)
 	// FIXME SMP: Anything else needed here for SMP?
 }
 
-// FIXME: It would be nice to print out a nice error message for bad
-//  values of these boot-time parameters, but it seems we are too early
-//  in the boot and attempts to print freeze the system?
-#define abort(x...) do {} while(0)
-#define warn(x...) do {} while(0)
-
 static void parse_dom0_mem(char *s)
 {
-	unsigned long bytes = parse_size_and_unit(s);
-
-	if (dom0_size < 4 * 1024 * 1024) {
-		abort("parse_dom0_mem: too small, boot aborted"
-			" (try e.g. dom0_mem=256M or dom0_mem=65536K)\n");
-	}
-	if (dom0_size % dom0_align) {
-		dom0_size = ((dom0_size / dom0_align) + 1) * dom0_align;
-		warn("parse_dom0_mem: dom0_size rounded up from"
-			" %lx to %lx bytes, due to dom0_align=%lx\n",
-			bytes,dom0_size,dom0_align);
-	}
-	else dom0_size = bytes;
+	dom0_size = parse_size_and_unit(s);
 }
 custom_param("dom0_mem", parse_dom0_mem);
 
 
 static void parse_dom0_align(char *s)
 {
-	unsigned long bytes = parse_size_and_unit(s);
-
-	if ((bytes - 1) ^ bytes) { /* not a power of two */
-		abort("parse_dom0_align: dom0_align must be power of two, "
-			"boot aborted"
-			" (try e.g. dom0_align=256M or dom0_align=65536K)\n");
-	}
-	else if (bytes < PAGE_SIZE) {
-		abort("parse_dom0_align: dom0_align must be >= %ld, "
-			"boot aborted"
-			" (try e.g. dom0_align=256M or dom0_align=65536K)\n",
-			PAGE_SIZE);
-	}
-	else dom0_align = bytes;
-	if (dom0_size % dom0_align) {
-		dom0_size = (dom0_size / dom0_align + 1) * dom0_align;
-		warn("parse_dom0_align: dom0_size rounded up from"
-			" %ld to %ld bytes, due to dom0_align=%lx\n",
-			bytes,dom0_size,dom0_align);
-	}
+	dom0_align = parse_size_and_unit(s);
 }
 custom_param("dom0_align", parse_dom0_align);
-

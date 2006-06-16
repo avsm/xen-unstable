@@ -416,6 +416,7 @@ void __init
 setup_arch (char **cmdline_p)
 {
 	unw_init();
+
 #ifdef CONFIG_XEN
 	if (is_running_on_xen())
 		setup_xen_features();
@@ -519,14 +520,18 @@ setup_arch (char **cmdline_p)
 	}
 #ifdef CONFIG_XEN
 	if (is_running_on_xen()) {
-		extern shared_info_t *HYPERVISOR_shared_info;
-		extern int xen_init (void);
+		shared_info_t *s = HYPERVISOR_shared_info;
 
-		xen_init ();
+		xen_start_info = __va(s->arch.start_info_pfn << PAGE_SHIFT);
+		xen_start_info->flags = s->arch.flags;
+
+		printk("Running on Xen! start_info_pfn=0x%lx nr_pages=%ld "
+		       "flags=0x%x\n", s->arch.start_info_pfn,
+		       xen_start_info->nr_pages, xen_start_info->flags);
 
 		/* xen_start_info isn't setup yet, get the flags manually */
-		if (HYPERVISOR_shared_info->arch.flags & SIF_INITDOMAIN) {
-			if (!(HYPERVISOR_shared_info->arch.flags & SIF_PRIVILEGED))
+		if (s->arch.flags & SIF_INITDOMAIN) {
+			if (!(s->arch.flags & SIF_PRIVILEGED))
 				panic("Xen granted us console access "
 				      "but not privileged status");
 		} else {
@@ -929,6 +934,7 @@ cpu_init (void)
 	/* size of physical stacked register partition plus 8 bytes: */
 	__get_cpu_var(ia64_phys_stacked_size_p8) = num_phys_stacked*8 + 8;
 	platform_cpu_init();
+
 #ifdef CONFIG_XEN
 	/* Need to be moved into platform_cpu_init later */
 	if (is_running_on_xen()) {
@@ -936,6 +942,7 @@ cpu_init (void)
 		xen_smp_intr_init();
 	}
 #endif
+
 	pm_idle = default_idle;
 }
 
