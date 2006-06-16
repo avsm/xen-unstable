@@ -23,12 +23,21 @@
 //#include <linux/kernel.h>
 #include <linux/spinlock.h>
 #include <linux/bootmem.h>
+#include <linux/module.h>
 #include <linux/vmalloc.h>
 #include <asm/page.h>
 #include <asm/hypervisor.h>
 #include <asm/hypercall.h>
 #include <xen/interface/memory.h>
 #include <xen/balloon.h>
+
+shared_info_t *HYPERVISOR_shared_info = (shared_info_t *)XSI_BASE;
+EXPORT_SYMBOL(HYPERVISOR_shared_info);
+
+start_info_t *xen_start_info;
+
+int running_on_xen;
+EXPORT_SYMBOL(running_on_xen);
 
 //XXX xen/ia64 copy_from_guest() is broken.
 //    This is a temporal work around until it is fixed.
@@ -66,6 +75,15 @@ ia64_xenmem_reservation_op(unsigned long op,
 				ret = tmp_ret;
 			}
 			break;
+		}
+		if (tmp_ret == 0) {
+			//XXX dirty work around for skbuff_ctor()
+			//    of a non-privileged domain, 
+			if ((op == XENMEM_increase_reservation ||
+			     op == XENMEM_populate_physmap) &&
+			    !(xen_start_info->flags & SIF_PRIVILEGED) &&
+			    reservation.extent_order > 0)
+				return ret;
 		}
 		frame_list += tmp_ret;
 		nr_extents -= tmp_ret;
@@ -156,7 +174,12 @@ HYPERVISOR_populate_physmap(unsigned long gpfn, unsigned int extent_order,
         };
 	set_xen_guest_handle(reservation.extent_start, &gpfn);
 	ret = HYPERVISOR_memory_op(XENMEM_populate_physmap, &reservation);
-	BUG_ON(ret != 1);
+	// it may fail on non-privileged domain with extent_order > 0.
+	BUG_ON(ret != 1 &&
+	       !(ret == 0 && !(xen_start_info->flags & SIF_PRIVILEGED) &&
+		 extent_order > 0));
+	if (ret != 1)
+		return -EINVAL;//XXX
 	return 0;
 }
 
@@ -564,7 +587,7 @@ xen_ia64_privcmd_entry_munmap(struct xen_ia64_privcmd_range* privcmd_range,
 	entry->gpfn = INVALID_GPFN;
 }
 
-static int
+static void
 xen_ia64_privcmd_entry_open(struct xen_ia64_privcmd_range* privcmd_range,
 			    int i)
 {
@@ -576,7 +599,7 @@ xen_ia64_privcmd_entry_open(struct xen_ia64_privcmd_range* privcmd_range,
 	}
 }
 
-static int
+static void
 xen_ia64_privcmd_entry_close(struct xen_ia64_privcmd_range* privcmd_range,
 			     int i)
 {

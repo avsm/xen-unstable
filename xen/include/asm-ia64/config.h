@@ -1,9 +1,6 @@
 #ifndef	_IA64_CONFIG_H_
 #define _IA64_CONFIG_H_
 
-#undef USE_PAL_EMULATOR
-// control flags for turning on/off features under test
-#undef DOMU_BUILD_STAGING
 #define VHPT_GLOBAL
 
 #undef DEBUG_PFMON
@@ -170,12 +167,6 @@ void sort_extable(struct exception_table_entry *start,
 		  struct exception_table_entry *finish);
 void sort_main_extable(void);
 
-#if 0 /* Already defined in xen/lib.h */
-#define printk printf
-#endif
-
-#undef  __ARCH_IRQ_STAT
-
 #define find_first_set_bit(x)	(ffs(x)-1)	// FIXME: Is this right???
 
 // see drivers/char/console.c
@@ -235,12 +226,6 @@ struct screen_info { };
 #define seq_printf(a,b...) printf(b)
 //#define CONFIG_BLK_DEV_INITRD // needed to reserve memory for domain0
 
-void dummy_called(char *function);
-#define dummy()	dummy_called((char *) __FUNCTION__)
-
-// these declarations got moved at some point, find a better place for them
-extern int ht_per_core;
-
 #ifdef CONFIG_XEN_IA64_DOM0_VP
 #define CONFIG_SHADOW	1
 #endif
@@ -283,5 +268,8 @@ extern int ht_per_core;
 /* Allow .serialize.data/instruction in asm files.
    Old as doesn't handle this.  */
 #define HAVE_SERIALIZE_DIRECTIVE
+
+/* Define CONFIG_PRIVIFY to support privified OS (deprecated).  */
+#undef CONFIG_PRIVIFY
 
 #endif	/* _IA64_CONFIG_H_ */

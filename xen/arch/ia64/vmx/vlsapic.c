@@ -39,6 +39,7 @@
 #include <asm/kregs.h>
 #include <asm/vmx_platform.h>
 #include <asm/hvm/vioapic.h>
+#include <asm/linux/jiffies.h>
 
 //u64  fire_itc;
 //u64  fire_itc2;
@@ -139,8 +140,6 @@ uint64_t vtm_get_itc(VCPU *vcpu)
 }
 
 
-
-
 void vtm_set_itc(VCPU *vcpu, uint64_t new_itc)
 {
     uint64_t    vitm, vitv;
@@ -148,8 +147,15 @@ void vtm_set_itc(VCPU *vcpu, uint64_t new_itc)
     vitm = VCPU(vcpu,itm);
     vitv = VCPU(vcpu,itv);
     vtm=&(vcpu->arch.arch_vmx.vtm);
-    vtm->vtm_offset = new_itc - ia64_get_itc();
-    vtm->last_itc = new_itc;
+    if(vcpu->vcpu_id == 0){
+        vtm->vtm_offset = new_itc - ia64_get_itc();
+        vtm->last_itc = new_itc;
+    }
+    else{
+        vtm->vtm_offset = vcpu->domain->vcpu[0]->arch.arch_vmx.vtm.vtm_offset;
+        new_itc=vtm->vtm_offset + ia64_get_itc();
+        vtm->last_itc = new_itc;
+    }
     if(vitm < new_itc){
         clear_bit(ITV_VECTOR(vitv), &VCPU(vcpu, irr[0]));
         stop_timer(&vtm->vtm_timer);
@@ -171,6 +177,8 @@ void vtm_set_itm(VCPU *vcpu, uint64_t val)
     clear_bit(ITV_VECTOR(vitv), &VCPU(vcpu, irr[0]));
     VCPU(vcpu,itm)=val;
     cur_itc =now_itc(vtm);
+    if(time_before(val, cur_itc))
+        val = cur_itc;
     if(val >  vtm->last_itc){
         expires = NOW() + cycle_to_ns(val-cur_itc) + TIMER_SLOP;
         set_timer(&vtm->vtm_timer, expires);
@@ -359,7 +367,7 @@ void vlsapic_reset(VCPU *vcpu)
 {
     int     i;
 
-    VCPU(vcpu, lid) = ia64_getreg(_IA64_REG_CR_LID);
+    VCPU(vcpu, lid) = VCPU_LID(vcpu);
     VCPU(vcpu, ivr) = 0;
     VCPU(vcpu,tpr) = 0x10000;
     VCPU(vcpu, eoi) = 0;
@@ -380,7 +388,7 @@ void vlsapic_reset(VCPU *vcpu)
     vcpu->arch.arch_vmx.vlapic.vcpu = vcpu;
     hvm_vioapic_add_lapic(&vcpu->arch.arch_vmx.vlapic, vcpu);
 #endif
-    DPRINTK("VLSAPIC inservice base=%lp\n", &VLSAPIC_INSVC(vcpu,0) );
+    DPRINTK("VLSAPIC inservice base=%p\n", &VLSAPIC_INSVC(vcpu,0) );
 }
 
 /*

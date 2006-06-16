@@ -66,11 +66,13 @@ int
 assign_irq_vector (int irq)
 {
 	int pos, vector;
+
 #ifdef CONFIG_XEN
-	extern int xen_assign_irq_vector(int);
-	if (is_running_on_xen())
+	if (is_running_on_xen()) {
+		extern int xen_assign_irq_vector(int);
 		return xen_assign_irq_vector(irq);
-#endif /* CONFIG_XEN */
+	}
+#endif
  again:
 	pos = find_first_zero_bit(ia64_vector_mask, IA64_NUM_DEVICE_VECTORS);
 	vector = IA64_FIRST_DEVICE_VECTOR + pos;
@@ -279,10 +281,9 @@ static struct irqaction resched_irqaction = {
  * FIXME: MCA is not supported by far, and thus "nomca" boot param is
  * required.
  */
-void
+static void
 xen_register_percpu_irq (unsigned int irq, struct irqaction *action, int save)
 {
-	char name[15];
 	unsigned int cpu = smp_processor_id();
 	int ret = 0;
 
@@ -293,21 +294,23 @@ xen_register_percpu_irq (unsigned int irq, struct irqaction *action, int save)
 			ret = bind_virq_to_irqhandler(VIRQ_ITC, cpu,
 				action->handler, action->flags,
 				timer_name[cpu], action->dev_id);
-			printk(KERN_INFO "register VIRQ_ITC (%s) to xen irq (%d)\n", name, ret);
+			printk(KERN_INFO "register VIRQ_ITC (%s) to xen irq (%d)\n", timer_name[cpu], ret);
 			break;
 		case IA64_IPI_RESCHEDULE:
 			sprintf(resched_name[cpu], "%s%d", action->name, cpu);
 			ret = bind_ipi_to_irqhandler(RESCHEDULE_VECTOR, cpu,
 				action->handler, action->flags,
 				resched_name[cpu], action->dev_id);
-			printk(KERN_INFO "register RESCHEDULE_VECTOR (%s) to xen irq (%d)\n", name, ret);
+			printk(KERN_INFO "register RESCHEDULE_VECTOR (%s) to xen irq (%d)\n", resched_name[cpu], ret);
 			break;
 		case IA64_IPI_VECTOR:
 			sprintf(ipi_name[cpu], "%s%d", action->name, cpu);
 			ret = bind_ipi_to_irqhandler(IPI_VECTOR, cpu,
 				action->handler, action->flags,
 				ipi_name[cpu], action->dev_id);
-			printk(KERN_INFO "register IPI_VECTOR (%s) to xen irq (%d)\n", name, ret);
+			printk(KERN_INFO "register IPI_VECTOR (%s) to xen irq (%d)\n", ipi_name[cpu], ret);
+			break;
+		case IA64_SPURIOUS_INT_VECTOR:
 			break;
 		default:
 			printk(KERN_WARNING "Percpu irq %d is unsupported by xen!\n", irq);
@@ -360,6 +363,7 @@ void xen_smp_intr_init(void)
 		.type = CALLBACKTYPE_event,
 		.address = (unsigned long)&xen_event_callback,
 	};
+	static cpumask_t registered_cpumask;
 
 	if (!cpu)
 		return;
@@ -367,9 +371,13 @@ void xen_smp_intr_init(void)
 	/* This should be piggyback when setup vcpu guest context */
 	BUG_ON(HYPERVISOR_callback_op(CALLBACKOP_register, &event));
 
-	for (i = 0; i < saved_irq_cnt; i++)
-		xen_register_percpu_irq(saved_percpu_irqs[i].irq,
-			saved_percpu_irqs[i].action, 0);
+	if (!cpu_isset(cpu, registered_cpumask)) {
+		cpu_set(cpu, registered_cpumask);
+		for (i = 0; i < saved_irq_cnt; i++)
+			xen_register_percpu_irq(saved_percpu_irqs[i].irq,
+						saved_percpu_irqs[i].action,
+						0);
+	}
 #endif /* CONFIG_SMP */
 }
 #endif /* CONFIG_XEN */

@@ -440,7 +440,7 @@ int pirq_guest_eoi(struct domain *d, int irq)
     if ( test_and_clear_bit(irq, &d->pirq_mask) &&
          (--((irq_guest_action_t *)desc->action)->in_flight == 0) )
     {
-        ASSERT(action->ack_type == ACKTYPE_UNMASK);
+        ASSERT(((irq_guest_action_t*)desc->action)->ack_type == ACKTYPE_UNMASK);
         desc->handler->end(irq);
     }
     spin_unlock_irq(&desc->lock);
@@ -618,10 +618,9 @@ void process_soft_irq(void)
 }
 
 // this is a temporary hack until real console input is implemented
-extern void domain_pend_keyboard_interrupt(int irq);
 void guest_forward_keyboard_input(int irq, void *nada, struct pt_regs *regs)
 {
-	domain_pend_keyboard_interrupt(irq);
+	vcpu_pend_interrupt(dom0->vcpu[0],irq);
 }
 
 void serial_input_init(void)
