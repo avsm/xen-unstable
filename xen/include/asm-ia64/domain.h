@@ -14,6 +14,9 @@
 
 extern void domain_relinquish_resources(struct domain *);
 
+/* given a current domain metaphysical address, return the physical address */
+extern unsigned long translate_domain_mpaddr(unsigned long mpaddr);
+
 /* Flush cache of domain d.
    If sync_only is true, only synchronize I&D caches,
    if false, flush and invalidate caches.  */
@@ -54,8 +57,13 @@ struct arch_domain {
     struct virtual_platform_def     vmx_platform;
 #define	hvm_domain vmx_platform /* platform defs are not vmx specific */
 
-    u64 xen_vastart;
-    u64 xen_vaend;
+    /* OS boot rendez vous.  */
+    unsigned long boot_rdv_ip;
+    unsigned long boot_rdv_r1;
+
+    /* SAL return point.  */
+    unsigned long sal_return_addr;
+
     u64 shared_info_va;
     unsigned long initrd_start;
     unsigned long initrd_len;
@@ -66,9 +74,10 @@ struct arch_domain {
     void *efi_runtime;
     /* Metaphysical address to fpswa_interface_t in domain firmware memory is set. */
     void *fpswa_inf;
+
+    // protect v->itlb, v->dtlb and vhpt
+    seqlock_t   vtlb_lock ____cacheline_aligned_in_smp;
 };
-#define xen_vastart arch.xen_vastart
-#define xen_vaend arch.xen_vaend
 #define INT_ENABLE_OFFSET(v) 		  \
     (sizeof(vcpu_info_t) * (v)->vcpu_id + \
     offsetof(vcpu_info_t, evtchn_upcall_mask))
@@ -117,22 +126,6 @@ struct arch_vcpu {
     fpswa_ret_t fpswa_ret;	/* save return values of FPSWA emulation */
     struct arch_vmx_struct arch_vmx; /* Virtual Machine Extensions */
 };
-
-struct page_info * assign_new_domain_page(struct domain *d, unsigned long mpaddr);
-void assign_new_domain0_page(struct domain *d, unsigned long mpaddr);
-void __assign_domain_page(struct domain *d, unsigned long mpaddr, unsigned long physaddr, unsigned long flags);
-void assign_domain_page(struct domain *d, unsigned long mpaddr, unsigned long physaddr);
-void assign_domain_io_page(struct domain *d, unsigned long mpaddr, unsigned long flags);
-#ifdef CONFIG_XEN_IA64_DOM0_VP
-void alloc_dom_xen_and_dom_io(void);
-unsigned long assign_domain_mmio_page(struct domain *d, unsigned long mpaddr, unsigned long size);
-unsigned long assign_domain_mach_page(struct domain *d, unsigned long mpaddr, unsigned long size, unsigned long flags);
-unsigned long do_dom0vp_op(unsigned long cmd, unsigned long arg0, unsigned long arg1, unsigned long arg2, unsigned long arg3);
-unsigned long dom0vp_zap_physmap(struct domain *d, unsigned long gpfn, unsigned int extent_order);
-unsigned long dom0vp_add_physmap(struct domain* d, unsigned long gpfn, unsigned long mfn, unsigned long flags, domid_t domid);
-#else
-#define alloc_dom_xen_and_dom_io()      do { } while (0)
-#endif
 
 #include <asm/uaccess.h> /* for KERNEL_DS */
 #include <asm/pgtable.h>

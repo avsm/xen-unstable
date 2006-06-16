@@ -373,16 +373,8 @@ IA64FAULT vmx_vcpu_itc_d(VCPU *vcpu, UINT64 pte, UINT64 itir, UINT64 ifa)
     }
 #endif //VTLB_DEBUG
     gpfn = (pte & _PAGE_PPN_MASK)>> PAGE_SHIFT;
-    if (VMX_DOMAIN(vcpu)) {
-        if (__gpfn_is_io(vcpu->domain, gpfn))
-            pte |= VTLB_PTE_IO;
-        else
-            /* Ensure WB attribute if pte is related to a normal mem page,
-             * which is required by vga acceleration since qemu maps shared
-             * vram buffer with WB.
-             */
-            pte &= ~_PAGE_MA_MASK;
-    }
+    if (VMX_DOMAIN(vcpu) && __gpfn_is_io(vcpu->domain, gpfn))
+        pte |= VTLB_PTE_IO;
     thash_purge_and_insert(vcpu, pte, itir, ifa);
     return IA64_NO_FAULT;
 
@@ -456,8 +448,7 @@ IA64FAULT vmx_vcpu_ptr_d(VCPU *vcpu,UINT64 ifa,UINT64 ps)
     u64 va;
 
     va = PAGEALIGN(ifa, ps);
-    index = vtr_find_overlap(vcpu, va, ps, DSIDE_TLB);
-    if (index>=0) {
+    while ((index = vtr_find_overlap(vcpu, va, ps, DSIDE_TLB)) >= 0) {
         vcpu->arch.dtrs[index].pte.p=0;
     }
     thash_purge_entries(vcpu, va, ps);
@@ -470,8 +461,7 @@ IA64FAULT vmx_vcpu_ptr_i(VCPU *vcpu,UINT64 ifa,UINT64 ps)
     u64 va;
 
     va = PAGEALIGN(ifa, ps);
-    index = vtr_find_overlap(vcpu, va, ps, ISIDE_TLB);
-    if (index>=0) {
+    while ((index = vtr_find_overlap(vcpu, va, ps, ISIDE_TLB)) >= 0) {
         vcpu->arch.itrs[index].pte.p=0;
     }
     thash_purge_entries(vcpu, va, ps);
@@ -494,13 +484,66 @@ IA64FAULT vmx_vcpu_ptc_e(VCPU *vcpu, UINT64 va)
 
 IA64FAULT vmx_vcpu_ptc_g(VCPU *vcpu, UINT64 va, UINT64 ps)
 {
-    vmx_vcpu_ptc_l(vcpu, va, ps);
+    vmx_vcpu_ptc_ga(vcpu, va, ps);
     return IA64_ILLOP_FAULT;
 }
-
+/*
 IA64FAULT vmx_vcpu_ptc_ga(VCPU *vcpu,UINT64 va,UINT64 ps)
 {
     vmx_vcpu_ptc_l(vcpu, va, ps);
+    return IA64_NO_FAULT;
+}
+ */
+struct ptc_ga_args {
+    unsigned long vadr;
+    unsigned long rid;
+    unsigned long ps;
+    struct vcpu *vcpu;
+};
+
+static void ptc_ga_remote_func (void *varg)
+{
+    u64 oldrid, moldrid;
+    struct ptc_ga_args *args = (struct ptc_ga_args *)varg;
+    VCPU *v = args->vcpu;
+
+    oldrid = VMX(v, vrr[0]);
+    VMX(v, vrr[0]) = args->rid;
+    moldrid = ia64_get_rr(0x0);
+    ia64_set_rr(0x0,vrrtomrr(v,args->rid));
+    ia64_srlz_d();
+    vmx_vcpu_ptc_l(v, args->vadr, args->ps);
+    VMX(v, vrr[0]) = oldrid; 
+    ia64_set_rr(0x0,moldrid);
+    ia64_dv_serialize_data();
+}
+
+
+IA64FAULT vmx_vcpu_ptc_ga(VCPU *vcpu,UINT64 va,UINT64 ps)
+{
+
+    struct domain *d = vcpu->domain;
+    struct vcpu *v;
+    struct ptc_ga_args args;
+
+    args.vadr = va<<3>>3;
+    vcpu_get_rr(vcpu, va, &args.rid);
+    args.ps = ps;
+    for_each_vcpu (d, v) {
+        args.vcpu = v;
+        if (v->processor != vcpu->processor) {
+            int proc;
+            /* Flush VHPT on remote processors.  */
+            do {
+                proc = v->processor;
+                smp_call_function_single(v->processor, 
+                    &ptc_ga_remote_func, &args, 0, 1);
+                /* Try again if VCPU has migrated.  */
+            } while (proc != v->processor);
+        }
+        else
+            ptc_ga_remote_func(&args);
+    }
     return IA64_NO_FAULT;
 }
 
@@ -571,7 +614,8 @@ IA64FAULT vmx_vcpu_tpa(VCPU *vcpu, UINT64 vadr, UINT64 *padr)
             dnat_page_consumption(vcpu, vadr);
             return IA64_FAULT;
         }else{
-            *padr = (data->ppn<<12) | (vadr&(PSIZE(data->ps)-1));
+            *padr = ((data->ppn >> (data->ps - 12)) << data->ps) |
+                                                (vadr & (PSIZE(data->ps) - 1));
             return IA64_NO_FAULT;
         }
     }
@@ -588,7 +632,7 @@ IA64FAULT vmx_vcpu_tpa(VCPU *vcpu, UINT64 vadr, UINT64 *padr)
             dnat_page_consumption(vcpu, vadr);
             return IA64_FAULT;
         }else{
-            *padr = ((*(mpt_table+arch_to_xen_ppn(data->ppn)))<<PAGE_SHIFT) | (vadr&(PAGE_SIZE-1));
+            *padr = (get_gpfn_from_mfn(arch_to_xen_ppn(data->ppn)) << PAGE_SHIFT) | (vadr & (PAGE_SIZE - 1));
             return IA64_NO_FAULT;
         }
     }

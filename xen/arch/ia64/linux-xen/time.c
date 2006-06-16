@@ -201,14 +201,15 @@ ia64_init_itm (void)
 	itc_freq = (platform_base_freq*itc_ratio.num)/itc_ratio.den;
 
 	local_cpu_data->itm_delta = (itc_freq + HZ/2) / HZ;
-#ifdef XEN /* warning cleanup */
-	printk(KERN_DEBUG "CPU %d: base freq=%lu.%03luMHz, ITC ratio=%u/%u, "
-#else
 	printk(KERN_DEBUG "CPU %d: base freq=%lu.%03luMHz, ITC ratio=%lu/%lu, "
-#endif
 	       "ITC freq=%lu.%03luMHz", smp_processor_id(),
 	       platform_base_freq / 1000000, (platform_base_freq / 1000) % 1000,
+#ifdef XEN
+	       (u64)itc_ratio.num, (u64)itc_ratio.den,
+	       itc_freq / 1000000, (itc_freq / 1000) % 1000);
+#else
 	       itc_ratio.num, itc_ratio.den, itc_freq / 1000000, (itc_freq / 1000) % 1000);
+#endif
 
 	if (platform_base_drift != -1) {
 		itc_drift = platform_base_drift*itc_ratio.num/itc_ratio.den;

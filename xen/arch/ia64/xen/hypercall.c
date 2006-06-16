@@ -132,43 +132,45 @@ fw_hypercall_ipi (struct pt_regs *regs)
 	int cpu = regs->r14;
 	int vector = regs->r15;
 	struct vcpu *targ;
-		    
-	if (0 && vector == 254)
-		printf ("send_ipi from %d to %d vector=%d\n",
-			current->vcpu_id, cpu, vector);
+	struct domain *d = current->domain;
 
+	/* Be sure the target exists.  */
 	if (cpu > MAX_VIRT_CPUS)
 		return;
-
-	targ = current->domain->vcpu[cpu];
+	targ = d->vcpu[cpu];
 	if (targ == NULL)
 		return;
 
-	if (vector == XEN_SAL_BOOT_RENDEZ_VEC
-	    && !test_bit(_VCPUF_initialised, &targ->vcpu_flags)) {
-		struct pt_regs *targ_regs = vcpu_regs (targ);
-		struct vcpu_guest_context c;
+  	if (vector == XEN_SAL_BOOT_RENDEZ_VEC
+	    && (!test_bit(_VCPUF_initialised, &targ->vcpu_flags)
+		|| test_bit(_VCPUF_down, &targ->vcpu_flags))) {
+
+		/* First start: initialize vpcu.  */
+		if (!test_bit(_VCPUF_initialised, &targ->vcpu_flags)) {
+			struct vcpu_guest_context c;
 		
-		printf ("arch_boot_vcpu: %p %p\n",
-			(void *)targ_regs->cr_iip,
-			(void *)targ_regs->r1);
-		memset (&c, 0, sizeof (c));
-		/* Copy regs.  */
-		c.regs.cr_iip = targ_regs->cr_iip;
-		c.regs.r1 = targ_regs->r1;
-		
-		if (arch_set_info_guest (targ, &c) != 0) {
-			printf ("arch_boot_vcpu: failure\n");
-			return;
+			memset (&c, 0, sizeof (c));
+
+			if (arch_set_info_guest (targ, &c) != 0) {
+				printf ("arch_boot_vcpu: failure\n");
+				return;
+			}
 		}
+			
+		/* First or next rendez-vous: set registers.  */
+		vcpu_init_regs (targ);
+		vcpu_regs (targ)->cr_iip = d->arch.boot_rdv_ip;
+		vcpu_regs (targ)->r1 = d->arch.boot_rdv_r1;
+		vcpu_regs (targ)->b0 = d->arch.sal_return_addr;
+
 		if (test_and_clear_bit(_VCPUF_down,
 				       &targ->vcpu_flags)) {
 			vcpu_wake(targ);
-			printf ("arch_boot_vcpu: vcpu %d awaken %016lx!\n",
-				targ->vcpu_id, targ_regs->cr_iip);
+			printf ("arch_boot_vcpu: vcpu %d awaken\n",
+				targ->vcpu_id);
 		}
 		else
-			printf ("arch_boot_vcpu: huu, already awaken!");
+			printf ("arch_boot_vcpu: huu, already awaken!\n");
 	}
 	else {
 		int running = test_bit(_VCPUF_running,
@@ -253,6 +255,10 @@ fw_hypercall (struct pt_regs *regs)
 		regs->r8 = x.r8; regs->r9 = x.r9;
 		regs->r10 = x.r10; regs->r11 = x.r11;
 		break;
+ 	    case FW_HYPERCALL_SAL_RETURN:
+	        if ( !test_and_set_bit(_VCPUF_down, &v->vcpu_flags) )
+			vcpu_sleep_nosync(v);
+		break;
 	    case FW_HYPERCALL_EFI_CALL:
 		efi_ret_value = efi_emulator (regs, &fault);
 		if (fault != IA64_NO_FAULT) return fault;
@@ -326,6 +332,58 @@ ia64_hypercall (struct pt_regs *regs)
 	    return fw_hypercall (regs);
 	else
 	    return xen_hypercall (regs);
+}
+
+unsigned long hypercall_create_continuation(
+	unsigned int op, const char *format, ...)
+{
+    struct mc_state *mcs = &mc_state[smp_processor_id()];
+    struct vcpu *v = current;
+    const char *p = format;
+    unsigned long arg;
+    unsigned int i;
+    va_list args;
+
+    va_start(args, format);
+    if ( test_bit(_MCSF_in_multicall, &mcs->flags) ) {
+	panic("PREEMPT happen in multicall\n");	// Not support yet
+    } else {
+	vcpu_set_gr(v, 2, op, 0);
+	for ( i = 0; *p != '\0'; i++) {
+            switch ( *p++ )
+            {
+            case 'i':
+                arg = (unsigned long)va_arg(args, unsigned int);
+                break;
+            case 'l':
+                arg = (unsigned long)va_arg(args, unsigned long);
+                break;
+            case 'h':
+                arg = (unsigned long)va_arg(args, void *);
+                break;
+            default:
+                arg = 0;
+                BUG();
+            }
+	    switch (i) {
+	    case 0: vcpu_set_gr(v, 14, arg, 0);
+		    break;
+	    case 1: vcpu_set_gr(v, 15, arg, 0);
+		    break;
+	    case 2: vcpu_set_gr(v, 16, arg, 0);
+		    break;
+	    case 3: vcpu_set_gr(v, 17, arg, 0);
+		    break;
+	    case 4: vcpu_set_gr(v, 18, arg, 0);
+		    break;
+	    default: panic("Too many args for hypercall continuation\n");
+		    break;
+	    }
+	}
+    }
+    v->arch.hypercall_continuation = 1;
+    va_end(args);
+    return op;
 }
 
 /* Need make this function common */

@@ -10,14 +10,3 @@
 #eventually asm-xsi-offsets needs to be part of hypervisor.h/hypercall.h
 ln -sf ../../../../xen/include/asm-ia64/asm-xsi-offsets.h include/asm-ia64/xen/
 
-#not sure where these ia64-specific files will end up in the future
-ln -sf ../../../arch/ia64/xen/drivers/xenia64_init.c drivers/xen/core
-
-#still a few x86-ism's in various drivers/xen files, patch them
-#cd drivers/xen
-#if [ ! -e ia64.patch.semaphore ]
-#then
-#	cat ../../arch/ia64/xen/drivers/patches/* | patch -p1 -b
-#fi
-#touch ia64.patch.semaphore
-#cd ../..
