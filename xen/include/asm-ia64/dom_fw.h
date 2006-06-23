@@ -14,8 +14,8 @@
 /* This is used to determined the portion of a domain's metaphysical memory
    space reserved for the hypercall patch table. */
 //FIXME: experiment with smaller sizes
-#define HYPERCALL_START	1*MB
-#define HYPERCALL_END	2*MB
+#define HYPERCALL_START	1UL*MB
+#define HYPERCALL_END	2UL*MB
 
 #define FW_HYPERCALL_BASE_PADDR HYPERCALL_START
 #define	FW_HYPERCALL_END_PADDR HYPERCALL_END
@@ -144,6 +144,9 @@
 #define FW_HYPERCALL_FPSWA_ENTRY_PADDR			FW_HYPERCALL_PADDR(FW_HYPERCALL_FPSWA_ENTRY_INDEX)
 #define FW_HYPERCALL_FPSWA_PATCH_PADDR			FW_HYPERCALL_PADDR(FW_HYPERCALL_FPSWA_PATCH_INDEX)
 #define FW_HYPERCALL_FPSWA				0x500UL
+
+/* Set the shared_info base virtual address.  */
+#define FW_HYPERCALL_SET_SHARED_INFO_VA			0x600UL
 
 /* Hypercalls index bellow _FIRST_ARCH are reserved by Xen, while those above
    are for the architecture.

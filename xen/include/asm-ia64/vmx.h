@@ -24,6 +24,7 @@
 
 #define RR7_SWITCH_SHIFT	12	/* 4k enough */
 #include <public/hvm/ioreq.h>
+#define vmx_user_mode(regs) (((struct ia64_psr *)&(regs)->cr_ipsr)->vm == 1)
 
 #define VCPU_LID(v) (((u64)(v)->vcpu_id)<<24)
 
@@ -36,7 +37,6 @@ extern void vmx_load_state(struct vcpu *v);
 extern void vmx_setup_platform(struct domain *d, struct vcpu_guest_context *c);
 extern void vmx_wait_io(void);
 extern void vmx_io_assist(struct vcpu *v);
-extern void vmx_load_all_rr(struct vcpu *vcpu);
 extern void panic_domain(struct pt_regs *regs, const char *fmt, ...);
 extern int ia64_hypercall (struct pt_regs *regs);
 extern void vmx_save_state(struct vcpu *v);
@@ -56,6 +56,7 @@ extern void vmx_intr_assist(struct vcpu *v);
 extern void set_illegal_op_isr (struct vcpu *vcpu);
 extern void illegal_op (struct vcpu *vcpu);
 extern void vmx_relinquish_vcpu_resources(struct vcpu *v);
+extern void vmx_die_if_kernel(char *str, struct pt_regs *regs, long err);
 
 static inline vcpu_iodata_t *get_vio(struct domain *d, unsigned long cpu)
 {

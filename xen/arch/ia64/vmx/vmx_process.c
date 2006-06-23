@@ -58,7 +58,6 @@
 
 extern void die_if_kernel(char *str, struct pt_regs *regs, long err);
 extern void rnat_consumption (VCPU *vcpu);
-extern unsigned long translate_domain_mpaddr(unsigned long mpaddr);
 extern void alt_itlb (VCPU *vcpu, u64 vadr);
 extern void itlb_fault (VCPU *vcpu, u64 vadr);
 extern void ivhpt_fault (VCPU *vcpu, u64 vadr);
@@ -126,7 +125,7 @@ vmx_ia64_handle_break (unsigned long ifa, struct pt_regs *regs, unsigned long is
 #endif
     {
         if (iim == 0) 
-            die_if_kernel("bug check", regs, iim);
+            vmx_die_if_kernel("Break 0 in Hypervisor.", regs, iim);
 
         if (!user_mode(regs)) {
             /* Allow hypercalls only when cpl = 0.  */

@@ -283,17 +283,18 @@ struct mapped_regs {
              * shared info area now. interrupt_mask_addr is the address
              * of evtchn_upcall_mask for current vcpu
              */
-            unsigned long interrupt_mask_addr;
+            unsigned char *interrupt_mask_addr;
             int pending_interruption;
             int incomplete_regframe; // see SDM vol2 6.8
-            unsigned long reserved5_1[4];
+            unsigned char vpsr_pp;
+            unsigned char reserved5_2[7];
+            unsigned long reserved5_1[3];
             int metaphysical_mode; // 1 = use metaphys mapping, 0 = use virtual
             int banknum; // 0 or 1, which virtual register bank is active
             unsigned long rrs[8]; // region registers
             unsigned long krs[8]; // kernel registers
             unsigned long pkrs[8]; // protection key registers
             unsigned long tmp[8]; // temp registers (e.g. for hyperprivops)
-            // FIXME: tmp[8] temp'ly being used for virtual psr.pp
         };
     };
     unsigned long  reserved6[3456];
@@ -336,7 +337,7 @@ struct vcpu_guest_context {
     unsigned long sys_pgnr;    /* System pages out of domain memory */
     unsigned long vm_assist;   /* VMASST_TYPE_* bitmap, now none on IPF */
 
-    struct cpu_user_regs regs;
+    struct cpu_user_regs user_regs;
     struct mapped_regs *privregs;
     struct arch_shared_info shared;
     struct arch_initrd_info initrd;
@@ -378,6 +379,18 @@ DEFINE_XEN_GUEST_HANDLE(vcpu_guest_context_t);
 #define ASSIGN_writable                 (0UL << _ASSIGN_readonly) // dummy flag
 
 #endif /* !__ASSEMBLY__ */
+
+/* Address of shared_info in domain virtual space.
+   This is the default address, for compatibility only.  */
+#define XSI_BASE				0xf100000000000000
+
+/* Size of the shared_info area (this is not related to page size).  */
+#define XSI_LOG_SIZE			14
+#define XSI_SIZE				(1 << XSI_LOG_SIZE)
+/* Log size of mapped_regs area (64 KB - only 4KB is used).  */
+#define XMAPPEDREGS_LOG_SIZE	16
+/* Offset of XASI (Xen arch shared info) wrt XSI_BASE.  */
+#define XMAPPEDREGS_OFS			XSI_SIZE
 
 /* Hyperprivops.  */
 #define HYPERPRIVOP_RFI			0x1

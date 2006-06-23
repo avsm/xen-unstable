@@ -118,7 +118,7 @@ void reflect_interruption(unsigned long isr, struct pt_regs *regs, unsigned long
 
 	regs->cr_iip = ((unsigned long) PSCBX(v,iva) + vector) & ~0xffUL;
 	regs->cr_ipsr = (regs->cr_ipsr & ~DELIVER_PSR_CLR) | DELIVER_PSR_SET;
-	regs->r31 = XSI_IPSR;
+	regs->r31 = current->domain->arch.shared_info_va + XSI_IPSR_OFS;
 
 	v->vcpu_info->evtchn_upcall_mask = 1;
 	PSCB(v,interrupt_collection_enabled) = 0;
@@ -172,7 +172,7 @@ void reflect_event(struct pt_regs *regs)
 
 	regs->cr_iip = v->arch.event_callback_ip;
 	regs->cr_ipsr = (regs->cr_ipsr & ~DELIVER_PSR_CLR) | DELIVER_PSR_SET;
-	regs->r31 = XSI_IPSR;
+	regs->r31 = current->domain->arch.shared_info_va + XSI_IPSR_OFS;
 
 	v->vcpu_info->evtchn_upcall_mask = 1;
 	PSCB(v,interrupt_collection_enabled) = 0;
@@ -214,11 +214,10 @@ void ia64_do_page_fault (unsigned long address, unsigned long isr, struct pt_reg
 	// FIXME should validate address here
 	unsigned long pteval;
 	unsigned long is_data = !((isr >> IA64_ISR_X_BIT) & 1UL);
-	seqlock_t* vtlb_lock = &current->domain->arch.vtlb_lock;
-	unsigned long seq;
 	IA64FAULT fault;
+	int is_ptc_l_needed = 0;
+	u64 logps;
 
-	if ((isr & IA64_ISR_IR) && handle_lazy_cover(current, regs)) return;
 	if ((isr & IA64_ISR_SP)
 	    || ((isr & IA64_ISR_NA) && (isr & IA64_ISR_CODE_MASK) == IA64_ISR_CODE_LFETCH))
 	{
@@ -232,20 +231,29 @@ void ia64_do_page_fault (unsigned long address, unsigned long isr, struct pt_reg
 	}
 
  again:
-	seq = read_seqbegin(vtlb_lock);
 	fault = vcpu_translate(current,address,is_data,&pteval,&itir,&iha);
 	if (fault == IA64_NO_FAULT || fault == IA64_USE_TLB) {
-		u64 logps;
-		pteval = translate_domain_pte(pteval, address, itir, &logps);
+		struct p2m_entry entry;
+		pteval = translate_domain_pte(pteval, address, itir, &logps, &entry);
 		vcpu_itc_no_srlz(current,is_data?2:1,address,pteval,-1UL,logps);
-		if (read_seqretry(vtlb_lock, seq)) {
+		if ((fault == IA64_USE_TLB && !current->arch.dtlb.pte.p) ||
+		    p2m_entry_retry(&entry)) {
+			/* dtlb has been purged in-between.  This dtlb was
+			   matching.  Undo the work.  */
 			vcpu_flush_tlb_vhpt_range(address & ((1 << logps) - 1),
 			                          logps);
+
+			// the stale entry which we inserted above
+			// may remains in tlb cache.
+			// we don't purge it now hoping next itc purges it.
+			is_ptc_l_needed = 1;
 			goto again;
 		}
 		return;
 	}
 
+	if (is_ptc_l_needed)
+		vcpu_ptc_l(current, address, logps);
 	if (!user_mode (regs)) {
 		/* The fault occurs inside Xen.  */
 		if (!ia64_done_with_exception(regs)) {
@@ -260,6 +268,10 @@ void ia64_do_page_fault (unsigned long address, unsigned long isr, struct pt_reg
 		}
 		return;
 	}
+
+	if ((isr & IA64_ISR_IR) && handle_lazy_cover(current, regs))
+		return;
+
 	if (!PSCB(current,interrupt_collection_enabled)) {
 		check_bad_nested_interruption(isr,regs,fault);
 		//printf("Delivering NESTED DATA TLB fault\n");

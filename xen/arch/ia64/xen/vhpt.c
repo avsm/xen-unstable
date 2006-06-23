@@ -152,10 +152,11 @@ void domain_flush_vtlb_all (void)
 {
 	int cpu = smp_processor_id ();
 	struct vcpu *v;
-	seqlock_t* vtlb_lock = &current->domain->arch.vtlb_lock;
 
-	write_seqlock(vtlb_lock);
-	for_each_vcpu (current->domain, v)
+	for_each_vcpu (current->domain, v) {
+		if (!test_bit(_VCPUF_initialised, &v->vcpu_flags))
+			continue;
+
 		if (v->processor == cpu)
 			vcpu_flush_vtlb_all ();
 		else
@@ -163,7 +164,7 @@ void domain_flush_vtlb_all (void)
 				(v->processor,
 				 (void(*)(void *))vcpu_flush_vtlb_all,
 				 NULL,1,1);
-	write_sequnlock(vtlb_lock);
+	}
 }
 
 static void cpu_flush_vhpt_range (int cpu, u64 vadr, u64 addr_range)
@@ -190,7 +191,6 @@ void vcpu_flush_tlb_vhpt_range (u64 vadr, u64 log_range)
 
 void domain_flush_vtlb_range (struct domain *d, u64 vadr, u64 addr_range)
 {
-	seqlock_t* vtlb_lock = &d->arch.vtlb_lock;
 	struct vcpu *v;
 
 #if 0
@@ -201,8 +201,10 @@ void domain_flush_vtlb_range (struct domain *d, u64 vadr, u64 addr_range)
 	}
 #endif
 
-	write_seqlock(vtlb_lock);
 	for_each_vcpu (d, v) {
+		if (!test_bit(_VCPUF_initialised, &v->vcpu_flags))
+			continue;
+
 		/* Purge TC entries.
 		   FIXME: clear only if match.  */
 		vcpu_purge_tr_entry(&PSCBX(v,dtlb));
@@ -211,6 +213,9 @@ void domain_flush_vtlb_range (struct domain *d, u64 vadr, u64 addr_range)
 	smp_mb();
 
 	for_each_vcpu (d, v) {
+		if (!test_bit(_VCPUF_initialised, &v->vcpu_flags))
+			continue;
+
 		/* Invalidate VHPT entries.  */
 		cpu_flush_vhpt_range (v->processor, vadr, addr_range);
 	}
@@ -218,7 +223,6 @@ void domain_flush_vtlb_range (struct domain *d, u64 vadr, u64 addr_range)
 
 	/* ptc.ga  */
 	ia64_global_tlb_purge(vadr,vadr+addr_range,PAGE_SHIFT);
-	write_sequnlock(vtlb_lock);
 }
 
 static void flush_tlb_vhpt_all (struct domain *d)
@@ -230,8 +234,6 @@ static void flush_tlb_vhpt_all (struct domain *d)
 	local_flush_tlb_all ();
 }
 
-// this is called when a domain is destroyed
-// so that there is no race.
 void domain_flush_destroy (struct domain *d)
 {
 	/* Very heavy...  */
@@ -241,10 +243,8 @@ void domain_flush_destroy (struct domain *d)
 
 void flush_tlb_mask(cpumask_t mask)
 {
-    seqlock_t* vtlb_lock = &current->domain->arch.vtlb_lock;
     int cpu;
 
-    write_seqlock(vtlb_lock);
     cpu = smp_processor_id();
     if (cpu_isset (cpu, mask)) {
         cpu_clear(cpu, mask);
@@ -252,13 +252,11 @@ void flush_tlb_mask(cpumask_t mask)
     }
 
     if (cpus_empty(mask))
-        goto out;
+        return;
 
     for_each_cpu_mask (cpu, mask)
         smp_call_function_single
             (cpu, (void (*)(void *))flush_tlb_vhpt_all, NULL, 1, 1);
-out:
-    write_sequnlock(vtlb_lock);
 }
 
 void zero_vhpt_stats(void)
@@ -268,16 +266,21 @@ void zero_vhpt_stats(void)
 
 int dump_vhpt_stats(char *buf)
 {
-	int i;
+	int i, cpu;
 	char *s = buf;
-	struct vhpt_lf_entry *v = (void *)VHPT_ADDR;
-	unsigned long vhpt_valid = 0, vhpt_chains = 0;
 
-	for (i = 0; i < VHPT_NUM_ENTRIES; i++, v++) {
-		if (!(v->ti_tag & INVALID_TI_TAG)) vhpt_valid++;
-		if (v->CChain) vhpt_chains++;
+	s += sprintf(s,"VHPT usage (%ld entries):\n",
+		     (unsigned long) VHPT_NUM_ENTRIES);
+
+	for_each_present_cpu (cpu) {
+		struct vhpt_lf_entry *v = __va(per_cpu(vhpt_paddr, cpu));
+		unsigned long vhpt_valid = 0;
+
+		for (i = 0; i < VHPT_NUM_ENTRIES; i++, v++)
+			if (!(v->ti_tag & INVALID_TI_TAG))
+				vhpt_valid++;
+		s += sprintf(s,"  cpu %d: %ld\n", cpu, vhpt_valid);
 	}
-	s += sprintf(s,"VHPT usage: %ld/%ld (%ld collision chains)\n",
-		vhpt_valid, (unsigned long) VHPT_NUM_ENTRIES, vhpt_chains);
+
 	return s - buf;
 }

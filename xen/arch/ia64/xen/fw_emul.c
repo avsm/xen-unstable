@@ -359,18 +359,32 @@ xen_pal_emulator(unsigned long index, u64 in1, u64 in2, u64 in3)
 
 // given a current domain (virtual or metaphysical) address, return the virtual address
 static unsigned long
-efi_translate_domain_addr(unsigned long domain_addr, IA64FAULT *fault)
+efi_translate_domain_addr(unsigned long domain_addr, IA64FAULT *fault,
+			  struct page_info** page)
 {
 	struct vcpu *v = current;
 	unsigned long mpaddr = domain_addr;
+	unsigned long virt;
 	*fault = IA64_NO_FAULT;
 
+again:
 	if (v->domain->arch.efi_virt_mode) {
 		*fault = vcpu_tpa(v, domain_addr, &mpaddr);
 		if (*fault != IA64_NO_FAULT) return 0;
 	}
 
-	return ((unsigned long) __va(translate_domain_mpaddr(mpaddr)));
+	virt = (unsigned long)domain_mpa_to_imva(v->domain, mpaddr);
+	*page = virt_to_page(virt);
+	if (get_page(*page, current->domain) == 0) {
+		if (page_get_owner(*page) != current->domain) {
+			// which code is appropriate?
+			*fault = IA64_FAULT;
+			return 0;
+		}
+		goto again;
+	}
+
+	return virt;
 }
 
 static efi_status_t
@@ -379,18 +393,27 @@ efi_emulate_get_time(
 	IA64FAULT *fault)
 {
 	unsigned long tv = 0, tc = 0;
+	struct page_info *tv_page = NULL;
+	struct page_info *tc_page = NULL;
 	efi_status_t status;
 
 	//printf("efi_get_time(%016lx,%016lx) called\n", tv_addr, tc_addr);
-	tv = efi_translate_domain_addr(tv_addr, fault);
-	if (*fault != IA64_NO_FAULT) return 0;
+	tv = efi_translate_domain_addr(tv_addr, fault, &tv_page);
+	if (*fault != IA64_NO_FAULT)
+		return 0;
 	if (tc_addr) {
-		tc = efi_translate_domain_addr(tc_addr, fault);
-		if (*fault != IA64_NO_FAULT) return 0;
+		tc = efi_translate_domain_addr(tc_addr, fault, &tc_page);
+		if (*fault != IA64_NO_FAULT) {
+			put_page(tv_page);
+			return 0;
+		}
 	}
 	//printf("efi_get_time(%016lx,%016lx) translated to xen virtual address\n", tv, tc);
 	status = (*efi.get_time)((efi_time_t *) tv, (efi_time_cap_t *) tc);
 	//printf("efi_get_time returns %lx\n", status);
+	if (tc_page != NULL)
+		put_page(tc_page);
+	put_page(tv_page);
 	return status;
 }
 
@@ -549,7 +572,7 @@ do_ssc(unsigned long ssc, struct pt_regs *regs)
 	    case SSC_WAIT_COMPLETION:
 		if (arg0) {	// metaphysical address
 
-			arg0 = translate_domain_mpaddr(arg0);
+			arg0 = translate_domain_mpaddr(arg0, NULL);
 /**/			stat = (struct ssc_disk_stat *)__va(arg0);
 ///**/			if (stat->fd == last_fd) stat->count = last_count;
 /**/			stat->count = last_count;
@@ -564,7 +587,7 @@ do_ssc(unsigned long ssc, struct pt_regs *regs)
 		arg1 = vcpu_get_gr(current,33);	// access rights
 if (!running_on_sim) { printf("SSC_OPEN, not implemented on hardware.  (ignoring...)\n"); arg0 = 0; }
 		if (arg0) {	// metaphysical address
-			arg0 = translate_domain_mpaddr(arg0);
+			arg0 = translate_domain_mpaddr(arg0, NULL);
 			retval = ia64_ssc(arg0,arg1,0,0,ssc);
 		}
 		else retval = -1L;
@@ -581,7 +604,7 @@ if (!running_on_sim) { printf("SSC_OPEN, not implemented on hardware.  (ignoring
 			unsigned long mpaddr;
 			long len;
 
-			arg2 = translate_domain_mpaddr(arg2);
+			arg2 = translate_domain_mpaddr(arg2, NULL);
 			req = (struct ssc_disk_req *) __va(arg2);
 			req->len &= 0xffffffffL;	// avoid strange bug
 			len = req->len;
@@ -592,7 +615,7 @@ if (!running_on_sim) { printf("SSC_OPEN, not implemented on hardware.  (ignoring
 			retval = 0;
 			if ((mpaddr & PAGE_MASK) != ((mpaddr+len-1) & PAGE_MASK)) {
 				// do partial page first
-				req->addr = translate_domain_mpaddr(mpaddr);
+				req->addr = translate_domain_mpaddr(mpaddr, NULL);
 				req->len = PAGE_SIZE - (req->addr & ~PAGE_MASK);
 				len -= req->len; mpaddr += req->len;
 				retval = ia64_ssc(arg0,arg1,arg2,arg3,ssc);
@@ -602,7 +625,7 @@ if (!running_on_sim) { printf("SSC_OPEN, not implemented on hardware.  (ignoring
 //if (last_count >= PAGE_SIZE) printf("ssc(%p,%lx)[part]=%x ",req->addr,req->len,retval);
 			}
 			if (retval >= 0) while (len > 0) {
-				req->addr = translate_domain_mpaddr(mpaddr);
+				req->addr = translate_domain_mpaddr(mpaddr, NULL);
 				req->len = (len > PAGE_SIZE) ? PAGE_SIZE : len;
 				len -= PAGE_SIZE; mpaddr += PAGE_SIZE;
 				retval = ia64_ssc(arg0,arg1,arg2,arg3,ssc);
