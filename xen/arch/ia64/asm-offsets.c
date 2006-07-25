@@ -8,6 +8,7 @@
 #include <xen/sched.h>
 #include <asm/processor.h>
 #include <asm/ptrace.h>
+#include <asm/mca.h>
 #include <public/xen.h>
 #include <asm/tlb.h>
 #include <asm/regs.h>
@@ -31,6 +32,9 @@ void foo(void)
 	DEFINE(IA64_CPU_SIZE, sizeof (struct cpuinfo_ia64));
 	DEFINE(UNW_FRAME_INFO_SIZE, sizeof (struct unw_frame_info));
 	DEFINE(SHARED_INFO_SIZE, sizeof (struct shared_info));
+
+	BLANK();
+	DEFINE(IA64_MCA_CPU_INIT_STACK_OFFSET, offsetof (struct ia64_mca_cpu, init_stack));
 
 	BLANK();
 #ifdef   VTI_DEBUG
@@ -123,7 +127,6 @@ void foo(void)
 	DEFINE(IA64_PT_REGS_R6_OFFSET, offsetof (struct pt_regs, r6));
 	DEFINE(IA64_PT_REGS_R7_OFFSET, offsetof (struct pt_regs, r7));
 	DEFINE(IA64_PT_REGS_EML_UNAT_OFFSET, offsetof (struct pt_regs, eml_unat));
-	DEFINE(IA64_PT_REGS_RFI_PFS_OFFSET, offsetof (struct pt_regs, rfi_pfs));
 	DEFINE(IA64_VCPU_IIPA_OFFSET, offsetof (struct vcpu, arch.arch_vmx.cr_iipa));
 	DEFINE(IA64_VCPU_ISR_OFFSET, offsetof (struct vcpu, arch.arch_vmx.cr_isr));
 	DEFINE(IA64_VCPU_CAUSE_OFFSET, offsetof (struct vcpu, arch.arch_vmx.cause));
@@ -180,6 +183,7 @@ void foo(void)
 	BLANK();
 
 	DEFINE(IA64_VPD_BASE_OFFSET, offsetof (struct vcpu, arch.privregs));
+	DEFINE(IA64_VPD_VIFS_OFFSET, offsetof (mapped_regs_t, ifs));
  	DEFINE(IA64_VLSAPIC_INSVC_BASE_OFFSET, offsetof (struct vcpu, arch.insvc[0]));
 	DEFINE(IA64_VPD_CR_VPTA_OFFSET, offsetof (cr_t, pta));
 	DEFINE(XXX_THASH_SIZE, sizeof (thash_data_t));
