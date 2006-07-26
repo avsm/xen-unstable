@@ -170,6 +170,7 @@
 #include <asm/pgalloc.h>
 #include <asm/vhpt.h>
 #include <asm/vcpu.h>
+#include <asm/shadow.h>
 #include <linux/efi.h>
 
 #ifndef CONFIG_XEN_IA64_DOM0_VP
@@ -470,14 +471,29 @@ u64 translate_domain_pte(u64 pteval, u64 address, u64 itir__, u64* logps,
 	pteval2 &= _PAGE_PPN_MASK; // ignore non-addr bits
 	pteval2 |= (pteval & _PAGE_ED);
 	pteval2 |= _PAGE_PL_2; // force PL0->2 (PL3 is unaffected)
-	pteval2 = (pteval & ~_PAGE_PPN_MASK) | pteval2;
+	pteval2 |= (pteval & ~_PAGE_PPN_MASK);
 	/*
 	 * Don't let non-dom0 domains map uncached addresses.  This can
 	 * happen when domU tries to touch i/o port space.  Also prevents
 	 * possible address aliasing issues.
+	 * WB => WB
+	 * UC, UCE, WC => WB
+	 * NaTPage => NaTPage
 	 */
-	if (d != dom0)
+	if (d != dom0 && (pteval2 & _PAGE_MA_MASK) != _PAGE_MA_NAT)
 		pteval2 &= ~_PAGE_MA_MASK;
+
+    /* If shadow mode is enabled, virtualize dirty bit.  */
+    if (shadow_mode_enabled(d) && (pteval2 & _PAGE_D)) {
+        u64 mp_page = mpaddr >> PAGE_SHIFT;
+        pteval2 |= _PAGE_VIRT_D;
+
+        /* If the page is not already dirty, don't set the dirty bit.
+           This is a small optimization!  */
+        if (mp_page < d->arch.shadow_bitmap_size * 8
+            && !test_bit(mp_page, d->arch.shadow_bitmap))
+            pteval2 = (pteval2 & ~_PAGE_D);
+    }
 
 	return pteval2;
 }
@@ -583,7 +599,7 @@ lookup_alloc_domain_pte(struct domain* d, unsigned long mpaddr)
 }
 
 //XXX xxx_none() should be used instread of !xxx_present()?
-static volatile pte_t*
+volatile pte_t*
 lookup_noalloc_domain_pte(struct domain* d, unsigned long mpaddr)
 {
     struct mm_struct *mm = &d->arch.mm;
@@ -1155,11 +1171,10 @@ dom0vp_add_physmap(struct domain* d, unsigned long gpfn, unsigned long mfn,
         get_knownalive_domain(rd);
     }
 
-    if (unlikely(rd == d)) {
+    if (unlikely(rd == d || !mfn_valid(mfn))) {
         error = -EINVAL;
         goto out1;
     }
-    BUG_ON(!mfn_valid(mfn));
     if (unlikely(get_page(mfn_to_page(mfn), rd) == 0)) {
         error = -EINVAL;
         goto out1;
@@ -1416,10 +1431,13 @@ guest_physmap_remove_page(struct domain *d, unsigned long gpfn,
 
 //XXX sledgehammer.
 //    flush finer range.
-void
+static void
 domain_page_flush(struct domain* d, unsigned long mpaddr,
                   unsigned long old_mfn, unsigned long new_mfn)
 {
+    if (shadow_mode_enabled(d))
+        shadow_mark_page_dirty(d, mpaddr >> PAGE_SHIFT);
+
     domain_flush_vtlb_all();
 }
 
