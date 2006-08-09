@@ -32,6 +32,7 @@ void foo(void)
 	DEFINE(IA64_CPU_SIZE, sizeof (struct cpuinfo_ia64));
 	DEFINE(UNW_FRAME_INFO_SIZE, sizeof (struct unw_frame_info));
 	DEFINE(SHARED_INFO_SIZE, sizeof (struct shared_info));
+	DEFINE(MAPPED_REGS_T_SIZE, sizeof (mapped_regs_t));
 
 	BLANK();
 	DEFINE(IA64_MCA_CPU_INIT_STACK_OFFSET, offsetof (struct ia64_mca_cpu, init_stack));
@@ -210,4 +211,11 @@ void foo(void)
 	DEFINE(IA64_KR_IO_BASE_OFFSET, offsetof (cpu_kr_ia64_t, _kr[IA64_KR_IO_BASE]));
 	DEFINE(IA64_KR_CURRENT_STACK_OFFSET, offsetof (cpu_kr_ia64_t, _kr[IA64_KR_CURRENT_STACK]));
 
+#ifdef PERF_COUNTERS
+	BLANK();
+	DEFINE(RECOVER_TO_PAGE_FAULT_PERFC_OFS, offsetof (struct perfcounter, recover_to_page_fault));
+	DEFINE(RECOVER_TO_BREAK_FAULT_PERFC_OFS, offsetof (struct perfcounter, recover_to_break_fault));
+	DEFINE(FAST_HYPERPRIVOP_PERFC_OFS, offsetof (struct perfcounter, fast_hyperprivop));
+	DEFINE(FAST_REFLECT_PERFC_OFS, offsetof (struct perfcounter, fast_reflect));
+#endif
 }

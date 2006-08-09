@@ -4,12 +4,8 @@
 #define VHPT_ENABLED 1
 
 /* Size of the VHPT.  */
-#ifdef CONFIG_XEN_IA64_DOM0_VP
 // XXX work around to avoid trigerring xenLinux software lock up detection.
 # define	VHPT_SIZE_LOG2			16	// 64KB
-#else
-# define	VHPT_SIZE_LOG2			24	// 16MB default
-#endif
 
 /* Number of entries in the VHPT.  The size of an entry is 4*8B == 32B */
 #define	VHPT_NUM_ENTRIES		(1 << (VHPT_SIZE_LOG2 - 5))
@@ -36,7 +32,6 @@ struct vhpt_lf_entry {
 #define INVALID_TI_TAG 0x8000000000000000L
 
 extern void vhpt_init (void);
-extern void zero_vhpt_stats(void);
 extern int dump_vhpt_stats(char *buf);
 extern void vhpt_multiple_insert(unsigned long vaddr, unsigned long pte,
 				 unsigned long logps);

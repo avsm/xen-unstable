@@ -34,129 +34,6 @@ long arch_do_dom0_op(dom0_op_t *op, XEN_GUEST_HANDLE(dom0_op_t) u_dom0_op)
 
     switch ( op->cmd )
     {
-    case DOM0_GETPAGEFRAMEINFO:
-    {
-        struct page_info *page;
-        unsigned long mfn = op->u.getpageframeinfo.gmfn;
-        domid_t dom = op->u.getpageframeinfo.domain;
-        struct domain *d;
-
-        ret = -EINVAL;
-
-        if ( unlikely(!mfn_valid(mfn)) || 
-             unlikely((d = find_domain_by_id(dom)) == NULL) )
-            break;
-
-        page = mfn_to_page(mfn);
-
-        if ( likely(get_page(page, d)) )
-        {
-            ret = 0;
-
-            op->u.getpageframeinfo.type = NOTAB;
-
-            if ( (page->u.inuse.type_info & PGT_count_mask) != 0 )
-            {
-                switch ( page->u.inuse.type_info & PGT_type_mask )
-                {
-                default:
-                    panic("No such page type\n");
-                    break;
-                }
-            }
-            
-            put_page(page);
-        }
-
-        put_domain(d);
-
-        copy_to_guest(u_dom0_op, op, 1);
-    }
-    break;
-
-    case DOM0_GETPAGEFRAMEINFO2:
-    {
-#define GPF2_BATCH 128
-        int n,j;
-        int num = op->u.getpageframeinfo2.num;
-        domid_t dom = op->u.getpageframeinfo2.domain;
-        struct domain *d;
-        unsigned long *l_arr;
-        ret = -ESRCH;
-
-        if ( unlikely((d = find_domain_by_id(dom)) == NULL) )
-            break;
-
-        if ( unlikely(num > 1024) )
-        {
-            ret = -E2BIG;
-            break;
-        }
-
-        l_arr = (unsigned long *)alloc_xenheap_page();
- 
-        ret = 0;
-        for( n = 0; n < num; )
-        {
-            int k = ((num-n)>GPF2_BATCH)?GPF2_BATCH:(num-n);
-
-            if ( copy_from_guest_offset(l_arr, op->u.getpageframeinfo2.array,
-                                        n, k) )
-            {
-                ret = -EINVAL;
-                break;
-            }
-     
-            for( j = 0; j < k; j++ )
-            {      
-                struct page_info *page;
-                unsigned long mfn = l_arr[j];
-
-                if ( unlikely(mfn >= max_page) )
-                    goto e2_err;
-
-                page = mfn_to_page(mfn);
-  
-                if ( likely(get_page(page, d)) )
-                {
-                    unsigned long type = 0;
-
-                    switch( page->u.inuse.type_info & PGT_type_mask )
-                    {
-                    default:
-                        panic("No such page type\n");
-                        break;
-                    }
-
-                    if ( page->u.inuse.type_info & PGT_pinned )
-                        type |= LPINTAB;
-                    l_arr[j] |= type;
-                    put_page(page);
-                }
-                else
-                {
-                e2_err:
-                    l_arr[j] |= XTAB;
-                }
-
-            }
-
-            if ( copy_to_guest_offset(op->u.getpageframeinfo2.array,
-                                      n, l_arr, k) )
-            {
-                ret = -EINVAL;
-                break;
-            }
-
-            n += j;
-        }
-
-        free_xenheap_page((void *) l_arr);
-
-        put_domain(d);
-    }
-    break;
-
     case DOM0_GETMEMLIST:
     {
         unsigned long i;
@@ -245,6 +122,15 @@ long arch_do_dom0_op(dom0_op_t *op, XEN_GUEST_HANDLE(dom0_op_t) u_dom0_op)
                     ret = -EINVAL;
                     break;
                 }
+                if (!d->arch.is_vti) {
+                    struct vcpu *v;
+                    for_each_vcpu(d, v) {
+                        BUG_ON(v->arch.privregs == NULL);
+                        free_domheap_pages(virt_to_page(v->arch.privregs),
+                                      get_order_from_shift(XMAPPEDREGS_SHIFT));
+                        relinquish_vcpu_resources(v);
+                    }
+                }
                 d->arch.is_vti = 1;
                 vmx_setup_platform(d);
             }
@@ -313,7 +199,6 @@ long arch_do_dom0_op(dom0_op_t *op, XEN_GUEST_HANDLE(dom0_op_t) u_dom0_op)
     return ret;
 }
 
-#ifdef CONFIG_XEN_IA64_DOM0_VP
 static unsigned long
 dom0vp_ioremap(struct domain *d, unsigned long mpaddr, unsigned long size)
 {
@@ -374,7 +259,6 @@ do_dom0vp_op(unsigned long cmd,
 
     return ret;
 }
-#endif
 
 /*
  * Local variables:

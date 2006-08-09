@@ -433,7 +433,10 @@ void emulate_io_inst(VCPU *vcpu, u64 padr, u64 ma)
     u64 data, value,post_update, slot1a, slot1b, temp;
     INST64 inst;
     regs=vcpu_regs(vcpu);
-    bundle = __vmx_get_domain_bundle(regs->cr_iip);
+    if (IA64_RETRY == __vmx_get_domain_bundle(regs->cr_iip, &bundle)) {
+        /* if fetch code fail, return and try again */
+        return;
+    }
     slot = ((struct ia64_psr *)&(regs->cr_ipsr))->ri;
     if (!slot) inst.inst = bundle.slot0;
     else if (slot == 1){
@@ -494,6 +497,21 @@ void emulate_io_inst(VCPU *vcpu, u64 padr, u64 ma)
             vcpu_set_gr(vcpu,inst.M3.r3,temp,0);
 
         }
+    }
+    // Floating-point spill
+    else if (inst.M9.major == 6 && inst.M9.x6 == 0x3B &&
+             inst.M9.m == 0 && inst.M9.x == 0) {
+        struct ia64_fpreg v;
+
+        inst_type = SL_FLOATING;
+        dir = IOREQ_WRITE;
+        vcpu_get_fpreg(vcpu, inst.M9.f2, &v);
+        /* Write high word.
+           FIXME: this is a kludge!  */
+        v.u.bits[1] &= 0x3ffff;
+        mmio_access(vcpu, padr + 8, &v.u.bits[1], 8, ma, IOREQ_WRITE);
+        data = v.u.bits[0];
+        size = 3;
     }
     // Floating-point spill + Imm update
     else if(inst.M10.major==7&&inst.M10.x6==0x3B){

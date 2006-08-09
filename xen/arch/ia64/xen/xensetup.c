@@ -388,13 +388,6 @@ void start_kernel(void)
     max_page = 0;
     efi_memmap_walk(find_max_pfn, &max_page);
     printf("find_memory: efi_memmap_walk returns max_page=%lx\n",max_page);
-#ifndef CONFIG_XEN_IA64_DOM0_VP
-    /* this is a bad hack.  see dom_fw.c creation of EFI map for dom0 */
-    max_page = (GRANULEROUNDDOWN(max_page << PAGE_SHIFT)
-	- IA64_GRANULE_SIZE) >> PAGE_SHIFT;
-    printf("find_memory: last granule reserved for dom0; xen max_page=%lx\n",
-	max_page);
-#endif
     efi_print();
 
     heap_start = memguard_init(ia64_imva(&_end));
@@ -533,8 +526,10 @@ printk("num_online_cpus=%d, max_cpus=%d\n",num_online_cpus(),max_cpus);
 
     init_trace_bufs();
 
-    if (opt_xencons)
+    if (opt_xencons) {
         console_endboot();
+        serial_endboot();
+    }
 
     domain0_ready = 1;
 

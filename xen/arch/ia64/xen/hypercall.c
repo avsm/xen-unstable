@@ -70,7 +70,7 @@ hypercall_t ia64_hypercall_table[] =
 	(hypercall_t)do_ni_hypercall,		/*  */
 	(hypercall_t)do_event_channel_op,
 	(hypercall_t)do_physdev_op,
-	(hypercall_t)do_ni_hypercall,		/*  */
+	(hypercall_t)do_hvm_op,			/*  */
 	(hypercall_t)do_ni_hypercall,		/*  */                  /* 35 */
 	(hypercall_t)do_ni_hypercall,		/*  */
 	(hypercall_t)do_ni_hypercall,		/*  */
@@ -84,11 +84,7 @@ hypercall_t ia64_hypercall_table[] =
 	(hypercall_t)do_ni_hypercall,		/*  */                  /* 45 */
 	(hypercall_t)do_ni_hypercall,		/*  */
 	(hypercall_t)do_ni_hypercall,		/*  */
-#ifdef CONFIG_XEN_IA64_DOM0_VP
 	(hypercall_t)do_dom0vp_op,			/* dom0vp_op */
-#else
-	(hypercall_t)do_ni_hypercall,		/* arch_0 */
-#endif
 	(hypercall_t)do_ni_hypercall,		/* arch_1 */
 	(hypercall_t)do_ni_hypercall,		/* arch_2 */            /* 50 */
 	(hypercall_t)do_ni_hypercall,		/* arch_3 */
@@ -210,7 +206,7 @@ fw_hypercall (struct pt_regs *regs)
 		if (regs->r28 == PAL_HALT_LIGHT) {
 			if (vcpu_deliverable_interrupts(v) ||
 				event_pending(v)) {
-					idle_when_pending++;
+				perfc_incrc(idle_when_pending);
 				vcpu_pend_unspecified_interrupt(v);
 //printf("idle w/int#%d pending!\n",pi);
 //this shouldn't happen, but it apparently does quite a bit!  so don't
@@ -219,7 +215,7 @@ fw_hypercall (struct pt_regs *regs)
 //as deliver_pending_interrupt is called on the way out and will deliver it
 			}
 			else {
-				pal_halt_light_count++;
+				perfc_incrc(pal_halt_light);
 				do_sched_op_compat(SCHEDOP_yield, 0);
 			}
 			regs->r8 = 0;
@@ -319,7 +315,7 @@ ia64_hypercall (struct pt_regs *regs)
 
 	/* Hypercalls are only allowed by kernel.
 	   Kernel checks memory accesses.  */
-	if (privlvl != 2) {
+	if (VMX_DOMAIN(v) ? (privlvl != 0) : (privlvl != 2)) {
 	    /* FIXME: Return a better error value ?
 	       Reflection ? Illegal operation ?  */
 	    regs->r8 = -1;

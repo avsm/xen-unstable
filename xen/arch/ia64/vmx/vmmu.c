@@ -305,18 +305,18 @@ int unimplemented_gva(VCPU *vcpu,u64 vadr)
 
 
 /*
- * Prefetch guest bundle code.
+ * Fetch guest bundle code.
  * INPUT:
- *  code: buffer pointer to hold the read data.
- *  num:  number of dword (8byts) to read.
+ *  gip: guest ip
+ *  pbundle: used to return fetched bundle.
  */
-int
-fetch_code(VCPU *vcpu, u64 gip, u64 *code1, u64 *code2)
+unsigned long
+fetch_code(VCPU *vcpu, u64 gip, IA64_BUNDLE *pbundle)
 {
     u64     gpip=0;   // guest physical IP
     u64     *vpa;
     thash_data_t    *tlb;
-    u64     mfn;
+    u64     mfn, maddr;
     struct page_info* page;
 
  again:
@@ -333,11 +333,16 @@ fetch_code(VCPU *vcpu, u64 gip, u64 *code1, u64 *code2)
     if( gpip){
         mfn = gmfn_to_mfn(vcpu->domain, gpip >>PAGE_SHIFT);
         if( mfn == INVALID_MFN )  panic_domain(vcpu_regs(vcpu),"fetch_code: invalid memory\n");
+        maddr = (mfn << PAGE_SHIFT) | (gpip & (PAGE_SIZE - 1));
     }else{
         tlb = vhpt_lookup(gip);
-        if( tlb == NULL)
-            panic_domain(vcpu_regs(vcpu),"No entry found in ITLB and DTLB\n");
+        if (tlb == NULL) {
+            ia64_ptcl(gip, ARCH_PAGE_SHIFT << 2);
+            return IA64_RETRY;
+        }
         mfn = tlb->ppn >> (PAGE_SHIFT - ARCH_PAGE_SHIFT);
+        maddr = (tlb->ppn >> (tlb->ps - 12) << tlb->ps) |
+                (gip & (PSIZE(tlb->ps) - 1));
     }
 
     page = mfn_to_page(mfn);
@@ -349,12 +354,12 @@ fetch_code(VCPU *vcpu, u64 gip, u64 *code1, u64 *code2)
         }
         goto again;
     }
-    vpa = (u64 *)__va((mfn << PAGE_SHIFT) | (gip & (PAGE_SIZE - 1)));
+    vpa = (u64 *)__va(maddr);
 
-    *code1 = *vpa++;
-    *code2 = *vpa;
+    pbundle->i64[0] = *vpa++;
+    pbundle->i64[1] = *vpa;
     put_page(page);
-    return 1;
+    return IA64_NO_FAULT;
 }
 
 IA64FAULT vmx_vcpu_itc_i(VCPU *vcpu, UINT64 pte, UINT64 itir, UINT64 ifa)
@@ -371,7 +376,8 @@ IA64FAULT vmx_vcpu_itc_i(VCPU *vcpu, UINT64 pte, UINT64 itir, UINT64 ifa)
         return IA64_FAULT;
     }
 #endif //VTLB_DEBUG    
-    thash_purge_and_insert(vcpu, pte, itir, ifa);
+    pte &= ~PAGE_FLAGS_RV_MASK;
+    thash_purge_and_insert(vcpu, pte, itir, ifa, ISIDE_TLB);
     return IA64_NO_FAULT;
 }
 
@@ -390,10 +396,11 @@ IA64FAULT vmx_vcpu_itc_d(VCPU *vcpu, UINT64 pte, UINT64 itir, UINT64 ifa)
         return IA64_FAULT;
     }
 #endif //VTLB_DEBUG
+    pte &= ~PAGE_FLAGS_RV_MASK;
     gpfn = (pte & _PAGE_PPN_MASK)>> PAGE_SHIFT;
     if (VMX_DOMAIN(vcpu) && __gpfn_is_io(vcpu->domain, gpfn))
         pte |= VTLB_PTE_IO;
-    thash_purge_and_insert(vcpu, pte, itir, ifa);
+    thash_purge_and_insert(vcpu, pte, itir, ifa, DSIDE_TLB);
     return IA64_NO_FAULT;
 
 }
@@ -418,7 +425,8 @@ IA64FAULT vmx_vcpu_itr_i(VCPU *vcpu, u64 slot, u64 pte, u64 itir, u64 ifa)
         return IA64_FAULT;
     }
     thash_purge_entries(vcpu, va, ps);
-#endif    
+#endif
+    pte &= ~PAGE_FLAGS_RV_MASK;
     vcpu_get_rr(vcpu, va, &rid);
     rid = rid& RR_RID_MASK;
     p_itr = (thash_data_t *)&vcpu->arch.itrs[slot];
@@ -432,8 +440,8 @@ IA64FAULT vmx_vcpu_itr_d(VCPU *vcpu, u64 slot, u64 pte, u64 itir, u64 ifa)
 {
 #ifdef VTLB_DEBUG
     int index;
-    u64 gpfn;
 #endif    
+    u64 gpfn;
     u64 ps, va, rid;
     thash_data_t * p_dtr;
     ps = itir_ps(itir);
@@ -445,11 +453,12 @@ IA64FAULT vmx_vcpu_itr_d(VCPU *vcpu, u64 slot, u64 pte, u64 itir, u64 ifa)
         panic_domain(vcpu_regs(vcpu),"Tlb conflict!!");
         return IA64_FAULT;
     }
+#endif   
+    pte &= ~PAGE_FLAGS_RV_MASK;
     thash_purge_entries(vcpu, va, ps);
     gpfn = (pte & _PAGE_PPN_MASK)>> PAGE_SHIFT;
-    if(VMX_DOMAIN(vcpu) && _gpfn_is_io(vcpu->domain,gpfn))
+    if (VMX_DOMAIN(vcpu) && __gpfn_is_io(vcpu->domain, gpfn))
         pte |= VTLB_PTE_IO;
-#endif    
     vcpu_get_rr(vcpu, va, &rid);
     rid = rid& RR_RID_MASK;
     p_dtr = (thash_data_t *)&vcpu->arch.dtrs[slot];
@@ -521,19 +530,23 @@ struct ptc_ga_args {
 
 static void ptc_ga_remote_func (void *varg)
 {
-    u64 oldrid, moldrid, mpta;
+    u64 oldrid, moldrid, mpta, oldpsbits, vadr;
     struct ptc_ga_args *args = (struct ptc_ga_args *)varg;
     VCPU *v = args->vcpu;
+    vadr = args->vadr;
 
     oldrid = VMX(v, vrr[0]);
     VMX(v, vrr[0]) = args->rid;
+    oldpsbits = VMX(v, psbits[0]);
+    VMX(v, psbits[0]) = VMX(v, psbits[REGION_NUMBER(vadr)]);
     moldrid = ia64_get_rr(0x0);
     ia64_set_rr(0x0,vrrtomrr(v,args->rid));
     mpta = ia64_get_pta();
     ia64_set_pta(v->arch.arch_vmx.mpta&(~1));
     ia64_srlz_d();
-    vmx_vcpu_ptc_l(v, args->vadr, args->ps);
+    vmx_vcpu_ptc_l(v, REGION_OFFSET(vadr), args->ps);
     VMX(v, vrr[0]) = oldrid; 
+    VMX(v, psbits[0]) = oldpsbits;
     ia64_set_rr(0x0,moldrid);
     ia64_set_pta(mpta);
     ia64_dv_serialize_data();
@@ -547,7 +560,7 @@ IA64FAULT vmx_vcpu_ptc_ga(VCPU *vcpu,UINT64 va,UINT64 ps)
     struct vcpu *v;
     struct ptc_ga_args args;
 
-    args.vadr = va<<3>>3;
+    args.vadr = va;
     vcpu_get_rr(vcpu, va, &args.rid);
     args.ps = ps;
     for_each_vcpu (d, v) {

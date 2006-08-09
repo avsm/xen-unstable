@@ -40,6 +40,7 @@
 #include <asm/tlb.h>
 #include <asm/regionreg.h>
 #include <asm/vmx_mm_def.h>
+#include <asm/bundle.h>
 //#define         THASH_TLB_TR            0
 //#define         THASH_TLB_TC            1
 
@@ -270,7 +271,7 @@ extern thash_data_t *thash_find_next_overlap(thash_cb_t *hcb);
  *
  */
 extern void thash_purge_entries(struct vcpu *v, u64 va, u64 ps);
-extern void thash_purge_and_insert(struct vcpu *v, u64 pte, u64 itir, u64 ifa);
+extern void thash_purge_and_insert(struct vcpu *v, u64 pte, u64 itir, u64 ifa, int type);
 
 /*
  * Purge all TCs or VHPT entries including those in Hash table.
@@ -299,10 +300,10 @@ extern void free_domain_tlb(struct vcpu *v);
 extern thash_data_t * vsa_thash(PTA vpta, u64 va, u64 vrr, u64 *tag);
 extern thash_data_t * vhpt_lookup(u64 va);
 extern void machine_tlb_purge(u64 va, u64 ps);
-extern int fetch_code(struct vcpu *vcpu, u64 gip, u64 *code1, u64 *code2);
+extern unsigned long fetch_code(struct vcpu *vcpu, u64 gip, IA64_BUNDLE *pbundle);
 extern void emulate_io_inst(struct vcpu *vcpu, u64 padr, u64 ma);
 extern int vhpt_enabled(struct vcpu *vcpu, uint64_t vadr, vhpt_ref_t ref);
-extern void  vtlb_insert(thash_cb_t *hcb, u64 pte, u64 itir, u64 va);
+extern void vtlb_insert(struct vcpu *vcpu, u64 pte, u64 itir, u64 va);
 extern u64 translate_phy_pte(struct vcpu *v, u64 *pte, u64 itir, u64 va);
 extern void thash_vhpt_insert(struct vcpu *v, u64 pte, u64 itir, u64 ifa);
 extern u64 guest_vhpt_lookup(u64 iha, u64 *pte);

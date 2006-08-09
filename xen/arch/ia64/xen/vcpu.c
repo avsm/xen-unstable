@@ -763,12 +763,8 @@ UINT64 vcpu_deliverable_timer(VCPU *vcpu)
 
 IA64FAULT vcpu_get_lid(VCPU *vcpu, UINT64 *pval)
 {
-	/* Use real LID for domain0 until vIOSAPIC is present.
-	   Use EID=0, ID=vcpu_id for domU.  */
-	if (vcpu->domain == dom0)
-		*pval = ia64_getreg(_IA64_REG_CR_LID);
-	else
-		*pval = vcpu->vcpu_id << 24;
+	/* Use EID=0, ID=vcpu_id.  */
+	*pval = vcpu->vcpu_id << 24;
 	return IA64_NO_FAULT;
 }
 
@@ -1500,7 +1496,7 @@ IA64FAULT vcpu_translate(VCPU *vcpu, UINT64 address, BOOLEAN is_data, UINT64 *pt
 			*pteval = (address & _PAGE_PPN_MASK) | __DIRTY_BITS |
 			          _PAGE_PL_2 | _PAGE_AR_RWX;
 			*itir = PAGE_SHIFT << 2;
-			phys_translate_count++;
+			perfc_incrc(phys_translate);
 			return IA64_NO_FAULT;
 		}
 	}
@@ -1521,7 +1517,7 @@ IA64FAULT vcpu_translate(VCPU *vcpu, UINT64 address, BOOLEAN is_data, UINT64 *pt
 		if (trp != NULL) {
 			*pteval = trp->pte.val;
 			*itir = trp->itir;
-			tr_translate_count++;
+			perfc_incrc(tr_translate);
 			return IA64_NO_FAULT;
 		}
 	}
@@ -1531,7 +1527,7 @@ IA64FAULT vcpu_translate(VCPU *vcpu, UINT64 address, BOOLEAN is_data, UINT64 *pt
 		if (trp != NULL) {
 			*pteval = trp->pte.val;
 			*itir = trp->itir;
-			tr_translate_count++;
+			perfc_incrc(tr_translate);
 			return IA64_NO_FAULT;
 		}
 	}
@@ -1544,7 +1540,7 @@ IA64FAULT vcpu_translate(VCPU *vcpu, UINT64 address, BOOLEAN is_data, UINT64 *pt
 	    && vcpu_match_tr_entry_no_p(trp,address,rid)) {
 		*pteval = pte.val;
 		*itir = trp->itir;
-		dtlb_translate_count++;
+		perfc_incrc(dtlb_translate);
 		return IA64_USE_TLB;
 	}
 
@@ -1582,7 +1578,7 @@ IA64FAULT vcpu_translate(VCPU *vcpu, UINT64 address, BOOLEAN is_data, UINT64 *pt
 	/* found mapping in guest VHPT! */
 	*itir = rr & RR_PS_MASK;
 	*pteval = pte.val;
-	vhpt_translate_count++;
+	perfc_incrc(vhpt_translate);
 	return IA64_NO_FAULT;
 }
 
@@ -2012,9 +2008,7 @@ void vcpu_itc_no_srlz(VCPU *vcpu, UINT64 IorD, UINT64 vaddr, UINT64 pte, UINT64 
 		panic_domain (NULL, "vcpu_itc_no_srlz: domain trying to use "
  			      "smaller page size!\n");
 
-#ifdef CONFIG_XEN_IA64_DOM0_VP
 	BUG_ON(logps > PAGE_SHIFT);
-#endif
 	psr = ia64_clear_ic();
 	ia64_itc(IorD,vaddr,pte,ps); // FIXME: look for bigger mappings
 	ia64_set_psr(psr);

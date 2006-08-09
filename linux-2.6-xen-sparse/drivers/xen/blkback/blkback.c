@@ -398,14 +398,9 @@ static void dispatch_rw_block_io(blkif_t *blkif,
 		}
 
 		pending_handle(pending_req, i) = map[i].handle;
-#ifdef CONFIG_XEN_IA64_DOM0_NON_VP
-		pending_vaddrs[vaddr_pagenr(pending_req, i)] =
-			(unsigned long)gnttab_map_vaddr(map[i]);
-#else
 		set_phys_to_machine(__pa(vaddr(
 			pending_req, i)) >> PAGE_SHIFT,
 			FOREIGN_FRAME(map[i].dev_bus_addr >> PAGE_SHIFT));
-#endif
 		seg[i].buf  = map[i].dev_bus_addr | 
 			(req->seg[i].first_sect << 9);
 	}
@@ -519,17 +514,10 @@ static int __init blkif_init(void)
 
 	mmap_pages            = blkif_reqs * BLKIF_MAX_SEGMENTS_PER_REQUEST;
 
-#ifdef CONFIG_XEN_IA64_DOM0_NON_VP
-	extern unsigned long alloc_empty_foreign_map_page_range(
-		unsigned long pages);
-	mmap_vstart = (unsigned long)
-		alloc_empty_foreign_map_page_range(mmap_pages);
-#else /* ! ia64 */
 	page = balloon_alloc_empty_page_range(mmap_pages);
 	if (page == NULL)
 		return -ENOMEM;
 	mmap_vstart = (unsigned long)pfn_to_kaddr(page_to_pfn(page));
-#endif
 
 	pending_reqs          = kmalloc(sizeof(pending_reqs[0]) *
 					blkif_reqs, GFP_KERNEL);

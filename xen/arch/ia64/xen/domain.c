@@ -49,10 +49,6 @@
 #include <asm/shadow.h>
 #include <asm/privop_stat.h>
 
-#ifndef CONFIG_XEN_IA64_DOM0_VP
-#define CONFIG_DOMAIN0_CONTIGUOUS
-#endif
-unsigned long dom0_start = -1L;
 unsigned long dom0_size = 512*1024*1024;
 unsigned long dom0_align = 64*1024*1024;
 
@@ -136,7 +132,6 @@ void context_switch(struct vcpu *prev, struct vcpu *next)
     uint64_t pta;
 
     local_irq_save(spsr);
-    context_switch_count++;
 
     __ia64_save_fpu(prev->arch._thread.fph);
     __ia64_load_fpu(next->arch._thread.fph);
@@ -150,16 +145,6 @@ void context_switch(struct vcpu *prev, struct vcpu *next)
     /* Note: ia64_switch_to does not return here at vcpu initialization.  */
 
     //cpu_set(smp_processor_id(), current->domain->domain_dirty_cpumask);
-
-// leave this debug for now: it acts as a heartbeat when more than
-// one domain is active
-{
-static long cnt[16] = { 50,50,50,50,50,50,50,50,50,50,50,50,50,50,50,50};
-static int i = 100;
-int id = ((struct vcpu *)current)->domain->domain_id & 0xf;
-if (!cnt[id]--) { cnt[id] = 500000; printk("%x",id); }
-if (!i--) { i = 1000000; printk("+"); }
-}
  
     if (VMX_DOMAIN(current)){
 	vmx_load_all_rr(current);
@@ -236,6 +221,14 @@ void startup_cpu_idle_loop(void)
 	continue_cpu_idle_loop();
 }
 
+/* compile time test for get_order(sizeof(mapped_regs_t)) !=
+ * get_order_from_shift(XMAPPEDREGS_SHIFT))
+ */
+#if !(((1 << (XMAPPEDREGS_SHIFT - 1)) < MAPPED_REGS_T_SIZE) && \
+      (MAPPED_REGS_T_SIZE < (1 << (XMAPPEDREGS_SHIFT + 1))))
+# error "XMAPPEDREGS_SHIFT doesn't match sizeof(mapped_regs_t)."
+#endif
+
 struct vcpu *alloc_vcpu_struct(struct domain *d, unsigned int vcpu_id)
 {
 	struct vcpu *v;
@@ -261,13 +254,17 @@ struct vcpu *alloc_vcpu_struct(struct domain *d, unsigned int vcpu_id)
 
 	if (!is_idle_domain(d)) {
 	    if (!d->arch.is_vti) {
-		/* Create privregs page only if not VTi.  */
-		v->arch.privregs = 
-		    alloc_xenheap_pages(get_order(sizeof(mapped_regs_t)));
+		int order;
+		int i;
+
+		/* Create privregs page only if not VTi. */
+		order = get_order_from_shift(XMAPPEDREGS_SHIFT);
+		v->arch.privregs = alloc_xenheap_pages(order);
 		BUG_ON(v->arch.privregs == NULL);
-		memset(v->arch.privregs, 0, PAGE_SIZE);
-		share_xen_page_with_guest(virt_to_page(v->arch.privregs),
-		                          d, XENSHARE_writable);
+		memset(v->arch.privregs, 0, 1 << XMAPPEDREGS_SHIFT);
+		for (i = 0; i < (1 << order); i++)
+		    share_xen_page_with_guest(virt_to_page(v->arch.privregs) +
+		                              i, d, XENSHARE_writable);
 	    }
 
 	    v->arch.metaphysical_rr0 = d->arch.metaphysical_rr0;
@@ -295,15 +292,21 @@ struct vcpu *alloc_vcpu_struct(struct domain *d, unsigned int vcpu_id)
 	return v;
 }
 
+void relinquish_vcpu_resources(struct vcpu *v)
+{
+    if (v->arch.privregs != NULL) {
+        free_xenheap_pages(v->arch.privregs,
+                           get_order_from_shift(XMAPPEDREGS_SHIFT));
+        v->arch.privregs = NULL;
+    }
+}
+
 void free_vcpu_struct(struct vcpu *v)
 {
 	if (VMX_DOMAIN(v))
 		vmx_relinquish_vcpu_resources(v);
-	else {
-		if (v->arch.privregs != NULL)
-			free_xenheap_pages(v->arch.privregs,
-			              get_order_from_shift(XMAPPEDREGS_SHIFT));
-	}
+	else
+		relinquish_vcpu_resources(v);
 
 	free_xenheap_pages(v, KERNEL_STACK_SIZE_ORDER);
 }
@@ -516,9 +519,7 @@ static void relinquish_memory(struct domain *d, struct list_head *list)
 
         /* Follow the list chain and /then/ potentially free the page. */
         ent = ent->next;
-#ifdef CONFIG_XEN_IA64_DOM0_VP
         BUG_ON(get_gpfn_from_mfn(page_to_mfn(page)) != INVALID_M2P_ENTRY);
-#endif
         put_page(page);
     }
 
@@ -770,24 +771,6 @@ static void loaddomainelfimage(struct domain *d, unsigned long image_start)
 		elfaddr = (unsigned long) elfbase + phdr.p_offset;
 		dom_mpaddr = phdr.p_paddr;
 
-//printf("p_offset: %x, size=%x\n",elfaddr,filesz);
-#ifdef CONFIG_DOMAIN0_CONTIGUOUS
-		if (d == dom0) {
-			if (dom_mpaddr+memsz>dom0_size)
-				panic("Dom0 doesn't fit in memory space!\n");
-			dom_imva = __va_ul(dom_mpaddr + dom0_start);
-			memcpy((void *)dom_imva, (void *)elfaddr, filesz);
-			if (memsz > filesz)
-				memset((void *)dom_imva+filesz, 0,
-				       memsz-filesz);
-//FIXME: This test for code seems to find a lot more than objdump -x does
-			if (phdr.p_flags & PF_X) {
-				privify_memory(dom_imva,filesz);
-				flush_icache_range (dom_imva, dom_imva+filesz);
-			}
-		}
-		else
-#endif
 		while (memsz > 0) {
 			p = assign_new_domain_page(d,dom_mpaddr);
 			BUG_ON (unlikely(p == NULL));
@@ -852,27 +835,10 @@ void alloc_dom0(void)
 	if (running_on_sim) {
 		dom0_size = 128*1024*1024; //FIXME: Should be configurable
 	}
-#ifdef CONFIG_DOMAIN0_CONTIGUOUS
-	printf("alloc_dom0: starting (initializing %lu MB...)\n",dom0_size/(1024*1024));
- 
-	/* FIXME: The first trunk (say 256M) should always be assigned to
-	 * Dom0, since Dom0's physical == machine address for DMA purpose.
-	 * Some old version linux, like 2.4, assumes physical memory existing
-	 * in 2nd 64M space.
-	 */
-	dom0_start = alloc_boot_pages(dom0_size >> PAGE_SHIFT, dom0_align >> PAGE_SHIFT);
-	dom0_start <<= PAGE_SHIFT;
-	if (!dom0_start) {
-	  panic("alloc_dom0: can't allocate contiguous memory size=%lu\n",
-		dom0_size);
-	}
-	printf("alloc_dom0: dom0_start=0x%lx\n", dom0_start);
-#else
-	// no need to allocate pages for now
-	// pages are allocated by map_new_domain_page() via loaddomainelfimage()
-	dom0_start = 0;
-#endif
 
+	/* no need to allocate pages for now
+	 * pages are allocated by map_new_domain_page() via loaddomainelfimage()
+	 */
 }
 
 
@@ -898,7 +864,6 @@ int construct_dom0(struct domain *d,
 	               char *cmdline)
 {
 	int i, rc;
-	unsigned long alloc_start, alloc_end;
 	start_info_t *si;
 	struct vcpu *v = d->vcpu[0];
 	unsigned long max_pages;
@@ -931,15 +896,9 @@ int construct_dom0(struct domain *d,
 
 	printk("*** LOADING DOMAIN 0 ***\n");
 
-	alloc_start = dom0_start;
-	alloc_end = dom0_start + dom0_size;
 	max_pages = dom0_size / PAGE_SIZE;
 	d->max_pages = max_pages;
-#ifndef CONFIG_XEN_IA64_DOM0_VP
-	d->tot_pages = d->max_pages;
-#else
 	d->tot_pages = 0;
-#endif
 	dsi.image_addr = (unsigned long)image_start;
 	dsi.image_len  = image_len;
 	rc = parseelfimage(&dsi);
@@ -980,8 +939,7 @@ int construct_dom0(struct domain *d,
 	if(initrd_start && initrd_len){
 	    unsigned long offset;
 
-	    pinitrd_start= (dom0_start + dom0_size) -
-	                   (PAGE_ALIGN(initrd_len) + 4*1024*1024);
+	    pinitrd_start= dom0_size - (PAGE_ALIGN(initrd_len) + 4*1024*1024);
 	    if (pinitrd_start <= pstart_info)
 		panic("%s:enough memory is not assigned to dom0", __func__);
 
@@ -1036,25 +994,6 @@ int construct_dom0(struct domain *d,
 	    if (alloc_vcpu(d, i, i) == NULL)
 		printf ("Cannot allocate dom0 vcpu %d\n", i);
 
-#if defined(VALIDATE_VT) && !defined(CONFIG_XEN_IA64_DOM0_VP)
-	/* Construct a frame-allocation list for the initial domain, since these
-	 * pages are allocated by boot allocator and pfns are not set properly
-	 */
-	for ( mfn = (alloc_start>>PAGE_SHIFT); 
-	      mfn < (alloc_end>>PAGE_SHIFT); 
-	      mfn++ )
-	{
-            page = mfn_to_page(mfn);
-            page_set_owner(page, d);
-            page->u.inuse.type_info = 0;
-            page->count_info        = PGC_allocated | 1;
-            list_add_tail(&page->list, &d->page_list);
-
-	    /* Construct 1:1 mapping */
-	    set_gpfn_from_mfn(mfn, mfn);
-	}
-#endif
-
 	/* Copy the OS image. */
 	loaddomainelfimage(d,image_start);
 
@@ -1106,17 +1045,14 @@ int construct_dom0(struct domain *d,
 	bp->console_info.orig_y = bp->console_info.num_rows == 0 ?
 	                          0 : bp->console_info.num_rows - 1;
 
-	bp->initrd_start = (dom0_start+dom0_size) -
-	  (PAGE_ALIGN(ia64_boot_param->initrd_size) + 4*1024*1024);
+	bp->initrd_start = dom0_size -
+	             (PAGE_ALIGN(ia64_boot_param->initrd_size) + 4*1024*1024);
 	bp->initrd_size = ia64_boot_param->initrd_size;
 
 	vcpu_init_regs (v);
 
 	vcpu_regs(v)->r28 = bp_mpa;
 
-#ifdef CONFIG_DOMAIN0_CONTIGUOUS
-	pkern_entry += dom0_start;
-#endif
 	vcpu_regs (v)->cr_iip = pkern_entry;
 
 	physdev_init_dom0(d);
