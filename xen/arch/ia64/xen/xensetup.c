@@ -26,11 +26,6 @@
 #include <linux/efi.h>
 #include <asm/iosapic.h>
 
-/* Be sure the struct shared_info size is <= XSI_SIZE.  */
-#if SHARED_INFO_SIZE > XSI_SIZE
-#error "struct shared_info bigger than XSI_SIZE"
-#endif
-
 unsigned long xenheap_phys_end, total_pages;
 
 char saved_command_line[COMMAND_LINE_SIZE];
@@ -257,6 +252,9 @@ void start_kernel(void)
 #ifdef CONFIG_SMP
     int i;
 #endif
+
+    /* Be sure the struct shared_info size is <= XSI_SIZE.  */
+    BUILD_BUG_ON(sizeof(struct shared_info) > XSI_SIZE);
 
     running_on_sim = is_platform_hp_ski();
     /* Kernel may be relocated by EFI loader */
@@ -517,9 +515,6 @@ printk("num_online_cpus=%d, max_cpus=%d\n",num_online_cpus(),max_cpus);
                         dom0_initrd_start,dom0_initrd_size,
   			0) != 0)
         panic("Could not set up DOM0 guest OS\n");
-
-    /* PIN domain0 on CPU 0.  */
-    dom0->vcpu[0]->cpu_affinity = cpumask_of_cpu(0);
 
     if (!running_on_sim)  // slow on ski and pages are pre-initialized to zero
 	scrub_heap_pages();

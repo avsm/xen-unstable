@@ -46,7 +46,6 @@
 #include <asm/regionreg.h>
 #include <asm/dom_fw.h>
 #include <asm/shadow.h>
-#include <asm/privop_stat.h>
 
 unsigned long dom0_size = 512*1024*1024;
 unsigned long dom0_align = 64*1024*1024;
@@ -111,6 +110,8 @@ void schedule_tail(struct vcpu *prev)
 
 	if (VMX_DOMAIN(current)) {
 		vmx_do_launch(current);
+		migrate_timer(&current->arch.arch_vmx.vtm.vtm_timer,
+		              current->processor);
 	} else {
 		ia64_set_iva(&ia64_ivt);
         	ia64_set_pta(VHPT_ADDR | (1 << 8) | (VHPT_SIZE_LOG2 << 2) |
@@ -134,10 +135,18 @@ void context_switch(struct vcpu *prev, struct vcpu *next)
 
     __ia64_save_fpu(prev->arch._thread.fph);
     __ia64_load_fpu(next->arch._thread.fph);
-    if (VMX_DOMAIN(prev))
-	    vmx_save_state(prev);
+    if (VMX_DOMAIN(prev)) {
+	vmx_save_state(prev);
+	if (!VMX_DOMAIN(next)) {
+	    /* VMX domains can change the physical cr.dcr.
+	     * Restore default to prevent leakage. */
+	    ia64_setreg(_IA64_REG_CR_DCR, (IA64_DCR_DP | IA64_DCR_DK
+	                   | IA64_DCR_DX | IA64_DCR_DR | IA64_DCR_PP
+	                   | IA64_DCR_DA | IA64_DCR_DD | IA64_DCR_LC));
+	}
+    }
     if (VMX_DOMAIN(next))
-	    vmx_load_state(next);
+	vmx_load_state(next);
     /*ia64_psr(ia64_task_regs(next))->dfh = !ia64_is_local_fpu_owner(next);*/
     prev = ia64_switch_to(next);
 
@@ -147,6 +156,8 @@ void context_switch(struct vcpu *prev, struct vcpu *next)
  
     if (VMX_DOMAIN(current)){
 	vmx_load_all_rr(current);
+	migrate_timer(&current->arch.arch_vmx.vtm.vtm_timer,
+	              current->processor);
     } else {
 	struct domain *nd;
     	extern char ia64_ivt;
@@ -228,6 +239,12 @@ void startup_cpu_idle_loop(void)
 # error "XMAPPEDREGS_SHIFT doesn't match sizeof(mapped_regs_t)."
 #endif
 
+void hlt_timer_fn(void *data)
+{
+	struct vcpu *v = data;
+	vcpu_unblock(v);
+}
+
 struct vcpu *alloc_vcpu_struct(struct domain *d, unsigned int vcpu_id)
 {
 	struct vcpu *v;
@@ -287,6 +304,9 @@ struct vcpu *alloc_vcpu_struct(struct domain *d, unsigned int vcpu_id)
 	    v->arch.breakimm = d->arch.breakimm;
 	    v->arch.last_processor = INVALID_PROCESSOR;
 	}
+	if (!VMX_DOMAIN(v)){
+		init_timer(&v->arch.hlt_timer, hlt_timer_fn, v, v->processor);
+	}
 
 	return v;
 }
@@ -298,6 +318,7 @@ void relinquish_vcpu_resources(struct vcpu *v)
                            get_order_from_shift(XMAPPEDREGS_SHIFT));
         v->arch.privregs = NULL;
     }
+    kill_timer(&v->arch.hlt_timer);
 }
 
 void free_vcpu_struct(struct vcpu *v)
@@ -532,6 +553,9 @@ void domain_relinquish_resources(struct domain *d)
     // relase page traversing d->arch.mm.
     relinquish_mm(d);
 
+    if (d->vcpu[0] && VMX_DOMAIN(d->vcpu[0]))
+	    vmx_relinquish_guest_resources(d);
+
     relinquish_memory(d, &d->xenpage_list);
     relinquish_memory(d, &d->page_list);
 
@@ -716,6 +740,15 @@ int shadow_mode_control(struct domain *d, xen_domctl_shadow_ops_t *sc)
 		}
 		break;
 	}
+	case DOM0_SHADOW_CONTROL_OP_GET_ALLOCATION:
+		sc->mb = 0;
+		break;
+	case DOM0_SHADOW_CONTROL_OP_SET_ALLOCATION:
+		if (sc->mb > 0) {
+			BUG();
+			rc = -ENOMEM;
+		}
+		break;
 	default:
 		rc = -EINVAL;
 		break;
