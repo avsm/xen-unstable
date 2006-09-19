@@ -114,8 +114,11 @@ struct page_extents {
  /* Set when is using a page as a page table */
 #define _PGC_page_table      29
 #define PGC_page_table      (1U<<_PGC_page_table)
+/* Set when using page for RMA */
+#define _PGC_page_RMA      28
+#define PGC_page_RMA      (1U<<_PGC_page_RMA)
  /* 29-bit count of references to this frame. */
-#define PGC_count_mask      ((1U<<29)-1)
+#define PGC_count_mask      ((1U<<28)-1)
 
 #define IS_XEN_HEAP_FRAME(_pfn) (page_to_maddr(_pfn) < xenheap_phys_end)
 
@@ -134,6 +137,7 @@ extern struct page_info *frame_table;
 extern unsigned long max_page;
 extern unsigned long total_pages;
 void init_frametable(void);
+void free_rma_check(struct page_info *page);
 
 static inline void put_page(struct page_info *page)
 {
@@ -146,7 +150,8 @@ static inline void put_page(struct page_info *page)
     while ( unlikely((y = cmpxchg(&page->count_info, x, nx)) != x) );
 
     if ( unlikely((nx & PGC_count_mask) == 0) ) {
-        panic("about to free page\n");
+        /* RMA pages can only be released while the domain is dying */
+        free_rma_check(page);
         free_domheap_page(page);
     }
 }
@@ -204,8 +209,6 @@ static inline int page_is_removable(struct page_info *page)
     return ((page->count_info & PGC_count_mask) == 1);
 }
 
-#define set_machinetophys(_mfn, _pfn) (trap(), 0)
-
 extern void synchronise_pagetables(unsigned long cpu_mask);
 
 /* XXX don't know what this is for */
@@ -218,8 +221,6 @@ extern vm_assist_info_t vm_assist_info[];
 #define share_xen_page_with_guest(p, d, r) do { } while (0)
 #define share_xen_page_with_privileged_guests(p, r) do { } while (0)
 
-extern unsigned long frame_table_size;
-
 /* hope that accesses to this will fail spectacularly */
 #define machine_to_phys_mapping ((u32 *)-1UL)
 
@@ -228,12 +229,14 @@ extern int update_grant_va_mapping(unsigned long va,
                                    struct domain *,
                                    struct vcpu *);
 
+#define INVALID_MFN (~0UL)
+#define PFN_TYPE_NONE 0
 #define PFN_TYPE_RMA 1
 #define PFN_TYPE_LOGICAL 2
 #define PFN_TYPE_IO 3
-#define PFN_TYPE_REMOTE 4
+#define PFN_TYPE_FOREIGN 4
 
-extern ulong pfn2mfn(struct domain *d, long pfn, int *type);
+extern ulong pfn2mfn(struct domain *d, ulong pfn, int *type);
 
 /* Arch-specific portion of memory_op hypercall. */
 long arch_memory_op(int op, XEN_GUEST_HANDLE(void) arg);

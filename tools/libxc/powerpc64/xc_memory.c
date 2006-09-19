@@ -11,28 +11,32 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
- * Foundation, 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  *
- * Copyright (C) IBM Corp. 2005
+ * Copyright (C) IBM Corporation 2006
  *
  * Authors: Hollis Blanchard <hollisb@us.ibm.com>
  */
 
-#ifndef _ASM_SMP_H
-#define _ASM_SMP_H
+#include "xc_private.h"
+#include <xen/domctl.h>
 
-#include <xen/types.h>
-#include <xen/cpumask.h>
-#include <xen/init.h>
-#include <asm/current.h>
-extern int smp_num_siblings;
+int xc_alloc_real_mode_area(int xc_handle,
+                            uint32_t domain,
+                            unsigned int log)
+{
+    DECLARE_DOMCTL;
+    int err;
 
-/* revisit when we support SMP */
-#define raw_smp_processor_id() (parea->whoami)
-#define get_hard_smp_processor_id(i) (global_cpu_table[i]->hard_id)
-#define hard_smp_processor_id() (parea->hard_id)
-extern cpumask_t cpu_sibling_map[];
-extern cpumask_t cpu_core_map[];
-extern void __devinit smp_generic_take_timebase(void);
-extern void __devinit smp_generic_give_timebase(void);
-#endif
+    domctl.cmd = XEN_DOMCTL_real_mode_area;
+    domctl.domain = (domid_t)domain;
+    domctl.u.real_mode_area.log = log;
+
+    err = do_domctl(xc_handle, &domctl);
+
+    if (err)
+        DPRINTF("Failed real mode area allocation for dom %u (log %u)\n",
+                domain, log);
+
+    return err;
+}
