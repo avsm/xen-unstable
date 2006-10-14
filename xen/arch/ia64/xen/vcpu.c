@@ -1314,12 +1314,21 @@ static inline int range_overlap (u64 b1, u64 e1, u64 b2, u64 e2)
 static inline void
 check_xen_space_overlap (const char *func, u64 base, u64 page_size)
 {
+	/* Overlaps can occur only in region 7.
+	   (This is an optimization to bypass all the checks).  */
+	if (REGION_NUMBER(base) != 7)
+		return;
+
 	/* Mask LSBs of base.  */
 	base &= ~(page_size - 1);
 
 	/* FIXME: ideally an MCA should be generated...  */
 	if (range_overlap (HYPERVISOR_VIRT_START, HYPERVISOR_VIRT_END,
-			   base, base + page_size))
+	                   base, base + page_size)
+	    || range_overlap(current->domain->arch.shared_info_va,
+	                     current->domain->arch.shared_info_va 
+	                     + XSI_SIZE + XMAPPEDREGS_SIZE,
+	                     base, base + page_size))
 		panic_domain (NULL, "%s on Xen virtual space (%lx)\n",
 			      func, base);
 }
@@ -2216,29 +2225,4 @@ IA64FAULT vcpu_ptr_i(VCPU *vcpu,UINT64 vadr,UINT64 log_range)
 	vcpu_flush_tlb_vhpt_range (vadr, log_range);
 
 	return IA64_NO_FAULT;
-}
-
-int ia64_map_hypercall_param(void)
-{
-	struct vcpu *v = current;
-	struct domain *d = current->domain;
-	u64 vaddr = v->arch.hypercall_param.va & PAGE_MASK;
-	volatile pte_t* pte;
-
-	if (v->arch.hypercall_param.va == 0)
-		return FALSE;
-	pte = lookup_noalloc_domain_pte(d, v->arch.hypercall_param.pa1);
-	if (!pte || !pte_present(*pte))
-		return FALSE;
-	vcpu_itc_no_srlz(v, 2, vaddr, pte_val(*pte), -1UL, PAGE_SHIFT);
-	if (v->arch.hypercall_param.pa2) {
-		vaddr += PAGE_SIZE;
-		pte = lookup_noalloc_domain_pte(d, v->arch.hypercall_param.pa2);
-		if (pte && pte_present(*pte)) {
-			vcpu_itc_no_srlz(v, 2, vaddr, pte_val(*pte),
-			                 -1UL, PAGE_SHIFT);
-		}
-	}
-	ia64_srlz_d();
-	return TRUE;
 }

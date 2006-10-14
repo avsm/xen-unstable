@@ -456,7 +456,15 @@ IA64FAULT vmx_vcpu_itr_d(VCPU *vcpu, u64 slot, u64 pte, u64 itir, u64 ifa)
     }
 #endif   
     pte &= ~PAGE_FLAGS_RV_MASK;
-    thash_purge_entries(vcpu, va, ps);
+
+    /* This is a bad workaround
+       In Linux, region 7 use 16M pagesize and is identity mapped.
+       VHPT page size is 16K in XEN.  If purge VHPT while guest insert 16M,
+       it will iteratively purge VHPT 1024 times, which makes XEN/IPF very
+       slow.  XEN doesn't purge VHPT
+    */   
+    if (ps != _PAGE_SIZE_16M)
+        thash_purge_entries(vcpu, va, ps);
     gpfn = (pte & _PAGE_PPN_MASK)>> PAGE_SHIFT;
     if (VMX_DOMAIN(vcpu) && __gpfn_is_io(vcpu->domain, gpfn))
         pte |= VTLB_PTE_IO;
@@ -637,37 +645,30 @@ IA64FAULT vmx_vcpu_tpa(VCPU *vcpu, UINT64 vadr, UINT64 *padr)
     visr.ei=pt_isr.ei;
     visr.ir=pt_isr.ir;
     vpsr.val = VCPU(vcpu, vpsr);
-    if(vpsr.ic==0){
-        visr.ni=1;
-    }
     visr.na=1;
     data = vtlb_lookup(vcpu, vadr, DSIDE_TLB);
     if(data){
         if(data->p==0){
-            visr.na=1;
             vcpu_set_isr(vcpu,visr.val);
-            page_not_present(vcpu, vadr);
+            data_page_not_present(vcpu, vadr);
             return IA64_FAULT;
         }else if(data->ma == VA_MATTR_NATPAGE){
-            visr.na = 1;
             vcpu_set_isr(vcpu, visr.val);
             dnat_page_consumption(vcpu, vadr);
             return IA64_FAULT;
         }else{
             *padr = ((data->ppn >> (data->ps - 12)) << data->ps) |
-                                                (vadr & (PSIZE(data->ps) - 1));
+                    (vadr & (PSIZE(data->ps) - 1));
             return IA64_NO_FAULT;
         }
     }
     data = vhpt_lookup(vadr);
     if(data){
         if(data->p==0){
-            visr.na=1;
             vcpu_set_isr(vcpu,visr.val);
-            page_not_present(vcpu, vadr);
+            data_page_not_present(vcpu, vadr);
             return IA64_FAULT;
         }else if(data->ma == VA_MATTR_NATPAGE){
-            visr.na = 1;
             vcpu_set_isr(vcpu, visr.val);
             dnat_page_consumption(vcpu, vadr);
             return IA64_FAULT;

@@ -87,6 +87,9 @@ struct arch_domain {
         unsigned long flags;
         struct {
             unsigned int is_vti : 1;
+#ifdef CONFIG_XEN_IA64_PERVCPU_VHPT
+            unsigned int has_pervcpu_vhpt : 1;
+#endif
         };
     };
 
@@ -142,11 +145,12 @@ struct arch_domain {
     (sizeof(vcpu_info_t) * (v)->vcpu_id + \
     offsetof(vcpu_info_t, evtchn_upcall_mask))
 
-struct hypercall_param {
-    unsigned long va;
-    unsigned long pa1;
-    unsigned long pa2;
-};
+#ifdef CONFIG_XEN_IA64_PERVCPU_VHPT
+#define HAS_PERVCPU_VHPT(d)     ((d)->arch.has_pervcpu_vhpt)
+#else
+#define HAS_PERVCPU_VHPT(d)     (0)
+#endif
+
 
 struct arch_vcpu {
     /* Save the state of vcpu.
@@ -192,14 +196,19 @@ struct arch_vcpu {
     char irq_new_condition;    // vpsr.i/vtpr change, check for pending VHPI
     char hypercall_continuation;
 
-    struct hypercall_param hypercall_param;  // used to remap a hypercall param
-
     //for phycial  emulation
     unsigned long old_rsc;
     int mode_flags;
     fpswa_ret_t fpswa_ret;	/* save return values of FPSWA emulation */
     struct timer hlt_timer;
     struct arch_vmx_struct arch_vmx; /* Virtual Machine Extensions */
+
+#ifdef CONFIG_XEN_IA64_PERVCPU_VHPT
+    PTA                 pta;
+    unsigned long       vhpt_maddr;
+    struct page_info*   vhpt_page;
+    unsigned long       vhpt_entries;
+#endif
 
 #define INVALID_PROCESSOR       INT_MAX
     int last_processor;

@@ -81,6 +81,7 @@ static UINT64 vec2off[68] = {0x0,0x400,0x800,0xc00,0x1000, 0x1400,0x1800,
 void vmx_reflect_interruption(UINT64 ifa,UINT64 isr,UINT64 iim,
      UINT64 vector,REGS *regs)
 {
+    UINT64 status;
     VCPU *vcpu = current;
     UINT64 vpsr = VCPU(vcpu, vpsr);
     vector=vec2off[vector];
@@ -89,13 +90,23 @@ void vmx_reflect_interruption(UINT64 ifa,UINT64 isr,UINT64 iim,
     }
     else{ // handle fpswa emulation
         // fp fault
-        if(vector == IA64_FP_FAULT_VECTOR && !handle_fpu_swa(1, regs, isr)){
-            vmx_vcpu_increment_iip(vcpu);
-            return;
+        if (vector == IA64_FP_FAULT_VECTOR) {
+            status = handle_fpu_swa(1, regs, isr);
+            if (!status) {
+                vmx_vcpu_increment_iip(vcpu);
+                return;
+            } else if (IA64_RETRY == status)
+                return;
         }
         //fp trap
-        else if(vector == IA64_FP_TRAP_VECTOR && !handle_fpu_swa(0, regs, isr)){
-            return; 
+        else if (vector == IA64_FP_TRAP_VECTOR) {
+            status = handle_fpu_swa(0, regs, isr);
+            if (!status)
+                return;
+            else if (IA64_RETRY == status) {
+                vmx_vcpu_decrement_iip(vcpu);
+                return;
+            }
         }
     }
     VCPU(vcpu,isr)=isr;
@@ -187,7 +198,7 @@ void leave_hypervisor_tail(struct pt_regs *regs)
 {
     struct domain *d = current->domain;
     struct vcpu *v = current;
-    int callback_irq;
+
     // FIXME: Will this work properly if doing an RFI???
     if (!is_idle_domain(d) ) {	// always comes from guest
 //        struct pt_regs *user_regs = vcpu_regs(current);
@@ -215,11 +226,14 @@ void leave_hypervisor_tail(struct pt_regs *regs)
 //           v->arch.irq_new_pending = 1;
 //       }
 
-        callback_irq = d->arch.hvm_domain.params[HVM_PARAM_CALLBACK_IRQ];
-        if (callback_irq != 0 && local_events_need_delivery()) {
-            /*inject para-device call back irq*/
-            v->vcpu_info->evtchn_upcall_mask = 1;
-            vmx_vcpu_pend_interrupt(v, callback_irq);
+        if (v->vcpu_id == 0) {
+            int callback_irq =
+                d->arch.hvm_domain.params[HVM_PARAM_CALLBACK_IRQ];
+            if (callback_irq != 0 && local_events_need_delivery()) {
+                /*inject para-device call back irq*/
+                v->vcpu_info->evtchn_upcall_mask = 1;
+                vmx_vcpu_pend_interrupt(v, callback_irq);
+            }
         }
 
         if ( v->arch.irq_new_pending ) {
@@ -252,18 +266,20 @@ IA64FAULT
 vmx_hpw_miss(u64 vadr , u64 vec, REGS* regs)
 {
     IA64_PSR vpsr;
-    int type=ISIDE_TLB;
+    int type;
     u64 vhpt_adr, gppa, pteval, rr, itir;
     ISR misr;
-//    REGS *regs;
     thash_data_t *data;
     VCPU *v = current;
-#ifdef  VTLB_DEBUG
-    check_vtlb_sanity(vtlb);
-    dump_vtlb(vtlb);
-#endif
     vpsr.val = VCPU(v, vpsr);
     misr.val=VMX(v,cr_isr);
+    
+    if (vec == 1)
+        type = ISIDE_TLB;
+    else if (vec == 2)
+        type = DSIDE_TLB;
+    else
+        panic_domain(regs, "wrong vec:%lx\n", vec);
 
     if(is_physical_mode(v)&&(!(vadr<<1>>62))){
         if(vec==2){
@@ -275,11 +291,6 @@ vmx_hpw_miss(u64 vadr , u64 vec, REGS* regs)
         physical_tlb_miss(v, vadr);
         return IA64_FAULT;
     }
-    if(vec == 1) type = ISIDE_TLB;
-    else if(vec == 2) type = DSIDE_TLB;
-    else panic_domain(regs,"wrong vec:%lx\n",vec);
-
-//    prepare_if_physical_mode(v);
 
     if((data=vtlb_lookup(v, vadr,type))!=0){
         if (v->domain != dom0 && type == DSIDE_TLB) {
@@ -298,46 +309,44 @@ vmx_hpw_miss(u64 vadr , u64 vec, REGS* regs)
         thash_vhpt_insert(v,data->page_flags, data->itir ,vadr);
 
     }else if(type == DSIDE_TLB){
+    
         if (misr.sp)
             return vmx_handle_lds(regs);
+
         if(!vhpt_enabled(v, vadr, misr.rs?RSE_REF:DATA_REF)){
             if(vpsr.ic){
                 vcpu_set_isr(v, misr.val);
                 alt_dtlb(v, vadr);
                 return IA64_FAULT;
             } else{
-                if(misr.sp){
-                    //TODO  lds emulation
-                    //panic("Don't support speculation load");
-                    return vmx_handle_lds(regs);
-                }else{
-                    nested_dtlb(v);
-                    return IA64_FAULT;
-                }
+                nested_dtlb(v);
+                return IA64_FAULT;
             }
         } else{
             vmx_vcpu_thash(v, vadr, &vhpt_adr);
             if(!guest_vhpt_lookup(vhpt_adr, &pteval)){
-                if ((pteval & _PAGE_P) &&
-                    ((pteval & _PAGE_MA_MASK) != _PAGE_MA_ST)) {
+                if (!(pteval & _PAGE_P)) {
+                    if (vpsr.ic) {
+                        vcpu_set_isr(v, misr.val);
+                        data_page_not_present(v, vadr);
+                        return IA64_FAULT;
+                    } else {
+                        nested_dtlb(v);
+                        return IA64_FAULT;
+                    }
+                }                     
+                else if ((pteval & _PAGE_MA_MASK) != _PAGE_MA_ST) {
                     vcpu_get_rr(v, vadr, &rr);
                     itir = rr&(RR_RID_MASK | RR_PS_MASK);
                     thash_purge_and_insert(v, pteval, itir, vadr, DSIDE_TLB);
                     return IA64_NO_FAULT;
-                }
-                if(vpsr.ic){
+                } else if (vpsr.ic) {
                     vcpu_set_isr(v, misr.val);
                     dtlb_fault(v, vadr);
                     return IA64_FAULT;
                 }else{
-                    if(misr.sp){
-                    //TODO  lds emulation
-                    //panic("Don't support speculation load");
-                    return vmx_handle_lds(regs);
-                    }else{
-                        nested_dtlb(v);
-                        return IA64_FAULT;
-                    }
+                    nested_dtlb(v);
+                    return IA64_FAULT;
                 }
             }else{
                 if(vpsr.ic){
@@ -345,22 +354,16 @@ vmx_hpw_miss(u64 vadr , u64 vec, REGS* regs)
                     dvhpt_fault(v, vadr);
                     return IA64_FAULT;
                 }else{
-                    if(misr.sp){
-                    //TODO  lds emulation
-                    //panic("Don't support speculation load");
-                    return vmx_handle_lds(regs);
-                    }else{
-                        nested_dtlb(v);
-                        return IA64_FAULT;
-                    }
+                    nested_dtlb(v);
+                    return IA64_FAULT;
                 }
             }
         }
     }else if(type == ISIDE_TLB){
+    
+        if (!vpsr.ic)
+            misr.ni = 1;
         if(!vhpt_enabled(v, vadr, misr.rs?RSE_REF:DATA_REF)){
-            if(!vpsr.ic){
-                misr.ni=1;
-            }
             vcpu_set_isr(v, misr.val);
             alt_itlb(v, vadr);
             return IA64_FAULT;
@@ -372,17 +375,12 @@ vmx_hpw_miss(u64 vadr , u64 vec, REGS* regs)
                     itir = rr&(RR_RID_MASK | RR_PS_MASK);
                     thash_purge_and_insert(v, pteval, itir, vadr, ISIDE_TLB);
                     return IA64_NO_FAULT;
+                } else {
+                    vcpu_set_isr(v, misr.val);
+                    inst_page_not_present(v, vadr);
+                    return IA64_FAULT;
                 }
-                if(!vpsr.ic){
-                    misr.ni=1;
-                }
-                vcpu_set_isr(v, misr.val);
-                itlb_fault(v, vadr);
-                return IA64_FAULT;
             }else{
-                if(!vpsr.ic){
-                    misr.ni=1;
-                }
                 vcpu_set_isr(v, misr.val);
                 ivhpt_fault(v, vadr);
                 return IA64_FAULT;
