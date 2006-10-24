@@ -172,13 +172,15 @@
 #include <asm/vhpt.h>
 #include <asm/vcpu.h>
 #include <asm/shadow.h>
+#include <asm/p2m_entry.h>
+#include <asm/tlb_track.h>
 #include <linux/efi.h>
 #include <xen/guest_access.h>
 #include <asm/page.h>
 #include <public/memory.h>
 
 static void domain_page_flush(struct domain* d, unsigned long mpaddr,
-                              unsigned long old_mfn, unsigned long new_mfn);
+                              volatile pte_t* ptep, pte_t old_pte);
 
 extern unsigned long ia64_iobase;
 
@@ -396,6 +398,13 @@ gmfn_to_mfn_foreign(struct domain *d, unsigned long gpfn)
 {
 	unsigned long pte;
 
+	// This function may be called from __gnttab_copy()
+	// during domain destruction with VNIF copy receiver.
+	// ** FIXME: This is not SMP-safe yet about p2m table. **
+	if (unlikely(d->arch.mm.pgd == NULL)) {
+		BUG();
+		return INVALID_MFN;
+	}
 	pte = lookup_domain_mpa(d,gpfn << PAGE_SHIFT, NULL);
 	if (!pte) {
 		panic("gmfn_to_mfn_foreign: bad gpfn. spinning...\n");
@@ -702,6 +711,22 @@ void *domain_mpa_to_imva(struct domain *d, unsigned long mpaddr)
 }
 #endif
 
+unsigned long
+xencomm_paddr_to_maddr(unsigned long paddr)
+{
+    struct vcpu *v = current;
+    struct domain *d = v->domain;
+    u64 pa;
+
+    pa = ____lookup_domain_mpa(d, paddr);
+    if (pa == INVALID_MFN) {
+        printk("%s: called with bad memory address: 0x%lx - iip=%lx\n",
+               __func__, paddr, vcpu_regs(v)->cr_iip);
+        return 0;
+    }
+    return __va_ul((pa & _PFN_MASK) | (paddr & ~PAGE_MASK));
+}
+
 /* Allocate a new page for domain and map it to the specified metaphysical
    address.  */
 static struct page_info *
@@ -776,15 +801,18 @@ flags_to_prot (unsigned long flags)
 
     res |= flags & ASSIGN_readonly ? _PAGE_AR_R: _PAGE_AR_RWX;
     res |= flags & ASSIGN_nocache ? _PAGE_MA_UC: _PAGE_MA_WB;
+#ifdef CONFIG_XEN_IA64_TLB_TRACK
+    res |= flags & ASSIGN_tlb_track ? _PAGE_TLB_TRACKING: 0;
+#endif
     
     return res;
 }
 
 /* map a physical address to the specified metaphysical addr */
-// flags: currently only ASSIGN_readonly, ASSIGN_nocache
+// flags: currently only ASSIGN_readonly, ASSIGN_nocache, ASSIGN_tlb_tack
 // This is called by assign_domain_mmio_page().
 // So accessing to pte is racy.
-void
+int
 __assign_domain_page(struct domain *d,
                      unsigned long mpaddr, unsigned long physaddr,
                      unsigned long flags)
@@ -800,8 +828,25 @@ __assign_domain_page(struct domain *d,
     old_pte = __pte(0);
     new_pte = pfn_pte(physaddr >> PAGE_SHIFT, __pgprot(prot));
     ret_pte = ptep_cmpxchg_rel(&d->arch.mm, mpaddr, pte, old_pte, new_pte);
-    if (pte_val(ret_pte) == pte_val(old_pte))
+    if (pte_val(ret_pte) == pte_val(old_pte)) {
         smp_mb();
+        return 0;
+    }
+
+    // dom0 tries to map real machine's I/O region, but failed.
+    // It is very likely that dom0 doesn't boot correctly because
+    // it can't access I/O. So complain here.
+    if ((flags & ASSIGN_nocache) &&
+        (pte_pfn(ret_pte) != (physaddr >> PAGE_SHIFT) ||
+         !(pte_val(ret_pte) & _PAGE_MA_UC)))
+        printk("%s:%d WARNING can't assign page domain 0x%p id %d\n"
+               "\talready assigned pte_val 0x%016lx\n"
+               "\tmpaddr 0x%016lx physaddr 0x%016lx flags 0x%lx\n",
+               __func__, __LINE__,
+               d, d->domain_id, pte_val(ret_pte),
+               mpaddr, physaddr, flags);
+
+    return -EAGAIN;
 }
 
 /* get_page() and map a physical address to the specified metaphysical addr */
@@ -818,7 +863,7 @@ assign_domain_page(struct domain *d,
     set_gpfn_from_mfn(physaddr >> PAGE_SHIFT, mpaddr >> PAGE_SHIFT);
     // because __assign_domain_page() uses set_pte_rel() which has
     // release semantics, smp_mb() isn't needed.
-    __assign_domain_page(d, mpaddr, physaddr, ASSIGN_writable);
+    (void)__assign_domain_page(d, mpaddr, physaddr, ASSIGN_writable);
 }
 
 int
@@ -841,8 +886,8 @@ ioports_permit_access(struct domain *d, unsigned long fp, unsigned long lp)
     lp_offset = PAGE_ALIGN(IO_SPACE_SPARSE_ENCODING(lp));
 
     for (off = fp_offset; off <= lp_offset; off += PAGE_SIZE)
-        __assign_domain_page(d, IO_PORTS_PADDR + off,
-                             __pa(ia64_iobase) + off, ASSIGN_nocache);
+        (void)__assign_domain_page(d, IO_PORTS_PADDR + off,
+                                   __pa(ia64_iobase) + off, ASSIGN_nocache);
 
     return 0;
 }
@@ -911,7 +956,7 @@ assign_domain_same_page(struct domain *d,
     //XXX optimization
     unsigned long end = PAGE_ALIGN(mpaddr + size);
     for (mpaddr &= PAGE_MASK; mpaddr < end; mpaddr += PAGE_SIZE) {
-        __assign_domain_page(d, mpaddr, mpaddr, flags);
+        (void)__assign_domain_page(d, mpaddr, mpaddr, flags);
     }
 }
 
@@ -995,7 +1040,7 @@ assign_domain_mach_page(struct domain *d,
 // caller must call set_gpfn_from_mfn() before call if necessary.
 // because set_gpfn_from_mfn() result must be visible before pte xchg
 // caller must use memory barrier. NOTE: xchg has acquire semantics.
-// flags: currently only ASSIGN_readonly
+// flags: ASSIGN_xxx
 static void
 assign_domain_page_replace(struct domain *d, unsigned long mpaddr,
                            unsigned long mfn, unsigned long flags)
@@ -1029,12 +1074,13 @@ assign_domain_page_replace(struct domain *d, unsigned long mpaddr,
                 set_gpfn_from_mfn(old_mfn, INVALID_M2P_ENTRY);
             }
 
-            domain_page_flush(d, mpaddr, old_mfn, mfn);
+            domain_page_flush(d, mpaddr, pte, old_pte);
 
             try_to_clear_PGC_allocate(d, old_page);
             put_page(old_page);
         }
     }
+    perfc_incrc(assign_domain_page_replace);
 }
 
 // caller must get_page(new_page) before
@@ -1048,7 +1094,7 @@ assign_domain_page_cmpxchg_rel(struct domain* d, unsigned long mpaddr,
     struct mm_struct *mm = &d->arch.mm;
     volatile pte_t* pte;
     unsigned long old_mfn;
-    unsigned long old_arflags;
+    unsigned long old_prot;
     pte_t old_pte;
     unsigned long new_mfn;
     unsigned long new_prot;
@@ -1058,12 +1104,12 @@ assign_domain_page_cmpxchg_rel(struct domain* d, unsigned long mpaddr,
     pte = lookup_alloc_domain_pte(d, mpaddr);
 
  again:
-    old_arflags = pte_val(*pte) & ~_PAGE_PPN_MASK;
+    old_prot = pte_val(*pte) & ~_PAGE_PPN_MASK;
     old_mfn = page_to_mfn(old_page);
-    old_pte = pfn_pte(old_mfn, __pgprot(old_arflags));
+    old_pte = pfn_pte(old_mfn, __pgprot(old_prot));
     if (!pte_present(old_pte)) {
-        DPRINTK("%s: old_pte 0x%lx old_arflags 0x%lx old_mfn 0x%lx\n",
-                __func__, pte_val(old_pte), old_arflags, old_mfn);
+        DPRINTK("%s: old_pte 0x%lx old_prot 0x%lx old_mfn 0x%lx\n",
+                __func__, pte_val(old_pte), old_prot, old_mfn);
         return -EINVAL;
     }
 
@@ -1078,10 +1124,10 @@ assign_domain_page_cmpxchg_rel(struct domain* d, unsigned long mpaddr,
             goto again;
         }
 
-        DPRINTK("%s: old_pte 0x%lx old_arflags 0x%lx old_mfn 0x%lx "
+        DPRINTK("%s: old_pte 0x%lx old_prot 0x%lx old_mfn 0x%lx "
                 "ret_pte 0x%lx ret_mfn 0x%lx\n",
                 __func__,
-                pte_val(old_pte), old_arflags, old_mfn,
+                pte_val(old_pte), old_prot, old_mfn,
                 pte_val(ret_pte), pte_pfn(ret_pte));
         return -EINVAL;
     }
@@ -1093,8 +1139,9 @@ assign_domain_page_cmpxchg_rel(struct domain* d, unsigned long mpaddr,
 
     set_gpfn_from_mfn(old_mfn, INVALID_M2P_ENTRY);
 
-    domain_page_flush(d, mpaddr, old_mfn, new_mfn);
+    domain_page_flush(d, mpaddr, pte, old_pte);
     put_page(old_page);
+    perfc_incrc(assign_domain_pge_cmpxchg_rel);
     return 0;
 }
 
@@ -1161,12 +1208,13 @@ zap_domain_page_one(struct domain *d, unsigned long mpaddr, unsigned long mfn)
         set_gpfn_from_mfn(mfn, INVALID_M2P_ENTRY);
     }
 
-    domain_page_flush(d, mpaddr, mfn, INVALID_MFN);
+    domain_page_flush(d, mpaddr, pte, old_pte);
 
     if (page_get_owner(page) != NULL) {
         try_to_clear_PGC_allocate(d, page);
     }
     put_page(page);
+    perfc_incrc(zap_dcomain_page_one);
 }
 
 unsigned long
@@ -1179,6 +1227,7 @@ dom0vp_zap_physmap(struct domain *d, unsigned long gpfn,
     }
 
     zap_domain_page_one(d, gpfn << PAGE_SHIFT, INVALID_MFN);
+    perfc_incrc(dom0vp_zap_physmap);
     return 0;
 }
 
@@ -1224,10 +1273,131 @@ dom0vp_add_physmap(struct domain* d, unsigned long gpfn, unsigned long mfn,
            get_gpfn_from_mfn(mfn) != INVALID_M2P_ENTRY);
     assign_domain_page_replace(d, gpfn << PAGE_SHIFT, mfn, flags);
     //don't update p2m table because this page belongs to rd, not d.
+    perfc_incrc(dom0vp_add_physmap);
 out1:
     put_domain(rd);
     return error;
 }
+
+#ifdef CONFIG_XEN_IA64_EXPOSE_P2M
+static struct page_info* p2m_pte_zero_page = NULL;
+
+void
+expose_p2m_init(void)
+{
+    pte_t* pte;
+
+    pte = pte_alloc_one_kernel(NULL, 0);
+    BUG_ON(pte == NULL);
+    smp_mb();// make contents of the page visible.
+    p2m_pte_zero_page = virt_to_page(pte);
+}
+
+static int
+expose_p2m_page(struct domain* d, unsigned long mpaddr, struct page_info* page)
+{
+    // we can't get_page(page) here.
+    // pte page is allocated form xen heap.(see pte_alloc_one_kernel().)
+    // so that the page has NULL page owner and it's reference count
+    // is useless.
+    // see also relinquish_pte()'s page_get_owner() == NULL check.
+    BUG_ON(page_get_owner(page) != NULL);
+
+    return __assign_domain_page(d, mpaddr, page_to_maddr(page),
+                                ASSIGN_readonly);
+}
+
+// It is possible to optimize loop, But this isn't performance critical.
+unsigned long
+dom0vp_expose_p2m(struct domain* d,
+                  unsigned long conv_start_gpfn,
+                  unsigned long assign_start_gpfn,
+                  unsigned long expose_size, unsigned long granule_pfn)
+{
+    unsigned long expose_num_pfn = expose_size >> PAGE_SHIFT;
+    unsigned long i;
+    volatile pte_t* conv_pte;
+    volatile pte_t* assign_pte;
+
+    if ((expose_size % PAGE_SIZE) != 0 ||
+        (granule_pfn % PTRS_PER_PTE) != 0 ||
+        (expose_num_pfn % PTRS_PER_PTE) != 0 ||
+        (conv_start_gpfn % granule_pfn) != 0 ||
+        (assign_start_gpfn % granule_pfn) != 0 ||
+        (expose_num_pfn % granule_pfn) != 0) {
+        DPRINTK("%s conv_start_gpfn 0x%016lx assign_start_gpfn 0x%016lx "
+                "expose_size 0x%016lx granulte_pfn 0x%016lx\n", __func__, 
+                conv_start_gpfn, assign_start_gpfn, expose_size, granule_pfn);
+        return -EINVAL;
+    }
+
+    if (granule_pfn != PTRS_PER_PTE) {
+        DPRINTK("%s granule_pfn 0x%016lx PTRS_PER_PTE 0x%016lx\n",
+                __func__, granule_pfn, PTRS_PER_PTE);
+        return -ENOSYS;
+    }
+
+    // allocate pgd, pmd.
+    i = conv_start_gpfn;
+    while (i < expose_num_pfn) {
+        conv_pte = lookup_noalloc_domain_pte(d, (conv_start_gpfn + i) <<
+                                             PAGE_SHIFT);
+        if (conv_pte == NULL) {
+            i++;
+            continue;
+        }
+        
+        assign_pte = lookup_alloc_domain_pte(d, (assign_start_gpfn <<
+                                             PAGE_SHIFT) + i * sizeof(pte_t));
+        if (assign_pte == NULL) {
+            DPRINTK("%s failed to allocate pte page\n", __func__);
+            return -ENOMEM;
+        }
+
+        // skip to next pte page
+        i += PTRS_PER_PTE;
+        i &= ~(PTRS_PER_PTE - 1);
+    }
+
+    // expose pte page
+    i = 0;
+    while (i < expose_num_pfn) {
+        conv_pte = lookup_noalloc_domain_pte(d, (conv_start_gpfn + i) <<
+                                             PAGE_SHIFT);
+        if (conv_pte == NULL) {
+            i++;
+            continue;
+        }
+
+        if (expose_p2m_page(d, (assign_start_gpfn << PAGE_SHIFT) +
+                            i * sizeof(pte_t), virt_to_page(conv_pte)) < 0) {
+            DPRINTK("%s failed to assign page\n", __func__);
+            return -EAGAIN;
+        }
+
+        // skip to next pte page
+        i += PTRS_PER_PTE;
+        i &= ~(PTRS_PER_PTE - 1);
+    }
+
+    // expose p2m_pte_zero_page 
+    for (i = 0; i < expose_num_pfn / PTRS_PER_PTE + 1; i++) {
+        assign_pte = lookup_noalloc_domain_pte(d, (assign_start_gpfn + i) <<
+                                               PAGE_SHIFT);
+        BUG_ON(assign_pte == NULL);
+        if (pte_present(*assign_pte)) {
+            continue;
+        }
+        if (expose_p2m_page(d, (assign_start_gpfn + i) << PAGE_SHIFT,
+                            p2m_pte_zero_page) < 0) {
+            DPRINTK("%s failed to assign zero-pte page\n", __func__);
+            return -EAGAIN;
+        }
+    }
+    
+    return 0;
+}
+#endif
 
 // grant table host mapping
 // mpaddr: host_addr: pseudo physical address
@@ -1253,8 +1423,13 @@ create_grant_host_mapping(unsigned long gpaddr,
     BUG_ON(ret == 0);
     BUG_ON(page_get_owner(mfn_to_page(mfn)) == d &&
            get_gpfn_from_mfn(mfn) != INVALID_M2P_ENTRY);
-    assign_domain_page_replace(d, gpaddr, mfn, (flags & GNTMAP_readonly)?
-                                              ASSIGN_readonly: ASSIGN_writable);
+    assign_domain_page_replace(d, gpaddr, mfn,
+#ifdef CONFIG_XEN_IA64_TLB_TRACK
+                               ASSIGN_tlb_track |
+#endif
+                               ((flags & GNTMAP_readonly) ?
+                                ASSIGN_readonly : ASSIGN_writable));
+    perfc_incrc(create_grant_host_mapping);
     return GNTST_okay;
 }
 
@@ -1308,12 +1483,13 @@ destroy_grant_host_mapping(unsigned long gpaddr,
     }
     BUG_ON(pte_pfn(old_pte) != mfn);
 
-    domain_page_flush(d, gpaddr, mfn, INVALID_MFN);
+    domain_page_flush(d, gpaddr, pte, old_pte);
 
     page = mfn_to_page(mfn);
     BUG_ON(page_get_owner(page) == d);//try_to_clear_PGC_allocate(d, page) is not needed.
     put_page(page);
 
+    perfc_incrc(destroy_grant_host_mapping);
     return GNTST_okay;
 }
 
@@ -1374,6 +1550,7 @@ steal_page(struct domain *d, struct page_info *page, unsigned int memflags)
             free_domheap_page(new);
             return -1;
         }
+        perfc_incrc(steal_page_refcount);
     }
 
     spin_lock(&d->page_alloc_lock);
@@ -1443,6 +1620,7 @@ steal_page(struct domain *d, struct page_info *page, unsigned int memflags)
     list_del(&page->list);
 
     spin_unlock(&d->page_alloc_lock);
+    perfc_incrc(steal_page);
     return 0;
 }
 
@@ -1460,6 +1638,8 @@ guest_physmap_add_page(struct domain *d, unsigned long gpfn,
     assign_domain_page_replace(d, gpfn << PAGE_SHIFT, mfn, ASSIGN_writable);
 
     //BUG_ON(mfn != ((lookup_domain_mpa(d, gpfn << PAGE_SHIFT) & _PFN_MASK) >> PAGE_SHIFT));
+
+    perfc_incrc(guest_physmap_add_page);
 }
 
 void
@@ -1468,18 +1648,51 @@ guest_physmap_remove_page(struct domain *d, unsigned long gpfn,
 {
     BUG_ON(mfn == 0);//XXX
     zap_domain_page_one(d, gpfn << PAGE_SHIFT, mfn);
+    perfc_incrc(guest_physmap_remove_page);
 }
 
 //XXX sledgehammer.
 //    flush finer range.
 static void
 domain_page_flush(struct domain* d, unsigned long mpaddr,
-                  unsigned long old_mfn, unsigned long new_mfn)
+                  volatile pte_t* ptep, pte_t old_pte)
 {
+#ifdef CONFIG_XEN_IA64_TLB_TRACK
+    struct tlb_track_entry* entry;
+#endif
+
     if (shadow_mode_enabled(d))
         shadow_mark_page_dirty(d, mpaddr >> PAGE_SHIFT);
 
+#ifndef CONFIG_XEN_IA64_TLB_TRACK
     domain_flush_vtlb_all();
+#else
+    switch (tlb_track_search_and_remove(d->arch.tlb_track,
+                                        ptep, old_pte, &entry)) {
+    case TLB_TRACK_NOT_TRACKED:
+        // DPRINTK("%s TLB_TRACK_NOT_TRACKED\n", __func__);
+        domain_flush_vtlb_all();
+        break;
+    case TLB_TRACK_NOT_FOUND:
+        /* do nothing */
+        // DPRINTK("%s TLB_TRACK_NOT_FOUND\n", __func__);
+        break;
+    case TLB_TRACK_FOUND:
+        // DPRINTK("%s TLB_TRACK_FOUND\n", __func__);
+        domain_flush_vtlb_track_entry(d, entry);
+        tlb_track_free_entry(d->arch.tlb_track, entry);
+        break;
+    case TLB_TRACK_MANY:
+        DPRINTK("%s TLB_TRACK_MANY\n", __func__);
+        domain_flush_vtlb_all();
+        break;
+    case TLB_TRACK_AGAIN:
+        DPRINTK("%s TLB_TRACK_AGAIN\n", __func__);
+        BUG();
+        break;
+    }
+#endif
+    perfc_incrc(domain_page_flush);
 }
 
 int
