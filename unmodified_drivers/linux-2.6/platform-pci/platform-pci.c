@@ -36,6 +36,9 @@
 #include <asm/pgtable.h>
 #include <xen/interface/memory.h>
 #include <xen/features.h>
+#ifdef __ia64__
+#include <asm/xen/xencomm.h>
+#endif
 
 #include "platform-pci.h"
 
@@ -63,6 +66,10 @@ static int __init init_xen_info(void)
 	unsigned long shared_info_frame;
 	struct xen_add_to_physmap xatp;
 	extern void *shared_info_area;
+
+#ifdef __ia64__
+	xencomm_init();
+#endif
 
 	setup_xen_features();
 
