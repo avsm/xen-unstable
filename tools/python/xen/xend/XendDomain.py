@@ -57,10 +57,10 @@ DOM0_ID   = 0
 class XendDomain:
     """Index of all domains. Singleton.
 
-    @ivar domains: map of domains indexed by UUID Strings
+    @ivar domains: map of domains indexed by domid
     @type domains: dict of XendDomainInfo
-    @ivar managed_domains: uuid of domains that are managed by Xend
-    @type managed_domains: list of (uuids, dom_name)
+    @ivar managed_domains: domains that are not running and managed by Xend
+    @type managed_domains: dict of XendDomainInfo indexed by uuid
     @ivar domains_lock: lock that must be held when manipulating self.domains
     @type domains_lock: threaading.RLock
     @ivar _allow_new_domains: Flag to set that allows creating of new domains.
@@ -167,10 +167,11 @@ class XendDomain:
 
             # add all managed domains as dormant domains.
             for dom in managed:
-                dom_uuid = dom.get('uuid', uuid.createString())
-                dom['uuid'] = dom_uuid
-                dom_name = dom.get('name', 'Domain-%s' % dom_uuid)
+                dom_uuid = dom.get('uuid')
+                if not dom_uuid:
+                    continue
                 
+                dom_name = dom.get('name', 'Domain-%s' % dom_uuid)
                 try:
                     running_dom = self.domain_lookup_nr(dom_name)
                     if not running_dom:
@@ -304,6 +305,11 @@ class XendDomain:
             try:
                 cfg_file = self._managed_config_path(dom_uuid)
                 cfg = XendConfig(filename = cfg_file)
+                if cfg.get('uuid') != dom_uuid:
+                    # something is wrong with the SXP
+                    log.error("UUID mismatch in stored configuration: %s" %
+                              cfg_file)
+                    continue
                 doms.append(cfg)
             except Exception:
                 log.exception('Unable to open or parse config.sxp: %s' % \
@@ -387,7 +393,7 @@ class XendDomain:
 
 
     def _add_domain(self, info):
-        """Add the given domain entry to this instance's internal cache.
+        """Add a domain to the list of running domains
         
         @requires: Expects to be protected by the domains_lock.
         @param info: XendDomainInfo of a domain to be added.
@@ -397,7 +403,7 @@ class XendDomain:
         self.domains[info.getDomid()] = info
 
     def _remove_domain(self, info, domid = None):
-        """Remove the given domain from this instance's internal cache.
+        """Remove the domain from the list of running domains
         
         @requires: Expects to be protected by the domains_lock.
         @param info: XendDomainInfo of a domain to be removed.
@@ -484,12 +490,27 @@ class XendDomain:
             if match:
                 return match[0]
 
+            match = [dom for dom in self.managed_domains.values() \
+                     if dom.getName() == domid]
+            if match:
+                return match[0]
+
             # lookup by id
             try:
                 if int(domid) in self.domains:
                     return self.domains[int(domid)]
             except ValueError:
                 pass
+
+            # lookup by uuid for running domains
+            match = [dom for dom in self.domains.values() \
+                     if dom.get_uuid() == domid]
+            if match:
+                return match[0]
+
+            # lookup by uuid for inactive managed domains 
+            if domid in self.managed_domains:
+                return self.managed_domains[domid]
 
             return None
         finally:
@@ -834,7 +855,7 @@ class XendDomain:
                 raise XendError("Domain is already running")
             
             dominfo.start(is_managed = True)
-
+            self._add_domain(dominfo)
         finally:
             self.domains_lock.release()
         
