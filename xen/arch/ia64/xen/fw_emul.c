@@ -32,6 +32,8 @@
 #include <xen/console.h>
 #include <xen/hypercall.h>
 
+static DEFINE_SPINLOCK(efi_time_services_lock);
+
 extern unsigned long running_on_sim;
 
 struct sal_ret_values
@@ -218,7 +220,19 @@ xen_pal_emulator(unsigned long index, u64 in1, u64 in2, u64 in3)
 		status = ia64_pal_cache_summary(&r9,&r10);
 		break;
 	    case PAL_VM_SUMMARY:
-	        {
+		if (VMX_DOMAIN(current)) {
+			pal_vm_info_1_u_t v1;
+			pal_vm_info_2_u_t v2;
+			status = ia64_pal_vm_summary((pal_vm_info_1_u_t *)&v1,
+			                             (pal_vm_info_2_u_t *)&v2);
+			v1.pal_vm_info_1_s.max_itr_entry = NITRS - 1;
+			v1.pal_vm_info_1_s.max_dtr_entry = NDTRS - 1;
+			v2.pal_vm_info_2_s.impl_va_msb -= 1;
+			v2.pal_vm_info_2_s.rid_size =
+				current->domain->arch.rid_bits;
+			r9 = v1.pvi1_val;
+			r10 = v2.pvi2_val;
+		} else {
 			/* Use xen-specific values.
 			   hash_tag_id is somewhat random! */
 			static const pal_vm_info_1_u_t v1 =
@@ -242,14 +256,18 @@ xen_pal_emulator(unsigned long index, u64 in1, u64 in2, u64 in3)
 			v2.pvi2_val = 0;
 			v2.pal_vm_info_2_s.rid_size =
 				current->domain->arch.rid_bits;
-			v2.pal_vm_info_2_s.impl_va_msb =
-				VMX_DOMAIN(current) ? GUEST_IMPL_VA_MSB : 50;
+			v2.pal_vm_info_2_s.impl_va_msb = 50;
 			r9 = v1.pvi1_val;
 			r10 = v2.pvi2_val;
 			status = PAL_STATUS_SUCCESS;
 		}
 		break;
 	    case PAL_VM_INFO:
+		if (VMX_DOMAIN(current)) {
+			status = ia64_pal_vm_info(in1, in2, 
+			                          (pal_tc_info_u_t *)&r9, &r10);
+			break;
+		}
 #ifdef VHPT_GLOBAL
 		if (in1 == 0 && in2 == 2) {
 			/* Level 1: VHPT  */
@@ -429,7 +447,6 @@ efi_emulate_get_time(
 	struct page_info *tc_page = NULL;
 	efi_status_t status = 0;
 
-	//printk("efi_get_time(%016lx,%016lx) called\n", tv_addr, tc_addr);
 	tv = efi_translate_domain_addr(tv_addr, fault, &tv_page);
 	if (*fault != IA64_NO_FAULT)
 		goto errout;
@@ -439,9 +456,9 @@ efi_emulate_get_time(
 			goto errout;
 	}
 
-	//printk("efi_get_time(%016lx,%016lx) translated to xen virtual address\n", tv, tc);
+	spin_lock(&efi_time_services_lock);
 	status = (*efi.get_time)((efi_time_t *) tv, (efi_time_cap_t *) tc);
-	//printk("efi_get_time returns %lx\n", status);
+	spin_unlock(&efi_time_services_lock);
 
 errout:
 	if (tc_page != NULL)
@@ -467,7 +484,9 @@ efi_emulate_set_time(
 	if (*fault != IA64_NO_FAULT)
 		goto errout;
 
+	spin_lock(&efi_time_services_lock);
 	status = (*efi.set_time)((efi_time_t *)tv);
+	spin_unlock(&efi_time_services_lock);
 
 errout:
 	if (tv_page != NULL)
@@ -502,9 +521,11 @@ efi_emulate_get_wakeup_time(
 	if (*fault != IA64_NO_FAULT)
 		goto errout;
 
+	spin_lock(&efi_time_services_lock);
 	status = (*efi.get_wakeup_time)((efi_bool_t *)enabled,
 	                                (efi_bool_t *)pending,
 	                                (efi_time_t *)tv);
+	spin_unlock(&efi_time_services_lock);
 
 errout:
 	if (e_page != NULL)
@@ -535,8 +556,10 @@ efi_emulate_set_wakeup_time(
 			goto errout;
 	}
 
+	spin_lock(&efi_time_services_lock);
 	status = (*efi.set_wakeup_time)((efi_bool_t)enabled,
 	                                (efi_time_t *)tv);
+	spin_unlock(&efi_time_services_lock);
 
 errout:
 	if (tv_page != NULL)
