@@ -168,6 +168,8 @@ extern int smp_num_siblings;
 
 #ifndef __ASSEMBLY__
 #include "asm/types.h"	// for u64
+#include "linux/linkage.h"	// for asmlinkage which is used by
+                                // xen/include/acpi/acpixf.h
 #endif
 
 // warning: unless search_extable is declared, the return value gets
@@ -277,5 +279,10 @@ struct screen_info { };
 
 /* Define CONFIG_PRIVIFY to support privified OS (deprecated).  */
 #undef CONFIG_PRIVIFY
+
+/* Necessary for hvm_vioapic.c */
+#define vcpu_vlapic(vcpu)   (&(vcpu)->arch.arch_vmx.vlapic)
+#define vlapic_vcpu(vpic)   (container_of((vpic), struct vcpu, \
+                                          arch.arch_vmx.vlapic))
 
 #endif	/* _IA64_CONFIG_H_ */

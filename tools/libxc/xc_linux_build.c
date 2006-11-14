@@ -496,18 +496,30 @@ static int setup_guest(int xc_handle,
     if ( rc != 0 )
         goto error_out;
 
-    dsi.v_start = round_pgdown(dsi.v_start);
-    (load_funcs.loadimage)(image, image_size, xc_handle, dom, page_array,
-                           &dsi);
-
-    vinitrd_start = round_pgup(dsi.v_end);
-    if ( load_initrd(xc_handle, dom, initrd,
-                     vinitrd_start - dsi.v_start, page_array) )
+    if ( (page_array = malloc(nr_pages * sizeof(xen_pfn_t))) == NULL )
+    {
+        PERROR("Could not allocate memory");
         goto error_out;
+    }
+    for ( i = 0; i < nr_pages; i++ )
+        page_array[i] = i;
+    if ( xc_domain_memory_populate_physmap(xc_handle, dom, nr_pages,
+                                           0, 0, page_array) )
+    {
+        PERROR("Could not allocate memory for PV guest.\n");
+        goto error_out;
+    }
+    if ( xc_domain_translate_gpfn_list(xc_handle, dom, nr_pages,
+                                       page_array, page_array) )
+    {
+        PERROR("Could not translate addresses of PV guest.\n");
+        goto error_out;
+    }
 
-    vinitrd_end    = vinitrd_start + initrd->len;
-    v_end          = round_pgup(vinitrd_end);
+    dsi.v_start    = round_pgdown(dsi.v_start);
+    vinitrd_start  = round_pgup(dsi.v_end);
     start_info_mpa = (nr_pages - 3) << PAGE_SHIFT;
+    *pvke          = dsi.v_kernentry;
 
     /* Build firmware.  */
     memset(&domctl.u.arch_setup, 0, sizeof(domctl.u.arch_setup));
@@ -520,18 +532,19 @@ static int setup_guest(int xc_handle,
         goto error_out;
 
     start_page = dsi.v_start >> PAGE_SHIFT;
-    pgnr = (v_end - dsi.v_start) >> PAGE_SHIFT;
-    if ( (page_array = malloc(pgnr * sizeof(xen_pfn_t))) == NULL )
-    {
-        PERROR("Could not allocate memory");
+    /* in order to get initrd->len, we need to load initrd image at first */
+    if ( load_initrd(xc_handle, dom, initrd,
+                     vinitrd_start - dsi.v_start, page_array + start_page) )
         goto error_out;
-    }
 
-    if ( xc_ia64_get_pfn_list(xc_handle, dom, page_array,
-                              start_page, pgnr) != pgnr )
+    vinitrd_end    = vinitrd_start + initrd->len;
+    v_end          = round_pgup(vinitrd_end);
+    pgnr = (v_end - dsi.v_start) >> PAGE_SHIFT;
+    if ( pgnr > nr_pages )
     {
-        PERROR("Could not get the page frame list");
-        goto error_out;
+        PERROR("too small memory is specified. "
+               "At least %ld kb is necessary.\n",
+               pgnr << (PAGE_SHIFT - 10));
     }
 
     IPRINTF("VIRTUAL MEMORY ARRANGEMENT:\n"
@@ -543,30 +556,21 @@ static int setup_guest(int xc_handle,
            _p(dsi.v_start),     _p(v_end));
     IPRINTF(" ENTRY ADDRESS: %p\n", _p(dsi.v_kernentry));
 
-    *pvke = dsi.v_kernentry;
+    (load_funcs.loadimage)(image, image_size, xc_handle, dom,
+                           page_array + start_page, &dsi);
 
-    /* Now need to retrieve machine pfn for system pages:
-     *  start_info/store/console
-     */
-    pgnr = 3;
-    if ( xc_ia64_get_pfn_list(xc_handle, dom, page_array,
-                              nr_pages - 3, pgnr) != pgnr )
-    {
-        PERROR("Could not get page frame for xenstore");
-        goto error_out;
-    }
-
-    *store_mfn = page_array[1];
-    *console_mfn = page_array[2];
+    *store_mfn = page_array[nr_pages - 2];
+    *console_mfn = page_array[nr_pages - 1];
     IPRINTF("start_info: 0x%lx at 0x%lx, "
            "store_mfn: 0x%lx at 0x%lx, "
            "console_mfn: 0x%lx at 0x%lx\n",
-           page_array[0], nr_pages - 3,
+           page_array[nr_pages - 3], nr_pages - 3,
            *store_mfn,    nr_pages - 2,
            *console_mfn,  nr_pages - 1);
 
     start_info = xc_map_foreign_range(
-        xc_handle, dom, PAGE_SIZE, PROT_READ|PROT_WRITE, page_array[0]);
+        xc_handle, dom, PAGE_SIZE, PROT_READ|PROT_WRITE,
+        page_array[nr_pages - 3]);
     memset(start_info, 0, sizeof(*start_info));
     rc = xc_version(xc_handle, XENVER_version, NULL);
     sprintf(start_info->magic, "xen-%i.%i-ia64", rc >> 16, rc & (0xFFFF));

@@ -100,7 +100,6 @@ int mm_switch_table[8][8] = {
 void
 physical_mode_init(VCPU *vcpu)
 {
-    vcpu->arch.old_rsc = 0;
     vcpu->arch.mode_flags = GUEST_IN_PHY;
 }
 
@@ -113,10 +112,7 @@ physical_tlb_miss(VCPU *vcpu, u64 vadr, int type)
     ia64_rr rr;
     rr.rrval = ia64_get_rr(vadr);
     pte =  vadr& _PAGE_PPN_MASK;
-    if (vadr >> 63)
-        pte = pte | PHY_PAGE_UC;
-    else
-        pte = pte | PHY_PAGE_WB;
+    pte = pte | PHY_PAGE_WB;
     thash_vhpt_insert(vcpu, pte, (rr.ps << 2), vadr, type);
     return;
 }
@@ -241,20 +237,17 @@ void
 switch_mm_mode(VCPU *vcpu, IA64_PSR old_psr, IA64_PSR new_psr)
 {
     int act;
-    REGS * regs=vcpu_regs(vcpu);
     act = mm_switch_action(old_psr, new_psr);
     perfc_incra(vmx_switch_mm_mode, act);
     switch (act) {
     case SW_V2P:
 //        printk("V -> P mode transition: (0x%lx -> 0x%lx)\n",
 //               old_psr.val, new_psr.val);
-        vcpu->arch.old_rsc = regs->ar_rsc;
         switch_to_physical_rid(vcpu);
         /*
          * Set rse to enforced lazy, to prevent active rse save/restor when
          * guest physical mode.
          */
-        regs->ar_rsc &= ~(IA64_RSC_MODE);
         vcpu->arch.mode_flags |= GUEST_IN_PHY;
         break;
     case SW_P2V:
@@ -265,7 +258,6 @@ switch_mm_mode(VCPU *vcpu, IA64_PSR old_psr, IA64_PSR new_psr)
          * recover old mode which is saved when entering
          * guest physical mode
          */
-        regs->ar_rsc = vcpu->arch.old_rsc;
         vcpu->arch.mode_flags &= ~GUEST_IN_PHY;
         break;
     case SW_SELF:
@@ -347,10 +339,9 @@ prepare_if_physical_mode(VCPU *vcpu)
 void
 recover_if_physical_mode(VCPU *vcpu)
 {
-    if (is_physical_mode(vcpu)) {
-	vcpu->arch.mode_flags &= ~GUEST_PHY_EMUL;
+    if (is_physical_mode(vcpu))
         switch_to_physical_rid(vcpu);
-    }
+    vcpu->arch.mode_flags &= ~GUEST_PHY_EMUL;
     return;
 }
 
