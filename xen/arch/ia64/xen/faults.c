@@ -83,12 +83,11 @@ void reflect_interruption(unsigned long isr, struct pt_regs *regs,
 		check_bad_nested_interruption(isr, regs, vector);
 	PSCB(v, unat) = regs->ar_unat;	// not sure if this is really needed?
 	PSCB(v, precover_ifs) = regs->cr_ifs;
-	vcpu_bsw0(v);
 	PSCB(v, ipsr) = vcpu_get_ipsr_int_state(v, regs->cr_ipsr);
+	vcpu_bsw0(v);
 	PSCB(v, isr) = isr;
 	PSCB(v, iip) = regs->cr_iip;
 	PSCB(v, ifs) = 0;
-	PSCB(v, incomplete_regframe) = 0;
 
 	regs->cr_iip = ((unsigned long)PSCBX(v, iva) + vector) & ~0xffUL;
 	regs->cr_ipsr = (regs->cr_ipsr & ~DELIVER_PSR_CLR) | DELIVER_PSR_SET;
@@ -120,19 +119,29 @@ void reflect_extint(struct pt_regs *regs)
 	reflect_interruption(isr, regs, IA64_EXTINT_VECTOR);
 }
 
-void reflect_event(struct pt_regs *regs)
+void reflect_event(void)
 {
-	unsigned long isr = regs->cr_ipsr & IA64_PSR_RI;
 	struct vcpu *v = current;
+	struct pt_regs *regs;
+	unsigned long isr;
+
+	if (!event_pending(v))
+		return;
 
 	/* Sanity check */
-	if (is_idle_vcpu(v) || !user_mode(regs)) {
+	if (is_idle_vcpu(v)) {
 		//printk("WARN: invocation to reflect_event in nested xen\n");
 		return;
 	}
 
-	if (!event_pending(v))
+	regs = vcpu_regs(v);
+
+	// can't inject event, when XEN is emulating rfi 
+	// and both PSCB(v, ifs) and regs->ifs are valid
+	if (regs->cr_iip == *(unsigned long *)dorfirfi)
 		return;
+
+	isr = regs->cr_ipsr & IA64_PSR_RI;
 
 	if (!PSCB(v, interrupt_collection_enabled))
 		printk("psr.ic off, delivering event, ipsr=%lx,iip=%lx,"
@@ -140,12 +149,11 @@ void reflect_event(struct pt_regs *regs)
 		       regs->cr_ipsr, regs->cr_iip, isr, PSCB(v, iip));
 	PSCB(v, unat) = regs->ar_unat;	// not sure if this is really needed?
 	PSCB(v, precover_ifs) = regs->cr_ifs;
-	vcpu_bsw0(v);
 	PSCB(v, ipsr) = vcpu_get_ipsr_int_state(v, regs->cr_ipsr);
+	vcpu_bsw0(v);
 	PSCB(v, isr) = isr;
 	PSCB(v, iip) = regs->cr_iip;
 	PSCB(v, ifs) = 0;
-	PSCB(v, incomplete_regframe) = 0;
 
 	regs->cr_iip = v->arch.event_callback_ip;
 	regs->cr_ipsr = (regs->cr_ipsr & ~DELIVER_PSR_CLR) | DELIVER_PSR_SET;
@@ -175,7 +183,6 @@ static int handle_lazy_cover(struct vcpu *v, struct pt_regs *regs)
 {
 	if (!PSCB(v, interrupt_collection_enabled)) {
 		PSCB(v, ifs) = regs->cr_ifs;
-		PSCB(v, incomplete_regframe) = 1;
 		regs->cr_ifs = 0;
 		perfc_incrc(lazy_cover);
 		return 1;	// retry same instruction with cr.ifs off
@@ -215,8 +222,8 @@ void ia64_do_page_fault(unsigned long address, unsigned long isr,
 		unsigned long m_pteval;
 		m_pteval = translate_domain_pte(pteval, address, itir,
 		                                &logps, &entry);
-		vcpu_itc_no_srlz(current, (is_data ? 2 : 1) | 4,
-		                 address, m_pteval, pteval, logps, &entry);
+		vcpu_itc_no_srlz(current, is_data ? 2 : 1, address,
+		                 m_pteval, pteval, logps, &entry);
 		if ((fault == IA64_USE_TLB && !current->arch.dtlb.pte.p) ||
 		    p2m_entry_retry(&entry)) {
 			/* dtlb has been purged in-between.  This dtlb was
@@ -545,7 +552,8 @@ ia64_handle_break(unsigned long ifa, struct pt_regs *regs, unsigned long isr,
 				vcpu_increment_iip(current);
 		} else
 			reflect_interruption(isr, regs, vector);
-	} else if (!PSCB(v, interrupt_collection_enabled)) {
+	} else if ((iim - HYPERPRIVOP_START) < HYPERPRIVOP_MAX
+		   && ia64_get_cpl(regs->cr_ipsr) == 2) {
 		if (ia64_hyperprivop(iim, regs))
 			vcpu_increment_iip(current);
 	} else {

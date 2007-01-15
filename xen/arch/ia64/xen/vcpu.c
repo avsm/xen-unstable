@@ -450,8 +450,6 @@ IA64FAULT vcpu_get_psr(VCPU * vcpu, u64 * pval)
 	struct ia64_psr newpsr;
 
 	newpsr = *(struct ia64_psr *)&regs->cr_ipsr;
-	if (newpsr.cpl == 2)
-		newpsr.cpl = 0;
 	if (!vcpu->vcpu_info->evtchn_upcall_mask)
 		newpsr.i = 1;
 	else
@@ -469,6 +467,7 @@ IA64FAULT vcpu_get_psr(VCPU * vcpu, u64 * pval)
 	else
 		newpsr.pp = 0;
 	*pval = *(unsigned long *)&newpsr;
+	*pval &= (MASK(0, 32) | MASK(35, 2));
 	return IA64_NO_FAULT;
 }
 
@@ -614,7 +613,6 @@ IA64FAULT vcpu_get_ifs(VCPU * vcpu, u64 * pval)
 	//PSCB(vcpu,ifs) = PSCB(vcpu)->regs.cr_ifs;
 	//*pval = PSCB(vcpu,regs).cr_ifs;
 	*pval = PSCB(vcpu, ifs);
-	PSCB(vcpu, incomplete_regframe) = 0;
 	return IA64_NO_FAULT;
 }
 
@@ -693,6 +691,20 @@ IA64FAULT vcpu_increment_iip(VCPU * vcpu)
 		regs->cr_iip += 16;
 	} else
 		ipsr->ri++;
+	return IA64_NO_FAULT;
+}
+
+IA64FAULT vcpu_decrement_iip(VCPU * vcpu)
+{
+	REGS *regs = vcpu_regs(vcpu);
+	struct ia64_psr *ipsr = (struct ia64_psr *)&regs->cr_ipsr;
+
+	if (ipsr->ri == 0) {
+		ipsr->ri = 2;
+		regs->cr_iip -= 16;
+	} else
+		ipsr->ri--;
+
 	return IA64_NO_FAULT;
 }
 
@@ -1208,8 +1220,8 @@ IA64FAULT vcpu_set_itc(VCPU * vcpu, u64 val)
 #ifdef DISALLOW_SETTING_ITC_FOR_NOW
 	static int did_print;
 	if (!did_print) {
-		printk("vcpu_set_itc: Setting ar.itc is currently disabled\n");
-		printk("(this message is only displayed one)\n");
+		printk("vcpu_set_itc: Setting ar.itc is currently disabled "
+		       "(this message is only displayed once)\n");
 		did_print = 1;
 	}
 #else
@@ -1327,7 +1339,6 @@ IA64FAULT vcpu_rfi(VCPU * vcpu)
 	u64 int_enable, regspsr = 0;
 	u64 ifs;
 	REGS *regs = vcpu_regs(vcpu);
-	extern void dorfirfi(void);
 
 	psr.i64 = PSCB(vcpu, ipsr);
 	if (psr.ia64_psr.cpl < 3)
@@ -1350,19 +1361,24 @@ IA64FAULT vcpu_rfi(VCPU * vcpu)
 		printk("*** DOMAIN TRYING TO TURN ON BIG-ENDIAN!!!\n");
 		return IA64_ILLOP_FAULT;
 	}
-	PSCB(vcpu, incomplete_regframe) = 0;	// is this necessary?
+
 	ifs = PSCB(vcpu, ifs);
-	//if ((ifs & regs->cr_ifs & 0x8000000000000000L) && ifs != regs->cr_ifs) {
-	//if ((ifs & 0x8000000000000000L) && ifs != regs->cr_ifs) {
-	if (ifs & regs->cr_ifs & 0x8000000000000000L) {
-		// TODO: validate PSCB(vcpu,iip)
-		// TODO: PSCB(vcpu,ipsr) = psr;
-		PSCB(vcpu, ipsr) = psr.i64;
-		// now set up the trampoline
-		regs->cr_iip = *(unsigned long *)dorfirfi; // function pointer!!
-		__asm__ __volatile("mov %0=psr;;":"=r"(regspsr)::"memory");
-		regs->cr_ipsr =
-		    regspsr & ~(IA64_PSR_I | IA64_PSR_IC | IA64_PSR_BN);
+	if (ifs > 0x8000000000000000UL) {
+		if (regs->cr_ifs > 0x8000000000000000UL) {
+			// TODO: validate PSCB(vcpu,iip)
+			// TODO: PSCB(vcpu,ipsr) = psr;
+			PSCB(vcpu, ipsr) = psr.i64;
+			// now set up the trampoline
+			regs->cr_iip = *(unsigned long *)dorfirfi; // func ptr!
+			__asm__ __volatile("mov %0=psr;;":"=r"(regspsr)
+			                   ::"memory");
+			regs->cr_ipsr = regspsr & ~(IA64_PSR_I | IA64_PSR_IC |
+			                            IA64_PSR_BN);
+		} else {
+			regs->cr_ifs = ifs;
+			regs->cr_ipsr = psr.i64;
+			regs->cr_iip = PSCB(vcpu, iip);
+		}
 	} else {
 		regs->cr_ipsr = psr.i64;
 		regs->cr_iip = PSCB(vcpu, iip);
@@ -1379,10 +1395,7 @@ IA64FAULT vcpu_cover(VCPU * vcpu)
 	REGS *regs = vcpu_regs(vcpu);
 
 	if (!PSCB(vcpu, interrupt_collection_enabled)) {
-		if (!PSCB(vcpu, incomplete_regframe))
-			PSCB(vcpu, ifs) = regs->cr_ifs;
-		else
-			PSCB(vcpu, incomplete_regframe) = 0;
+		PSCB(vcpu, ifs) = regs->cr_ifs;
 	}
 	regs->cr_ifs = 0;
 	return IA64_NO_FAULT;
@@ -2182,14 +2195,6 @@ vcpu_itc_no_srlz(VCPU * vcpu, u64 IorD, u64 vaddr, u64 pte,
 	else
 		vhpt_insert(vaddr, pte, PAGE_SHIFT << 2);
 #endif
-	if (IorD & 0x4)		/* don't place in 1-entry TLB */
-		return;
-	if (IorD & 0x1) {
-		vcpu_set_tr_entry(&PSCBX(vcpu, itlb), mp_pte, ps << 2, vaddr);
-	}
-	if (IorD & 0x2) {
-		vcpu_set_tr_entry(&PSCBX(vcpu, dtlb), mp_pte, ps << 2, vaddr);
-	}
 }
 
 IA64FAULT vcpu_itc_d(VCPU * vcpu, u64 pte, u64 itir, u64 ifa)
@@ -2216,6 +2221,7 @@ IA64FAULT vcpu_itc_d(VCPU * vcpu, u64 pte, u64 itir, u64 ifa)
 		vcpu_flush_tlb_vhpt_range(ifa, logps);
 		goto again;
 	}
+	vcpu_set_tr_entry(&PSCBX(vcpu, dtlb), pte, itir, ifa);
 	return IA64_NO_FAULT;
 }
 
@@ -2242,6 +2248,7 @@ IA64FAULT vcpu_itc_i(VCPU * vcpu, u64 pte, u64 itir, u64 ifa)
 		vcpu_flush_tlb_vhpt_range(ifa, logps);
 		goto again;
 	}
+	vcpu_set_tr_entry(&PSCBX(vcpu, itlb), pte, itir, ifa);
 	return IA64_NO_FAULT;
 }
 
