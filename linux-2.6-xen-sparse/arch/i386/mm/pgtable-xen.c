@@ -2,7 +2,6 @@
  *  linux/arch/i386/mm/pgtable.c
  */
 
-#include <linux/config.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
@@ -39,13 +38,12 @@ void show_mem(void)
 	struct page *page;
 	pg_data_t *pgdat;
 	unsigned long i;
-	struct page_state ps;
 	unsigned long flags;
 
 	printk(KERN_INFO "Mem-info:\n");
 	show_free_areas();
 	printk(KERN_INFO "Free swap:       %6ldkB\n", nr_swap_pages<<(PAGE_SHIFT-10));
-	for_each_pgdat(pgdat) {
+	for_each_online_pgdat(pgdat) {
 		pgdat_resize_lock(pgdat, &flags);
 		for (i = 0; i < pgdat->node_spanned_pages; ++i) {
 			page = pgdat_page_nr(pgdat, i);
@@ -67,12 +65,13 @@ void show_mem(void)
 	printk(KERN_INFO "%d pages shared\n", shared);
 	printk(KERN_INFO "%d pages swap cached\n", cached);
 
-	get_page_state(&ps);
-	printk(KERN_INFO "%lu pages dirty\n", ps.nr_dirty);
-	printk(KERN_INFO "%lu pages writeback\n", ps.nr_writeback);
-	printk(KERN_INFO "%lu pages mapped\n", ps.nr_mapped);
-	printk(KERN_INFO "%lu pages slab\n", ps.nr_slab);
-	printk(KERN_INFO "%lu pages pagetables\n", ps.nr_page_table_pages);
+	printk(KERN_INFO "%lu pages dirty\n", global_page_state(NR_FILE_DIRTY));
+	printk(KERN_INFO "%lu pages writeback\n",
+					global_page_state(NR_WRITEBACK));
+	printk(KERN_INFO "%lu pages mapped\n", global_page_state(NR_FILE_MAPPED));
+	printk(KERN_INFO "%lu pages slab\n", global_page_state(NR_SLAB));
+	printk(KERN_INFO "%lu pages pagetables\n",
+					global_page_state(NR_PAGETABLE));
 }
 
 /*
@@ -196,9 +195,10 @@ unsigned long hypervisor_virt_start = HYPERVISOR_VIRT_START;
 unsigned long __FIXADDR_TOP = (HYPERVISOR_VIRT_START - 2 * PAGE_SIZE);
 EXPORT_SYMBOL(__FIXADDR_TOP);
 
-void __init set_fixaddr_top()
+void __init set_fixaddr_top(unsigned long top)
 {
 	BUG_ON(nr_fixmaps > 0);
+	hypervisor_virt_start = top;
 	__FIXADDR_TOP = hypervisor_virt_start - 2 * PAGE_SIZE;
 }
 
@@ -215,6 +215,7 @@ void __set_fixmap (enum fixed_addresses idx, maddr_t phys, pgprot_t flags)
 #ifdef CONFIG_X86_F00F_BUG
 	case FIX_F00F_IDT:
 #endif
+	case FIX_VDSO:
 		set_pte_pfn(address, phys >> PAGE_SHIFT, flags);
 		break;
 	default:
@@ -251,7 +252,7 @@ struct page *pte_alloc_one(struct mm_struct *mm, unsigned long address)
 #endif
 	if (pte) {
 		SetPageForeign(pte, pte_free);
-		set_page_count(pte, 1);
+		init_page_count(pte);
 	}
 	return pte;
 }
@@ -275,7 +276,7 @@ void pte_free(struct page *pte)
 	}
 
 	ClearPageForeign(pte);
-	set_page_count(pte, 1);
+	init_page_count(pte);
 
 	__free_page(pte);
 }
