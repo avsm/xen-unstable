@@ -26,6 +26,7 @@
 #include <asm/vmx.h>
 #include <linux/efi.h>
 #include <asm/iosapic.h>
+#include <xen/softirq.h>
 
 unsigned long xenheap_phys_end, total_pages;
 
@@ -436,6 +437,12 @@ void start_kernel(void)
     init_xen_time(); /* initialise the time */
     timer_init();
 
+    rcu_init();
+
+#ifdef CONFIG_XEN_IA64_TLBFLUSH_CLOCK
+    open_softirq(NEW_TLBFLUSH_CLOCK_PERIOD_SOFTIRQ, new_tlbflush_clock_period);
+#endif
+
 #ifdef CONFIG_SMP
     if ( opt_nosmp )
     {
@@ -464,6 +471,7 @@ printk("num_online_cpus=%d, max_cpus=%d\n",num_online_cpus(),max_cpus);
         if ( num_online_cpus() >= max_cpus )
             break;
         if ( !cpu_online(i) ) {
+            rcu_online_cpu(i);
             __cpu_up(i);
 	}
     }
