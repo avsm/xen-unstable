@@ -33,6 +33,7 @@
 #include <xen/console.h>
 #include <xen/hypercall.h>
 #include <xen/softirq.h>
+#include <xen/time.h>
 
 static DEFINE_SPINLOCK(efi_time_services_lock);
 
@@ -370,12 +371,38 @@ sal_emulator (long index, unsigned long in1, unsigned long in2,
 	    case SAL_UPDATE_PAL:
 		printk("*** CALLED SAL_UPDATE_PAL.  IGNORED...\n");
 		break;
+	    case SAL_XEN_SAL_RETURN:
+	        if (!test_and_set_bit(_VCPUF_down, &current->vcpu_flags))
+			vcpu_sleep_nosync(current);
+		break;
 	    default:
 		printk("*** CALLED SAL_ WITH UNKNOWN INDEX.  IGNORED...\n");
 		status = -1;
 		break;
 	}
 	return ((struct sal_ret_values) {status, r9, r10, r11});
+}
+
+cpumask_t cpu_cache_coherent_map;
+
+struct cache_flush_args {
+	u64 cache_type;
+	u64 operation;
+	u64 progress;
+	long status;
+};
+
+static void
+remote_pal_cache_flush(void *v)
+{
+	struct cache_flush_args *args = v;
+	long status;
+	u64 progress = args->progress;
+
+	status = ia64_pal_cache_flush(args->cache_type, args->operation,
+				      &progress, NULL);
+	if (status != 0)
+		args->status = status;
 }
 
 struct ia64_pal_retval
@@ -541,8 +568,26 @@ xen_pal_emulator(unsigned long index, u64 in1, u64 in2, u64 in3)
 		status = ia64_pal_register_info(in1, &r9, &r10);
 		break;
 	    case PAL_CACHE_FLUSH:
+		if (in3 != 0) /* Initially progress_indicator must be 0 */
+			panic_domain(NULL, "PAL_CACHE_FLUSH ERROR, "
+				     "progress_indicator=%lx", in3);
+
 		/* Always call Host Pal in int=0 */
 		in2 &= ~PAL_CACHE_FLUSH_CHK_INTRS;
+
+		if (in1 != PAL_CACHE_TYPE_COHERENT) {
+			struct cache_flush_args args = {
+				.cache_type = in1,
+				.operation = in2,
+				.progress = 0,
+				.status = 0
+			};
+			smp_call_function(remote_pal_cache_flush,
+					  (void *)&args, 1, 1);
+			if (args.status != 0)
+				panic_domain(NULL, "PAL_CACHE_FLUSH ERROR, "
+					     "remote status %lx", args.status);
+		}
 
 		/*
 		 * Call Host PAL cache flush
@@ -555,6 +600,13 @@ xen_pal_emulator(unsigned long index, u64 in1, u64 in2, u64 in3)
 			panic_domain(NULL, "PAL_CACHE_FLUSH ERROR, "
 			             "status %lx", status);
 
+		if (in1 == PAL_CACHE_TYPE_COHERENT) {
+			int cpu = current->processor;
+			cpus_setall(current->arch.cache_coherent_map);
+			cpu_clear(cpu, current->arch.cache_coherent_map);
+			cpus_setall(cpu_cache_coherent_map);
+			cpu_clear(cpu, cpu_cache_coherent_map);
+		}
 		break;
 	    case PAL_PERF_MON_INFO:
 		{
@@ -675,6 +727,9 @@ efi_emulate_get_time(
 	struct page_info *tv_page = NULL;
 	struct page_info *tc_page = NULL;
 	efi_status_t status = 0;
+	efi_time_t *tvp;
+	struct tm timeptr;
+	unsigned long xtimesec;
 
 	tv = efi_translate_domain_addr(tv_addr, fault, &tv_page);
 	if (*fault != IA64_NO_FAULT)
@@ -687,6 +742,17 @@ efi_emulate_get_time(
 
 	spin_lock(&efi_time_services_lock);
 	status = (*efi.get_time)((efi_time_t *) tv, (efi_time_cap_t *) tc);
+	tvp = (efi_time_t *)tv;
+	xtimesec = mktime(tvp->year, tvp->month, tvp->day, tvp->hour,
+	                  tvp->minute, tvp->second);
+	xtimesec += current->domain->time_offset_seconds;
+	timeptr = gmtime(xtimesec);
+	tvp->second = timeptr.tm_sec;
+	tvp->minute = timeptr.tm_min;
+	tvp->hour   = timeptr.tm_hour;
+	tvp->day    = timeptr.tm_mday;
+	tvp->month  = timeptr.tm_mon + 1;
+	tvp->year   = timeptr.tm_year + 1900;
 	spin_unlock(&efi_time_services_lock);
 
 errout:
