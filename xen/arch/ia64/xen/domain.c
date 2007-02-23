@@ -138,6 +138,28 @@ static void flush_vtlb_for_context_switch(struct vcpu* prev, struct vcpu* next)
 	}
 }
 
+static void flush_cache_for_context_switch(struct vcpu *next)
+{
+	extern cpumask_t cpu_cache_coherent_map;
+	int cpu = smp_processor_id();
+
+	if (is_idle_vcpu(next) ||
+	    __test_and_clear_bit(cpu, &next->arch.cache_coherent_map)) {
+		if (cpu_test_and_clear(cpu, cpu_cache_coherent_map)) {
+			unsigned long flags;
+			u64 progress = 0;
+			s64 status;
+
+			local_irq_save(flags);
+			status = ia64_pal_cache_flush(4, 0, &progress, NULL);
+			local_irq_restore(flags);
+			if (status != 0)
+				panic_domain(NULL, "PAL_CACHE_FLUSH ERROR, "
+					     "cache_type=4 status %lx", status);
+		}
+	}
+}
+
 static void lazy_fp_switch(struct vcpu *prev, struct vcpu *next)
 {
 	/*
@@ -260,6 +282,7 @@ void context_switch(struct vcpu *prev, struct vcpu *next)
     }
    
     flush_vtlb_for_context_switch(prev, current);
+    flush_cache_for_context_switch(current);
     context_saved(prev);
 }
 
@@ -496,7 +519,7 @@ int arch_domain_create(struct domain *d)
 
 #ifdef CONFIG_XEN_IA64_PERVCPU_VHPT
 	d->arch.has_pervcpu_vhpt = opt_pervcpu_vhpt;
-	dprintk(XENLOG_WARNING, "%s:%d domain %d pervcpu_vhpt %d\n",
+	dprintk(XENLOG_INFO, "%s:%d domain %d pervcpu_vhpt %d\n",
 	        __func__, __LINE__, d->domain_id, d->arch.has_pervcpu_vhpt);
 #endif
 	if (tlb_track_create(d) < 0)
@@ -534,7 +557,7 @@ int arch_domain_create(struct domain *d)
 	d->arch.ioport_caps = rangeset_new(d, "I/O Ports",
 	                                   RANGESETF_prettyprint_hex);
 
-	printk ("arch_domain_create: domain=%p\n", d);
+	dprintk(XENLOG_DEBUG, "arch_domain_create: domain=%p\n", d);
 	return 0;
 
 fail_nomem:
@@ -591,7 +614,7 @@ void arch_get_info_guest(struct vcpu *v, vcpu_guest_context_u c)
 		er->dtrs[i].rid = v->arch.dtrs[i].rid;
 	}
 	er->event_callback_ip = v->arch.event_callback_ip;
-	er->dcr = PSCB(v,dcr);
+	er->dcr = v->arch.privregs ? PSCB(v,dcr) : 0;
 	er->iva = v->arch.iva;
 }
 
@@ -627,7 +650,6 @@ int arch_set_info_guest(struct vcpu *v, vcpu_guest_context_u c)
 			             er->dtrs[i].rid);
 		}
 		v->arch.event_callback_ip = er->event_callback_ip;
-		PSCB(v,dcr) = er->dcr;
 		v->arch.iva = er->iva;
 	}
 
@@ -753,7 +775,7 @@ domain_set_shared_info_va (unsigned long va)
 
 	/* Note: this doesn't work well if other cpus are already running.
 	   However this is part of the spec :-)  */
-	printk ("Domain set shared_info_va to 0x%016lx\n", va);
+	gdprintk(XENLOG_DEBUG, "Domain set shared_info_va to 0x%016lx\n", va);
 	d->arch.shared_info_va = va;
 
 	VCPU(v, interrupt_mask_addr) = (unsigned char *)va +
