@@ -13,28 +13,31 @@
  * along with this program; if not, write to the Free Software
  * Foundation, 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  *
- * Copyright (C) IBM Corp. 2005
+ * Copyright IBM Corp. 2007
  *
- * Authors: Jimi Xenidis <jimix@watson.ibm.com>
+ * Authors: Ryan Harper <ryanh@us.ibm.com>
+ *          Hollis Blanchard <hollisb@us.ibm.com>
  */
 
-#ifndef _OFTREE_H
-#define _OFTREE_H
-#include <xen/multiboot.h>
-#include "of-devtree.h"
+#include <asm/page.h>
+#include <asm/platform.h>
 
-extern ulong oftree;
-extern ulong oftree_len;
-extern ulong oftree_end;
-extern ofdn_t ofd_boot_cpu;
+#define IO_RANGE_START (2UL << 30)
+#define IO_RANGE_END   (4UL << 30)
+#define IO_SIZE        (IO_RANGE_END - IO_RANGE_START)
 
-extern int ofd_dom0_fixup(struct domain *d, ulong mem, const char *cmdline,
-                          ulong shared_info);
-extern void ofd_memory_props(void *m, struct domain *d);
+unsigned long platform_iohole_base(void)
+{
+    return IO_RANGE_START;
+}
 
-extern int firmware_image_start[0];
-extern int firmware_image_size[0];
+unsigned long platform_iohole_size(void)
+{
+    return IO_SIZE;
+}
 
-extern void memory_init(module_t *mod, int mcount);
-
-#endif  /* #ifndef _OFTREE_H */
+int platform_io_mfn(unsigned long mfn)
+{
+    unsigned long maddr = mfn << PAGE_SHIFT;
+    return maddr > IO_RANGE_START && maddr < IO_RANGE_END;
+}

@@ -13,28 +13,16 @@
  * along with this program; if not, write to the Free Software
  * Foundation, 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  *
- * Copyright (C) IBM Corp. 2005
+ * Copyright IBM Corp. 2007
  *
- * Authors: Jimi Xenidis <jimix@watson.ibm.com>
+ * Authors: Ryan Harper <ryanh@us.ibm.com>
  */
 
-#ifndef _OFTREE_H
-#define _OFTREE_H
-#include <xen/multiboot.h>
-#include "of-devtree.h"
+#ifndef _ASM_PLATFORM_H_
+#define _ASM_PLATFORM_H_
 
-extern ulong oftree;
-extern ulong oftree_len;
-extern ulong oftree_end;
-extern ofdn_t ofd_boot_cpu;
+extern unsigned long platform_iohole_base(void);
+extern unsigned long platform_iohole_size(void);
+extern int platform_io_mfn(unsigned long mfn);
 
-extern int ofd_dom0_fixup(struct domain *d, ulong mem, const char *cmdline,
-                          ulong shared_info);
-extern void ofd_memory_props(void *m, struct domain *d);
-
-extern int firmware_image_start[0];
-extern int firmware_image_size[0];
-
-extern void memory_init(module_t *mod, int mcount);
-
-#endif  /* #ifndef _OFTREE_H */
+#endif
