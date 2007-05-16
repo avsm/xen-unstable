@@ -153,7 +153,7 @@ vmx_ia64_handle_break (unsigned long ifa, struct pt_regs *regs, unsigned long is
 
     perfc_incr(vmx_ia64_handle_break);
 #ifdef CRASH_DEBUG
-    if ((iim == 0 || iim == CDB_BREAK_NUM) && !user_mode(regs) &&
+    if ((iim == 0 || iim == CDB_BREAK_NUM) && !guest_mode(regs) &&
         IS_VMM_ADDRESS(regs->cr_iip)) {
         if (iim == 0)
             show_registers(regs);
@@ -164,7 +164,7 @@ vmx_ia64_handle_break (unsigned long ifa, struct pt_regs *regs, unsigned long is
         if (iim == 0) 
             vmx_die_if_kernel("Break 0 in Hypervisor.", regs, iim);
 
-        if (!user_mode(regs)) {
+        if (ia64_psr(regs)->cpl == 0) {
             /* Allow hypercalls only when cpl = 0.  */
             if (iim == d->arch.breakimm) {
                 ia64_hypercall(regs);
@@ -320,7 +320,8 @@ vmx_hpw_miss(u64 vadr , u64 vec, REGS* regs)
         physical_tlb_miss(v, vadr, type);
         return IA64_FAULT;
     }
-
+    
+try_again:
     if((data=vtlb_lookup(v, vadr,type))!=0){
         if (v->domain != dom0 && type == DSIDE_TLB) {
             gppa = (vadr & ((1UL << data->ps) - 1)) +
@@ -342,7 +343,39 @@ vmx_hpw_miss(u64 vadr , u64 vec, REGS* regs)
         if (misr.sp)
             return vmx_handle_lds(regs);
 
+        vcpu_get_rr(v, vadr, &rr);
+        itir = rr & (RR_RID_MASK | RR_PS_MASK);
+
         if(!vhpt_enabled(v, vadr, misr.rs?RSE_REF:DATA_REF)){
+            if (GOS_WINDOWS(v)) {
+                /* windows use region 4 and 5 for identity mapping */
+                if (REGION_NUMBER(vadr) == 4 && !(regs->cr_ipsr & IA64_PSR_CPL)
+                    && (REGION_OFFSET(vadr)<= _PAGE_PPN_MASK)) {
+
+                    pteval = PAGEALIGN(REGION_OFFSET(vadr), itir_ps(itir)) |
+                             (_PAGE_P | _PAGE_A | _PAGE_D |
+                               _PAGE_MA_WB | _PAGE_AR_RW);
+
+                    if (thash_purge_and_insert(v, pteval, itir, vadr, type))
+                        goto try_again;
+
+                    return IA64_NO_FAULT;
+                }
+
+                if (REGION_NUMBER(vadr) == 5 && !(regs->cr_ipsr & IA64_PSR_CPL)
+                    && (REGION_OFFSET(vadr)<= _PAGE_PPN_MASK)) {
+
+                    pteval = PAGEALIGN(REGION_OFFSET(vadr),itir_ps(itir)) |
+                             (_PAGE_P | _PAGE_A | _PAGE_D |
+                              _PAGE_MA_UC | _PAGE_AR_RW);
+
+                    if (thash_purge_and_insert(v, pteval, itir, vadr, type))
+                        goto try_again;
+
+                    return IA64_NO_FAULT;
+                }
+            }
+
             if(vpsr.ic){
                 vcpu_set_isr(v, misr.val);
                 alt_dtlb(v, vadr);
@@ -353,7 +386,7 @@ vmx_hpw_miss(u64 vadr , u64 vec, REGS* regs)
             }
         }
 
-        vmx_vcpu_get_pta(v, &vpta.val);
+        vpta.val = vmx_vcpu_get_pta(v);
         if (vpta.vf) {
             /* Long format is not yet supported.  */
             if (vpsr.ic) {
@@ -367,7 +400,9 @@ vmx_hpw_miss(u64 vadr , u64 vec, REGS* regs)
         }
 
         /* avoid recursively walking (short format) VHPT */
-        if ((((vadr ^ vpta.val) << 3) >> (vpta.size + 3)) == 0) {
+        if (!GOS_WINDOWS(v) &&
+            (((vadr ^ vpta.val) << 3) >> (vpta.size + 3)) == 0) {
+
             if (vpsr.ic) {
                 vcpu_set_isr(v, misr.val);
                 dtlb_fault(v, vadr);
@@ -378,7 +413,7 @@ vmx_hpw_miss(u64 vadr , u64 vec, REGS* regs)
             }
         }
             
-        vmx_vcpu_thash(v, vadr, &vhpt_adr);
+        vhpt_adr = vmx_vcpu_thash(v, vadr);
         if (!guest_vhpt_lookup(vhpt_adr, &pteval)) {
             /* VHPT successfully read.  */
             if (!(pteval & _PAGE_P)) {
@@ -391,8 +426,6 @@ vmx_hpw_miss(u64 vadr , u64 vec, REGS* regs)
                     return IA64_FAULT;
                 }
             } else if ((pteval & _PAGE_MA_MASK) != _PAGE_MA_ST) {
-                vcpu_get_rr(v, vadr, &rr);
-                itir = rr & (RR_RID_MASK | RR_PS_MASK);
                 thash_purge_and_insert(v, pteval, itir, vadr, DSIDE_TLB);
                 return IA64_NO_FAULT;
             } else if (vpsr.ic) {
@@ -424,7 +457,7 @@ vmx_hpw_miss(u64 vadr , u64 vec, REGS* regs)
             return IA64_FAULT;
         }
 
-        vmx_vcpu_get_pta(v, &vpta.val);
+        vpta.val = vmx_vcpu_get_pta(v);
         if (vpta.vf) {
             /* Long format is not yet supported.  */
             vcpu_set_isr(v, misr.val);
@@ -433,7 +466,7 @@ vmx_hpw_miss(u64 vadr , u64 vec, REGS* regs)
         }
 
 
-        vmx_vcpu_thash(v, vadr, &vhpt_adr);
+        vhpt_adr = vmx_vcpu_thash(v, vadr);
         if (!guest_vhpt_lookup(vhpt_adr, &pteval)) {
             /* VHPT successfully read.  */
             if (pteval & _PAGE_P) {
