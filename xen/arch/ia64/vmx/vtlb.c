@@ -141,7 +141,7 @@ static void thash_recycle_cch(thash_cb_t *hcb, thash_data_t *hash)
 
 static void vmx_vhpt_insert(thash_cb_t *hcb, u64 pte, u64 itir, u64 ifa)
 {
-    u64 tag ,len;
+    u64 tag;
     ia64_rr rr;
     thash_data_t *head, *cch;
     pte = pte & ~PAGE_FLAGS_RV_MASK;
@@ -150,33 +150,40 @@ static void vmx_vhpt_insert(thash_cb_t *hcb, u64 pte, u64 itir, u64 ifa)
     tag = ia64_ttag(ifa);
     cch = head;
     while (cch) {    
-        if (INVALID_VHPT(cch)) {
-            len = cch->len;
-            cch->page_flags = pte;
-            cch->len = len;
-            cch->itir = rr.ps << 2;
-            cch->etag = tag;
-            return;
-        }
+        if (INVALID_VHPT(cch))
+            break;
         cch = cch->next;
     }
-
-    if(head->len>=MAX_CCN_DEPTH){
-        thash_recycle_cch(hcb, head);
-        cch = cch_alloc(hcb);
+    if (cch) {
+        if (cch != head) {
+            local_irq_disable();
+            cch->page_flags = head->page_flags;
+            cch->itir = head->itir;
+            cch->etag  = head->etag;
+            head->ti = 1;
+            local_irq_enable();
+        }
     }
     else{
-        cch = __alloc_chain(hcb);
+        if (head->len >= MAX_CCN_DEPTH) {
+            thash_recycle_cch(hcb, head);
+            cch = cch_alloc(hcb);
+        } else {
+            cch = __alloc_chain(hcb);
+        }
+        local_irq_disable();
+        *cch = *head;
+        head->ti = 1;
+        head->next = cch;
+        head->len = cch->len + 1;
+        cch->len = 0;
+        local_irq_enable();
     }
-    local_irq_disable();
-    *cch = *head;
+    //here head is invalid
+    wmb();
     head->page_flags=pte;
     head->itir = rr.ps << 2;
-    head->etag=tag;
-    head->next = cch;
-    head->len = cch->len+1;
-    cch->len = 0;
-    local_irq_enable();
+    *(volatile unsigned long*)&head->etag = tag;
     return;
 }
 
@@ -269,7 +276,7 @@ u64 guest_vhpt_lookup(u64 iha, u64 *pte)
 
     data = vhpt_lookup(iha);
     if (data == NULL) {
-        data = vtlb_lookup(current, iha, DSIDE_TLB);
+        data = __vtr_lookup(current, iha, DSIDE_TLB);
         if (data != NULL)
             thash_vhpt_insert(current, data->page_flags, data->itir,
                               iha, DSIDE_TLB);
@@ -511,24 +518,31 @@ u64 translate_phy_pte(VCPU *v, u64 *pte, u64 itir, u64 va)
 /*
  * Purge overlap TCs and then insert the new entry to emulate itc ops.
  *    Notes: Only TC entry can purge and insert.
+ *    1 indicates this is MMIO
  */
-void thash_purge_and_insert(VCPU *v, u64 pte, u64 itir, u64 ifa, int type)
+int thash_purge_and_insert(VCPU *v, u64 pte, u64 itir, u64 ifa, int type)
 {
     u64 ps;//, va;
     u64 phy_pte;
     ia64_rr vrr, mrr;
+    int ret = 0;
     ps = itir_ps(itir);
     vcpu_get_rr(current, ifa, &vrr.rrval);
     mrr.rrval = ia64_get_rr(ifa);
     if(VMX_DOMAIN(v)){
+        
+        phy_pte = translate_phy_pte(v, &pte, itir, ifa);
+
         /* Ensure WB attribute if pte is related to a normal mem page,
          * which is required by vga acceleration since qemu maps shared
          * vram buffer with WB.
          */
-        if (!(pte & VTLB_PTE_IO) && ((pte & _PAGE_MA_MASK) != _PAGE_MA_NAT))
+        if (!(pte & VTLB_PTE_IO) && ((pte & _PAGE_MA_MASK) != _PAGE_MA_NAT)) {
             pte &= ~_PAGE_MA_MASK;
-
-        phy_pte = translate_phy_pte(v, &pte, itir, ifa);
+            phy_pte &= ~_PAGE_MA_MASK;
+        }
+        if (pte & VTLB_PTE_IO)
+            ret = 1;
         vtlb_purge(v, ifa, ps);
         vhpt_purge(v, ifa, ps);
         if (ps == mrr.ps) {
@@ -567,6 +581,7 @@ void thash_purge_and_insert(VCPU *v, u64 pte, u64 itir, u64 ifa, int type)
         machine_tlb_purge(ifa, ps);
         vmx_vhpt_insert(&v->arch.vhpt, phy_pte, itir, ifa);
     }
+    return ret;
 }
 
 /*

@@ -666,19 +666,22 @@ unsigned long lookup_domain_mpa(struct domain *d, unsigned long mpaddr,
             return GPFN_INV_MASK;
     }
 
-    if (mpaddr < d->arch.convmem_end) {
+    if (mpaddr < d->arch.convmem_end && !d->is_dying) {
         gdprintk(XENLOG_WARNING, "vcpu %d iip 0x%016lx: non-allocated mpa "
-                 "0x%lx (< 0x%lx)\n", current->vcpu_id, PSCB(current, iip),
-                 mpaddr, d->arch.convmem_end);
+                 "d %"PRId16" 0x%lx (< 0x%lx)\n",
+                 current->vcpu_id, PSCB(current, iip),
+                 d->domain_id, mpaddr, d->arch.convmem_end);
     } else if (mpaddr - IO_PORTS_PADDR < IO_PORTS_SIZE) {
         /* Log I/O port probing, but complain less loudly about it */
         gdprintk(XENLOG_INFO, "vcpu %d iip 0x%016lx: bad I/O port access "
-                 "0x%lx\n", current->vcpu_id, PSCB(current, iip),
+                 "d %"PRId16" 0x%lx\n",
+                 current->vcpu_id, PSCB(current, iip), d->domain_id,
                  IO_SPACE_SPARSE_DECODING(mpaddr - IO_PORTS_PADDR));
     } else {
-        gdprintk(XENLOG_WARNING, "vcpu %d iip 0x%016lx: bad mpa 0x%lx "
-                 "(=> 0x%lx)\n", current->vcpu_id, PSCB(current, iip),
-                 mpaddr, d->arch.convmem_end);
+        gdprintk(XENLOG_WARNING, "vcpu %d iip 0x%016lx: bad mpa "
+                 "d %"PRId16" 0x%lx (=> 0x%lx)\n",
+                 current->vcpu_id, PSCB(current, iip),
+                 d->domain_id, mpaddr, d->arch.convmem_end);
     }
 
     if (entry != NULL)
@@ -2140,6 +2143,37 @@ arch_memory_op(int op, XEN_GUEST_HANDLE(void) arg)
         put_domain(d);
 
         break;
+    }
+
+    case XENMEM_machine_memory_map:
+    {
+        struct xen_memory_map memmap;
+        struct xen_ia64_memmap_info memmap_info;
+        XEN_GUEST_HANDLE(char) buffer;
+
+        if (!IS_PRIV(current->domain))
+            return -EINVAL;
+        if (copy_from_guest(&memmap, arg, 1))
+            return -EFAULT;
+        if (memmap.nr_entries <
+            sizeof(memmap_info) + ia64_boot_param->efi_memmap_size)
+            return -EINVAL;
+
+        memmap.nr_entries =
+            sizeof(memmap_info) + ia64_boot_param->efi_memmap_size;
+        memset(&memmap_info, 0, sizeof(memmap_info));
+        memmap_info.efi_memmap_size = ia64_boot_param->efi_memmap_size;
+        memmap_info.efi_memdesc_size = ia64_boot_param->efi_memdesc_size;
+        memmap_info.efi_memdesc_version = ia64_boot_param->efi_memdesc_version;
+
+        buffer = guest_handle_cast(memmap.buffer, char);
+        if (copy_to_guest(buffer, (char*)&memmap_info, sizeof(memmap_info)) ||
+            copy_to_guest_offset(buffer, sizeof(memmap_info),
+                                 (char*)__va(ia64_boot_param->efi_memmap),
+                                 ia64_boot_param->efi_memmap_size) ||
+            copy_to_guest(arg, &memmap, 1))
+            return -EFAULT;
+        return 0;
     }
 
     default:

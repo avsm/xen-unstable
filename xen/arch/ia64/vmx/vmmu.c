@@ -295,7 +295,7 @@ int vhpt_enabled(VCPU *vcpu, uint64_t vadr, vhpt_ref_t ref)
 
     vpsr.val = VCPU(vcpu, vpsr);
     vcpu_get_rr(vcpu, vadr, &vrr.rrval);
-    vmx_vcpu_get_pta(vcpu,&vpta.val);
+    vpta.val = vmx_vcpu_get_pta(vcpu);
 
     if ( vrr.ve & vpta.ve ) {
         switch ( ref ) {
@@ -408,7 +408,6 @@ IA64FAULT vmx_vcpu_itc_i(VCPU *vcpu, u64 pte, u64 itir, u64 ifa)
 
 IA64FAULT vmx_vcpu_itc_d(VCPU *vcpu, u64 pte, u64 itir, u64 ifa)
 {
-    u64 gpfn;
 #ifdef VTLB_DEBUG    
     int slot;
     u64 ps, va;
@@ -422,9 +421,6 @@ IA64FAULT vmx_vcpu_itc_d(VCPU *vcpu, u64 pte, u64 itir, u64 ifa)
     }
 #endif //VTLB_DEBUG
     pte &= ~PAGE_FLAGS_RV_MASK;
-    gpfn = (pte & _PAGE_PPN_MASK)>> PAGE_SHIFT;
-    if (VMX_DOMAIN(vcpu) && __gpfn_is_io(vcpu->domain, gpfn))
-        pte |= VTLB_PTE_IO;
     thash_purge_and_insert(vcpu, pte, itir, ifa, DSIDE_TLB);
     return IA64_NO_FAULT;
 
@@ -563,11 +559,21 @@ struct ptc_ga_args {
 
 static void ptc_ga_remote_func (void *varg)
 {
-    u64 oldrid, moldrid, mpta, oldpsbits, vadr;
+    u64 oldrid, moldrid, mpta, oldpsbits, vadr, flags;
     struct ptc_ga_args *args = (struct ptc_ga_args *)varg;
     VCPU *v = args->vcpu;
+    int cpu = v->processor;
+
     vadr = args->vadr;
 
+    /* Try again if VCPU has migrated. */
+    if (cpu != current->processor)
+        return;
+    local_irq_save(flags);
+    if (!spin_trylock(&per_cpu(schedule_data, cpu).schedule_lock))
+        goto bail2;
+    if (v->processor != cpu)
+        goto bail1;
     oldrid = VMX(v, vrr[0]);
     VMX(v, vrr[0]) = args->rid;
     oldpsbits = VMX(v, psbits[0]);
@@ -584,6 +590,11 @@ static void ptc_ga_remote_func (void *varg)
     ia64_set_rr(0x0,moldrid);
     ia64_set_pta(mpta);
     ia64_dv_serialize_data();
+    args->vcpu = NULL;
+bail1:
+    spin_unlock(&per_cpu(schedule_data, cpu).schedule_lock);
+bail2:
+    local_irq_restore(flags);
 }
 
 
@@ -593,7 +604,7 @@ IA64FAULT vmx_vcpu_ptc_ga(VCPU *vcpu, u64 va, u64 ps)
     struct domain *d = vcpu->domain;
     struct vcpu *v;
     struct ptc_ga_args args;
-    int proc;
+    int cpu;
 
     args.vadr = va;
     vcpu_get_rr(vcpu, va, &args.rid);
@@ -602,65 +613,63 @@ IA64FAULT vmx_vcpu_ptc_ga(VCPU *vcpu, u64 va, u64 ps)
         if (!v->is_initialised)
             continue;
 
-        args.vcpu = v;
-again: /* Try again if VCPU has migrated.  */
-        proc = v->processor;
-        if (proc != vcpu->processor) {
-            /* Flush VHPT on remote processors.  */
-            smp_call_function_single(v->processor,
-                                     &ptc_ga_remote_func, &args, 0, 1);
-            if (proc != v->processor)
-                goto again;
-        } else if (v == vcpu) {
+        if (v == vcpu) {
             vmx_vcpu_ptc_l(v, va, ps);
-        } else {
-            vcpu_schedule_lock_irq(v);
-            proc = v->processor;
-            if (proc == vcpu->processor)
-                ptc_ga_remote_func(&args);
-            else
-                proc = INVALID_PROCESSOR;
-            vcpu_schedule_unlock_irq(v);
-            if (proc == INVALID_PROCESSOR)
-                goto again;
+            continue;
         }
+
+        args.vcpu = v;
+        do {
+            cpu = v->processor;
+            if (cpu != current->processor) {
+                spin_unlock_wait(&per_cpu(schedule_data, cpu).schedule_lock);
+                /* Flush VHPT on remote processors. */
+                smp_call_function_single(cpu, &ptc_ga_remote_func,
+                                         &args, 0, 1);
+            } else {
+                ptc_ga_remote_func(&args);
+            }
+        } while (args.vcpu != NULL);
     }
     return IA64_NO_FAULT;
 }
 
 
-IA64FAULT vmx_vcpu_thash(VCPU *vcpu, u64 vadr, u64 *pval)
+u64 vmx_vcpu_thash(VCPU *vcpu, u64 vadr)
 {
     PTA vpta;
     ia64_rr vrr;
+    u64 pval;
     u64 vhpt_offset;
-    vmx_vcpu_get_pta(vcpu, &vpta.val);
+    vpta.val = vmx_vcpu_get_pta(vcpu);
     vcpu_get_rr(vcpu, vadr, &vrr.rrval);
     if(vpta.vf){
-        *pval = ia64_call_vsa(PAL_VPS_THASH,vadr,vrr.rrval,vpta.val,0,0,0,0);
-        *pval = vpta.val & ~0xffff;
+        pval = ia64_call_vsa(PAL_VPS_THASH, vadr, vrr.rrval,
+                             vpta.val, 0, 0, 0, 0);
+        pval = vpta.val & ~0xffff;
     }else{
         vhpt_offset=((vadr>>vrr.ps)<<3)&((1UL<<(vpta.size))-1);
-        *pval = (vadr&VRN_MASK)|
+        pval = (vadr & VRN_MASK) |
             (vpta.val<<3>>(vpta.size+3)<<(vpta.size))|
             vhpt_offset;
     }
-    return  IA64_NO_FAULT;
+    return  pval;
 }
 
 
-IA64FAULT vmx_vcpu_ttag(VCPU *vcpu, u64 vadr, u64 *pval)
+u64 vmx_vcpu_ttag(VCPU *vcpu, u64 vadr)
 {
     ia64_rr vrr;
     PTA vpta;
-    vmx_vcpu_get_pta(vcpu, &vpta.val);
+    u64 pval;
+    vpta.val = vmx_vcpu_get_pta(vcpu);
     vcpu_get_rr(vcpu, vadr, &vrr.rrval);
     if(vpta.vf){
-        *pval = ia64_call_vsa(PAL_VPS_TTAG,vadr,vrr.rrval,0,0,0,0,0);
+        pval = ia64_call_vsa(PAL_VPS_TTAG, vadr, vrr.rrval, 0, 0, 0, 0, 0);
     }else{
-        *pval = 1;
+        pval = 1;
     }
-    return  IA64_NO_FAULT;
+    return  pval;
 }
 
 
@@ -725,7 +734,7 @@ IA64FAULT vmx_vcpu_tpa(VCPU *vcpu, u64 vadr, u64 *padr)
             }
         }
         else{
-            vmx_vcpu_thash(vcpu, vadr, &vhpt_adr);
+            vhpt_adr = vmx_vcpu_thash(vcpu, vadr);
             data = vtlb_lookup(vcpu, vhpt_adr, DSIDE_TLB);
             if(data){
                 if(vpsr.ic){
@@ -753,20 +762,21 @@ IA64FAULT vmx_vcpu_tpa(VCPU *vcpu, u64 vadr, u64 *padr)
     }
 }
 
-IA64FAULT vmx_vcpu_tak(VCPU *vcpu, u64 vadr, u64 *key)
+u64 vmx_vcpu_tak(VCPU *vcpu, u64 vadr)
 {
     thash_data_t *data;
     PTA vpta;
-    vmx_vcpu_get_pta(vcpu, &vpta.val);
+    u64 key;
+    vpta.val = vmx_vcpu_get_pta(vcpu);
     if(vpta.vf==0 || unimplemented_gva(vcpu, vadr)){
-        *key=1;
-        return IA64_NO_FAULT;
+        key=1;
+        return key;
     }
     data = vtlb_lookup(vcpu, vadr, DSIDE_TLB);
     if(!data||!data->p){
-        *key=1;
+        key = 1;
     }else{
-        *key=data->key;
+        key = data->key;
     }
-    return IA64_NO_FAULT;
+    return key;
 }
