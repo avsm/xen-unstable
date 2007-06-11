@@ -52,6 +52,14 @@ typedef union {
 #define	IA64_PTA_LFMT		(1UL << IA64_PTA_VF_BIT)
 #define	IA64_PTA_SZ(x)		(x##UL << IA64_PTA_SZ_BIT)
 
+#define IA64_PSR_NON_VIRT_BITS				\
+	(IA64_PSR_BE | IA64_PSR_UP | IA64_PSR_AC |	\
+	 IA64_PSR_MFL| IA64_PSR_MFH| IA64_PSR_PK |	\
+	 IA64_PSR_DFL| IA64_PSR_SP | IA64_PSR_DB |	\
+	 IA64_PSR_LP | IA64_PSR_TB | IA64_PSR_ID |	\
+	 IA64_PSR_DA | IA64_PSR_DD | IA64_PSR_SS |	\
+	 IA64_PSR_RI | IA64_PSR_ED | IA64_PSR_IA)
+
 unsigned long vcpu_verbose = 0;
 
 /**************************************************************************
@@ -448,32 +456,101 @@ IA64FAULT vcpu_set_psr_l(VCPU * vcpu, u64 val)
 	return IA64_NO_FAULT;
 }
 
-IA64FAULT vcpu_get_psr(VCPU * vcpu, u64 * pval)
+IA64FAULT vcpu_set_psr(VCPU * vcpu, u64 val)
 {
+	IA64_PSR newpsr, vpsr;
 	REGS *regs = vcpu_regs(vcpu);
-	struct ia64_psr newpsr;
+	u64 enabling_interrupts = 0;
 
-	newpsr = *(struct ia64_psr *)&regs->cr_ipsr;
-	if (!vcpu->vcpu_info->evtchn_upcall_mask)
-		newpsr.i = 1;
-	else
-		newpsr.i = 0;
-	if (PSCB(vcpu, interrupt_collection_enabled))
-		newpsr.ic = 1;
-	else
-		newpsr.ic = 0;
-	if (PSCB(vcpu, metaphysical_mode))
-		newpsr.dt = 0;
-	else
-		newpsr.dt = 1;
-	if (PSCB(vcpu, vpsr_pp))
-		newpsr.pp = 1;
-	else
-		newpsr.pp = 0;
-	newpsr.dfh = PSCB(vcpu, vpsr_dfh);
+	/* Copy non-virtualized bits.  */
+	newpsr.val = val & IA64_PSR_NON_VIRT_BITS;
 
-	*pval = *(unsigned long *)&newpsr;
-	*pval &= (MASK(0, 32) | MASK(35, 2));
+	/* Bits forced to 1 (psr.si, psr.is and psr.mc are forced to 0)  */
+	newpsr.val |= IA64_PSR_DI;
+
+	newpsr.val |= IA64_PSR_I  | IA64_PSR_IC | IA64_PSR_DT | IA64_PSR_RT |
+		      IA64_PSR_IT | IA64_PSR_BN | IA64_PSR_DI | IA64_PSR_PP;
+
+	vpsr.val = val;
+
+	if (val & IA64_PSR_DFH) {
+		newpsr.dfh = 1;
+		PSCB(vcpu, vpsr_dfh) = 1;
+	} else {
+		newpsr.dfh = PSCB(vcpu, hpsr_dfh);
+		PSCB(vcpu, vpsr_dfh) = 0;
+	}
+
+	PSCB(vcpu, vpsr_pp) = vpsr.pp;
+
+	if (vpsr.i) {
+		if (vcpu->vcpu_info->evtchn_upcall_mask)
+			enabling_interrupts = 1;
+
+		vcpu->vcpu_info->evtchn_upcall_mask = 0;
+
+		if (enabling_interrupts &&
+		    vcpu_check_pending_interrupts(vcpu) != SPURIOUS_VECTOR)
+			PSCB(vcpu, pending_interruption) = 1;
+	} else
+		vcpu->vcpu_info->evtchn_upcall_mask = 1;
+
+	PSCB(vcpu, interrupt_collection_enabled) = vpsr.ic;
+	vcpu_set_metaphysical_mode(vcpu, !(vpsr.dt && vpsr.rt && vpsr.it));
+
+	newpsr.cpl |= vpsr.cpl | 2;
+
+	if (PSCB(vcpu, banknum)	!= vpsr.bn) {
+		if (vpsr.bn)
+			vcpu_bsw1(vcpu);
+		else
+			vcpu_bsw0(vcpu);
+	}
+
+	regs->cr_ipsr = newpsr.val;
+
+	return IA64_NO_FAULT;
+}
+
+u64 vcpu_get_psr(VCPU * vcpu)
+{
+ 	REGS *regs = vcpu_regs(vcpu);
+	PSR newpsr;
+	PSR ipsr;
+
+	ipsr.i64 = regs->cr_ipsr;
+
+	/* Copy non-virtualized bits.  */
+	newpsr.i64 = ipsr.i64 & IA64_PSR_NON_VIRT_BITS;
+
+	/* Bits forced to 1 (psr.si and psr.is are forced to 0)  */
+	newpsr.i64 |= IA64_PSR_DI;
+
+	/* System mask.  */
+	newpsr.ia64_psr.ic = PSCB(vcpu, interrupt_collection_enabled);
+	newpsr.ia64_psr.i = !vcpu->vcpu_info->evtchn_upcall_mask;
+
+	if (!PSCB(vcpu, metaphysical_mode))
+		newpsr.i64 |= IA64_PSR_DT | IA64_PSR_RT | IA64_PSR_IT;
+
+	newpsr.ia64_psr.dfh = PSCB(vcpu, vpsr_dfh);
+	newpsr.ia64_psr.pp = PSCB(vcpu, vpsr_pp);
+
+	/* Fool cpl.  */
+	if (ipsr.ia64_psr.cpl < 3)
+		newpsr.ia64_psr.cpl = 0;
+	else
+		newpsr.ia64_psr.cpl = 3;
+
+	newpsr.ia64_psr.bn = PSCB(vcpu, banknum);
+	
+	return newpsr.i64;
+}
+
+IA64FAULT vcpu_get_psr_masked(VCPU * vcpu, u64 * pval)
+{
+  	u64 psr = vcpu_get_psr(vcpu);
+	*pval = psr & (MASK(0, 32) | MASK(35, 2));
 	return IA64_NO_FAULT;
 }
 
@@ -485,30 +562,6 @@ BOOLEAN vcpu_get_psr_ic(VCPU * vcpu)
 BOOLEAN vcpu_get_psr_i(VCPU * vcpu)
 {
 	return !vcpu->vcpu_info->evtchn_upcall_mask;
-}
-
-u64 vcpu_get_ipsr_int_state(VCPU * vcpu, u64 prevpsr)
-{
-	u64 dcr = PSCB(vcpu, dcr);
-	PSR psr;
-
-	//printk("*** vcpu_get_ipsr_int_state (0x%016lx)...\n",prevpsr);
-	psr.i64 = prevpsr;
-	psr.ia64_psr.pp = 0;
-	if (dcr & IA64_DCR_PP)
-		psr.ia64_psr.pp = 1;
-	psr.ia64_psr.ic = PSCB(vcpu, interrupt_collection_enabled);
-	psr.ia64_psr.i = !vcpu->vcpu_info->evtchn_upcall_mask;
-	psr.ia64_psr.bn = PSCB(vcpu, banknum);
-	psr.ia64_psr.dfh = PSCB(vcpu, vpsr_dfh);
-	psr.ia64_psr.dt = 1;
-	psr.ia64_psr.it = 1;
-	psr.ia64_psr.rt = 1;
-	if (psr.ia64_psr.cpl == 2)
-		psr.ia64_psr.cpl = 0;	// !!!! fool domain
-	// psr.pk = 1;
-	//printk("returns 0x%016lx...\n",psr.i64);
-	return psr.i64;
 }
 
 /**************************************************************************
@@ -1333,44 +1386,17 @@ IA64FAULT vcpu_force_data_miss(VCPU * vcpu, u64 ifa)
 
 IA64FAULT vcpu_rfi(VCPU * vcpu)
 {
-	// TODO: Only allowed for current vcpu
-	PSR psr;
-	u64 int_enable, ifs;
+	u64 ifs;
 	REGS *regs = vcpu_regs(vcpu);
-
-	psr.i64 = PSCB(vcpu, ipsr);
-	if (psr.ia64_psr.cpl < 3)
-		psr.ia64_psr.cpl = 2;
-	int_enable = psr.ia64_psr.i;
-	if (psr.ia64_psr.dfh) {
-		PSCB(vcpu, vpsr_dfh) = 1;
-	} else {
-		psr.ia64_psr.dfh = PSCB(vcpu, hpsr_dfh);
-		PSCB(vcpu, vpsr_dfh) = 0;
-	}
-	if (psr.ia64_psr.ic)
-		PSCB(vcpu, interrupt_collection_enabled) = 1;
-	if (psr.ia64_psr.dt && psr.ia64_psr.rt && psr.ia64_psr.it)
-		vcpu_set_metaphysical_mode(vcpu, FALSE);
-	else
-		vcpu_set_metaphysical_mode(vcpu, TRUE);
-	psr.ia64_psr.ic = 1;
-	psr.ia64_psr.i = 1;
-	psr.ia64_psr.dt = 1;
-	psr.ia64_psr.rt = 1;
-	psr.ia64_psr.it = 1;
-	psr.ia64_psr.bn = 1;
-	//psr.pk = 1;  // checking pkeys shouldn't be a problem but seems broken
+	
+	vcpu_set_psr(vcpu, PSCB(vcpu, ipsr));
 
 	ifs = PSCB(vcpu, ifs);
 	if (ifs & 0x8000000000000000UL) 
 		regs->cr_ifs = ifs;
 
-	regs->cr_ipsr = psr.i64;
 	regs->cr_iip = PSCB(vcpu, iip);
-	PSCB(vcpu, interrupt_collection_enabled) = 1;
-	vcpu_bsw1(vcpu);
-	vcpu->vcpu_info->evtchn_upcall_mask = !int_enable;
+
 	return IA64_NO_FAULT;
 }
 
@@ -2174,7 +2200,6 @@ vcpu_itc_no_srlz(VCPU * vcpu, u64 IorD, u64 vaddr, u64 pte,
 	ia64_itc(IorD, vaddr, pte, ps);	// FIXME: look for bigger mappings
 	ia64_set_psr(psr);
 	// ia64_srlz_i(); // no srls req'd, will rfi later
-#ifdef VHPT_GLOBAL
 	if (vcpu->domain == dom0 && ((vaddr >> 61) == 7)) {
 		// FIXME: this is dangerous... vhpt_flush_address ensures these
 		// addresses never get flushed.  More work needed if this
@@ -2189,7 +2214,6 @@ vcpu_itc_no_srlz(VCPU * vcpu, u64 IorD, u64 vaddr, u64 pte,
 	// PAGE_SIZE mapping in the vhpt for now, else purging is complicated
 	else
 		vhpt_insert(vaddr, pte, PAGE_SHIFT << 2);
-#endif
 }
 
 IA64FAULT vcpu_itc_d(VCPU * vcpu, u64 pte, u64 itir, u64 ifa)

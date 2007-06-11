@@ -89,7 +89,7 @@ long arch_do_domctl(xen_domctl_t *op, XEN_GUEST_HANDLE(xen_domctl_t) u_domctl)
                 ds->flags |= XEN_DOMAINSETUP_hvm_guest;
             /* Set params.  */
             ds->bp = 0;		/* unknown.  */
-            ds->maxmem = 0; /* unknown.  */
+            ds->maxmem = d->arch.convmem_end;
             ds->xsi_va = d->arch.shared_info_va;
             ds->hypercall_imm = d->arch.breakimm;
             /* Copy back.  */
@@ -101,34 +101,35 @@ long arch_do_domctl(xen_domctl_t *op, XEN_GUEST_HANDLE(xen_domctl_t) u_domctl)
                 if (!vmx_enabled) {
                     printk("No VMX hardware feature for vmx domain.\n");
                     ret = -EINVAL;
-                    break;
+                } else {
+                    d->arch.is_vti = 1;
+                    vmx_setup_platform(d);
                 }
-                d->arch.is_vti = 1;
-                vmx_setup_platform(d);
             }
             else {
-                dom_fw_setup(d, ds->bp, ds->maxmem);
-                if (ds->xsi_va)
-                    d->arch.shared_info_va = ds->xsi_va;
                 if (ds->hypercall_imm) {
+                    /* dom_fw_setup() reads d->arch.breakimm */
                     struct vcpu *v;
                     d->arch.breakimm = ds->hypercall_imm;
                     for_each_vcpu (d, v)
                         v->arch.breakimm = d->arch.breakimm;
                 }
-                {
-                    /*
-                     * XXX IA64_SHARED_INFO_PADDR
-                     * assign these pages into guest psudo physical address
-                     * space for dom0 to map this page by gmfn.
-                     * this is necessary for domain build, save, restore and 
-                     * dump-core.
-                     */
-                    unsigned long i;
-                    for (i = 0; i < XSI_SIZE; i += PAGE_SIZE)
-                        assign_domain_page(d, IA64_SHARED_INFO_PADDR + i,
-                                           virt_to_maddr(d->shared_info + i));
-                }
+                if (ds->xsi_va)
+                    d->arch.shared_info_va = ds->xsi_va;
+                ret = dom_fw_setup(d, ds->bp, ds->maxmem);
+            }
+            if (ret == 0) {
+                /*
+                 * XXX IA64_SHARED_INFO_PADDR
+                 * assign these pages into guest psudo physical address
+                 * space for dom0 to map this page by gmfn.
+                 * this is necessary for domain build, save, restore and 
+                 * dump-core.
+                 */
+                unsigned long i;
+                for (i = 0; i < XSI_SIZE; i += PAGE_SIZE)
+                    assign_domain_page(d, IA64_SHARED_INFO_PADDR + i,
+                                       virt_to_maddr(d->shared_info + i));
             }
         }
 
@@ -352,6 +353,16 @@ dom0vp_ioremap(struct domain *d, unsigned long mpaddr, unsigned long size)
                                    ASSIGN_writable | ASSIGN_nocache);
 }
 
+static unsigned long
+dom0vp_fpswa_revision(XEN_GUEST_HANDLE(uint) revision)
+{
+    if (fpswa_interface == NULL)
+        return -ENOSYS;
+    if (copy_to_guest(revision, &fpswa_interface->revision, 1))
+        return -EFAULT;
+    return 0;
+}
+
 unsigned long
 do_dom0vp_op(unsigned long cmd,
              unsigned long arg0, unsigned long arg1, unsigned long arg2,
@@ -400,6 +411,12 @@ do_dom0vp_op(unsigned long cmd,
         XEN_GUEST_HANDLE(void) hnd;
         set_xen_guest_handle(hnd, (void*)arg1);
         ret = do_perfmon_op(arg0, hnd, arg2);
+        break;
+    }
+    case IA64_DOM0VP_fpswa_revision: {
+        XEN_GUEST_HANDLE(uint) hnd;
+        set_xen_guest_handle(hnd, (uint*)arg0);
+        ret = dom0vp_fpswa_revision(hnd);
         break;
     }
     default:

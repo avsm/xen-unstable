@@ -84,7 +84,7 @@ static void reflect_interruption(unsigned long isr, struct pt_regs *regs,
 		check_bad_nested_interruption(isr, regs, vector);
 	PSCB(v, unat) = regs->ar_unat;	// not sure if this is really needed?
 	PSCB(v, precover_ifs) = regs->cr_ifs;
-	PSCB(v, ipsr) = vcpu_get_ipsr_int_state(v, regs->cr_ipsr);
+	PSCB(v, ipsr) = vcpu_get_psr(v);
 	vcpu_bsw0(v);
 	PSCB(v, isr) = isr;
 	PSCB(v, iip) = regs->cr_iip;
@@ -129,7 +129,7 @@ void reflect_event(void)
 		       regs->cr_ipsr, regs->cr_iip, isr, PSCB(v, iip));
 	PSCB(v, unat) = regs->ar_unat;	// not sure if this is really needed?
 	PSCB(v, precover_ifs) = regs->cr_ifs;
-	PSCB(v, ipsr) = vcpu_get_ipsr_int_state(v, regs->cr_ipsr);
+	PSCB(v, ipsr) = vcpu_get_psr(v);
 	vcpu_bsw0(v);
 	PSCB(v, isr) = isr;
 	PSCB(v, iip) = regs->cr_iip;
@@ -252,7 +252,7 @@ void ia64_do_page_fault(unsigned long address, unsigned long isr,
 
 fpswa_interface_t *fpswa_interface = 0;
 
-void trap_init(void)
+void __init trap_init(void)
 {
 	if (ia64_boot_param->fpswa)
 		/* FPSWA fixup: make the interface pointer a virtual address */
@@ -666,7 +666,10 @@ ia64_handle_reflection(unsigned long ifa, struct pt_regs *regs,
 		vector = IA64_FP_TRAP_VECTOR;
 		break;
 	case 34:
-		printk("ia64_handle_reflection: handling lowerpriv trap\n");
+		if (isr & (1UL << 4))
+			printk("ia64_handle_reflection: handling "
+			       "unimplemented instruction address %s\n",
+			       (isr & (1UL<<32)) ? "fault" : "trap");
 		vector = IA64_LOWERPRIV_TRANSFER_TRAP_VECTOR;
 		break;
 	case 35:

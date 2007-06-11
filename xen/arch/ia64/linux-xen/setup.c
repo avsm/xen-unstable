@@ -506,13 +506,6 @@ setup_arch (char **cmdline_p)
 	if (early_console_setup(*cmdline_p) == 0)
 		mark_bsp_online();
 
-#ifdef XEN
-}
-
-void __init
-late_setup_arch (char **cmdline_p)
-{
-#endif
 #ifdef CONFIG_ACPI_BOOT
 	/* Initialize the ACPI boot-time table parser */
 	acpi_table_init();
@@ -525,6 +518,13 @@ late_setup_arch (char **cmdline_p)
 # endif
 #endif /* CONFIG_APCI_BOOT */
 
+#ifdef XEN
+}
+
+void __init
+late_setup_arch (char **cmdline_p)
+{
+#endif
 #ifndef XEN
 	find_memory();
 #endif
@@ -873,7 +873,7 @@ cpu_init (void)
 	cpu_data = per_cpu_init();
 
 #ifdef XEN
-	printk("cpu_init: current=%p\n", current);
+	printk(XENLOG_DEBUG "cpu_init: current=%p\n", current);
 #endif
 
 	/*

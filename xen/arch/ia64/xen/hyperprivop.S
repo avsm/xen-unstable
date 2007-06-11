@@ -1029,8 +1029,22 @@ ENTRY(slow_vcpu_rfi)
 	ld8 r22=[r22];;
 	tbit.z p6,p0=r22,63
 (p6)	br.spnt.few dispatch_break_fault ;;
-	// if vips is valid, discard current register frame
-	// don't need dorfirfi any more
+	// If vifs.v is set, we have two IFS to consider:
+	// * the guest IFS
+	// * the hypervisor IFS (validated by cover)
+	// Because IFS is copied to CFM and is used to adjust AR.BSP,
+	// virtualization of rfi is not easy.
+	// Previously there was a two steps method (a first rfi jumped to
+	// a stub which performed a new rfi).
+	// This new method discards the RS before executing the hypervisor
+	// cover.  After cover, IFS.IFM will be zero.  This IFS would simply
+	// clear CFM but not modifying AR.BSP.  Therefore the guest IFS can
+	// be used instead and there is no need of a second rfi.
+	// Discarding the RS with the following alloc instruction just clears
+	// CFM, which is safe because rfi will overwrite it.
+	// There is a drawback:	because the RS must be discarded before
+	// executing C code, emulation of rfi must go through an hyperprivop
+	// and not through normal instruction decoding.
 	alloc r22=ar.pfs,0,0,0,0
 	br.spnt.few dispatch_break_fault
 	;;
@@ -1073,23 +1087,16 @@ ENTRY(hyper_rfi)
 	ld4 r20=[r20];;
 	cmp.ne p7,p0=r20,r0
 (p7)	br.spnt.few slow_vcpu_rfi ;;
+#if 0
 	// if domain hasn't already done virtual bank switch
 	//  do it the slow way (FIXME later?)
-#if 0
 	adds r20=XSI_BANKNUM_OFS-XSI_PSR_IC_OFS,r18 ;;
 	ld4 r20=[r20];;
 	cmp.eq p7,p0=r20,r0
 (p7)	br.spnt.few slow_vcpu_rfi ;;
 #endif
-	// validate vcr.iip, if in Xen range, do it the slow way
 	adds r20=XSI_IIP_OFS-XSI_PSR_IC_OFS,r18 ;;
 	ld8 r22=[r20];;
-	movl r23=HYPERVISOR_VIRT_START
-	movl r24=HYPERVISOR_VIRT_END;;
-	cmp.ltu p0,p7=r22,r23 ;;	// if !(iip<low) &&
-(p7)	cmp.geu p0,p7=r22,r24 ;;	//    !(iip>=high)
-(p7)	br.spnt.few slow_vcpu_rfi ;;
-
 1:	// OK now, let's do an rfi.
 #ifdef FAST_HYPERPRIVOP_CNT
 	movl r20=FAST_HYPERPRIVOP_PERFC(HYPERPRIVOP_RFI);;
