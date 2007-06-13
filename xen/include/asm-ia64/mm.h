@@ -118,9 +118,9 @@ struct page_info
 #define is_xen_heap_frame(pfn) ((page_to_maddr(pfn) < xenheap_phys_end) \
 				 && (page_to_maddr(pfn) >= xen_pstart))
 
-extern void *xen_heap_start;
-#define __pickle(a)	((unsigned long)a - (unsigned long)xen_heap_start)
-#define __unpickle(a)	(void *)(a + xen_heap_start)
+extern void* xen_pickle_offset;
+#define __pickle(a)	((unsigned long)a - (unsigned long)xen_pickle_offset)
+#define __unpickle(a)	(void *)(a + xen_pickle_offset)
 
 static inline struct domain *unpickle_domptr(u64 _d)
 { return (_d == 0) ? NULL : __unpickle(_d); }
@@ -506,6 +506,6 @@ int steal_page(
 
 #define domain_clamp_alloc_bitsize(d, b) (b)
 
-#define domain_get_maximum_gpfn(d) (-ENOSYS)
+unsigned long domain_get_maximum_gpfn(struct domain *d);
 
 #endif /* __ASM_IA64_MM_H__ */

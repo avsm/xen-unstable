@@ -187,6 +187,13 @@ extern unsigned long ia64_iobase;
 
 static struct domain *dom_xen, *dom_io;
 
+/*
+ * This number is bigger than DOMID_SELF, DOMID_XEN and DOMID_IO.
+ * If more reserved domain ids are introduced, this might be increased.
+ */
+#define DOMID_P2M       (0x7FF8U)
+static struct domain *dom_p2m;
+
 // followings are stolen from arch_init_memory() @ xen/arch/x86/mm.c
 void
 alloc_dom_xen_and_dom_io(void)
@@ -227,11 +234,8 @@ mm_teardown_pte(struct domain* d, volatile pte_t* pte, unsigned long offset)
     if (!mfn_valid(mfn))
         return;
     page = mfn_to_page(mfn);
-    // page might be pte page for p2m exposing. check it.
-    if (page_get_owner(page) == NULL) {
-        BUG_ON(page->count_info != 0);
-        return;
-    }
+    BUG_ON(page_get_owner(page) == NULL);
+
     // struct page_info corresponding to mfn may exist or not depending
     // on CONFIG_VIRTUAL_FRAME_TABLE.
     // The above check is too easy.
@@ -370,6 +374,12 @@ mm_final_teardown(struct domain* d)
     mm_p2m_teardown(d);
 }
 
+unsigned long
+domain_get_maximum_gpfn(struct domain *d)
+{
+    return (d->arch.convmem_end + PAGE_SIZE - 1) >> PAGE_SHIFT;
+}
+
 // stolen from share_xen_page_with_guest() in xen/arch/x86/mm.c
 void
 share_xen_page_with_guest(struct page_info *page,
@@ -492,9 +502,22 @@ u64 translate_domain_pte(u64 pteval, u64 address, u64 itir__, u64* logps,
 			   This can happen when domU tries to touch i/o
 			   port space.  Also prevents possible address
 			   aliasing issues.  */
-			if (!(mpaddr - IO_PORTS_PADDR < IO_PORTS_SIZE))
-				gdprintk(XENLOG_WARNING, "Warning: UC to WB "
-				         "for mpaddr=%lx\n", mpaddr);
+			if (!(mpaddr - IO_PORTS_PADDR < IO_PORTS_SIZE)) {
+				u64 ucwb;
+				
+				/*
+				 * If dom0 page has both UC & WB attributes
+				 * don't warn about attempted UC access.
+				 */
+				ucwb = efi_mem_attribute(mpaddr, PAGE_SIZE);
+				ucwb &= EFI_MEMORY_UC | EFI_MEMORY_WB;
+				ucwb ^= EFI_MEMORY_UC | EFI_MEMORY_WB;
+
+				if (d != dom0 || ucwb != 0)
+					gdprintk(XENLOG_WARNING, "Warning: UC"
+						 " to WB for mpaddr=%lx\n",
+						 mpaddr);
+			}
 			pteval = (pteval & ~_PAGE_MA_MASK) | _PAGE_MA_WB;
 		}
 		break;
@@ -779,7 +802,7 @@ assign_new_domain_page(struct domain *d, unsigned long mpaddr)
     return __assign_new_domain_page(d, mpaddr, pte);
 }
 
-void
+void __init
 assign_new_domain0_page(struct domain *d, unsigned long mpaddr)
 {
     volatile pte_t *pte;
@@ -867,81 +890,144 @@ assign_domain_page(struct domain *d,
 }
 
 int
-ioports_permit_access(struct domain *d, unsigned long fp, unsigned long lp)
+ioports_permit_access(struct domain *d, unsigned int fp, unsigned int lp)
 {
+    struct io_space *space;
+    unsigned long mmio_start, mmio_end, mach_start;
     int ret;
-    unsigned long off;
-    unsigned long fp_offset;
-    unsigned long lp_offset;
 
+    if (IO_SPACE_NR(fp) >= num_io_spaces) {
+        dprintk(XENLOG_WARNING, "Unknown I/O Port range 0x%x - 0x%x\n", fp, lp);
+        return -EFAULT;
+    }
+
+    /*
+     * The ioport_cap rangeset tracks the I/O port address including
+     * the port space ID.  This means port space IDs need to match
+     * between Xen and dom0.  This is also a requirement because
+     * the hypercall to pass these port ranges only uses a u32.
+     *
+     * NB - non-dom0 driver domains may only have a subset of the
+     * I/O port spaces and thus will number port spaces differently.
+     * This is ok, they don't make use of this interface.
+     */
     ret = rangeset_add_range(d->arch.ioport_caps, fp, lp);
     if (ret != 0)
         return ret;
 
-    /* Domain 0 doesn't virtualize IO ports space. */
-    if (d == dom0)
+    space = &io_space[IO_SPACE_NR(fp)];
+
+    /* Legacy I/O on dom0 is already setup */
+    if (d == dom0 && space == &io_space[0])
         return 0;
 
-    fp_offset = IO_SPACE_SPARSE_ENCODING(fp) & ~PAGE_MASK;
-    lp_offset = PAGE_ALIGN(IO_SPACE_SPARSE_ENCODING(lp));
+    fp = IO_SPACE_PORT(fp);
+    lp = IO_SPACE_PORT(lp);
 
-    for (off = fp_offset; off <= lp_offset; off += PAGE_SIZE)
-        (void)__assign_domain_page(d, IO_PORTS_PADDR + off,
-                                   __pa(ia64_iobase) + off, ASSIGN_nocache);
+    if (space->sparse) {
+        mmio_start = IO_SPACE_SPARSE_ENCODING(fp) & ~PAGE_MASK;
+        mmio_end = PAGE_ALIGN(IO_SPACE_SPARSE_ENCODING(lp));
+    } else {
+        mmio_start = fp & ~PAGE_MASK;
+        mmio_end = PAGE_ALIGN(lp);
+    }
+
+    /*
+     * The "machine first port" is not necessarily identity mapped
+     * to the guest first port.  At least for the legacy range.
+     */
+    mach_start = mmio_start | __pa(space->mmio_base);
+
+    if (space == &io_space[0]) {
+        mmio_start |= IO_PORTS_PADDR;
+        mmio_end |= IO_PORTS_PADDR;
+    } else {
+        mmio_start |= __pa(space->mmio_base);
+        mmio_end |= __pa(space->mmio_base);
+    }
+
+    while (mmio_start <= mmio_end) {
+        (void)__assign_domain_page(d, mmio_start, mach_start, ASSIGN_nocache); 
+        mmio_start += PAGE_SIZE;
+        mach_start += PAGE_SIZE;
+    }
 
     return 0;
 }
 
 static int
-ioports_has_allowed(struct domain *d, unsigned long fp, unsigned long lp)
+ioports_has_allowed(struct domain *d, unsigned int fp, unsigned int lp)
 {
-    unsigned long i;
-    for (i = fp; i < lp; i++)
-        if (rangeset_contains_singleton(d->arch.ioport_caps, i))
+    for (; fp < lp; fp++)
+        if (rangeset_contains_singleton(d->arch.ioport_caps, fp))
             return 1;
+
     return 0;
 }
 
 int
-ioports_deny_access(struct domain *d, unsigned long fp, unsigned long lp)
+ioports_deny_access(struct domain *d, unsigned int fp, unsigned int lp)
 {
     int ret;
     struct mm_struct *mm = &d->arch.mm;
-    unsigned long off;
-    unsigned long io_ports_base;
-    unsigned long fp_offset;
-    unsigned long lp_offset;
+    unsigned long mmio_start, mmio_end, mmio_base;
+    unsigned int fp_base, lp_base;
+    struct io_space *space;
+
+    if (IO_SPACE_NR(fp) >= num_io_spaces) {
+        dprintk(XENLOG_WARNING, "Unknown I/O Port range 0x%x - 0x%x\n", fp, lp);
+        return -EFAULT;
+    }
 
     ret = rangeset_remove_range(d->arch.ioport_caps, fp, lp);
     if (ret != 0)
         return ret;
-    if (d == dom0)
-        io_ports_base = __pa(ia64_iobase);
+
+    space = &io_space[IO_SPACE_NR(fp)];
+    fp_base = IO_SPACE_PORT(fp);
+    lp_base = IO_SPACE_PORT(lp);
+
+    if (space->sparse) {
+        mmio_start = IO_SPACE_SPARSE_ENCODING(fp_base) & ~PAGE_MASK;
+        mmio_end = PAGE_ALIGN(IO_SPACE_SPARSE_ENCODING(lp_base));
+    } else {
+        mmio_start = fp_base & ~PAGE_MASK;
+        mmio_end = PAGE_ALIGN(lp_base);
+    }
+
+    if (space == &io_space[0] && d != dom0)
+        mmio_base = IO_PORTS_PADDR;
     else
-        io_ports_base = IO_PORTS_PADDR;
+        mmio_base = __pa(space->mmio_base);
 
-    fp_offset = IO_SPACE_SPARSE_ENCODING(fp) & PAGE_MASK;
-    lp_offset = PAGE_ALIGN(IO_SPACE_SPARSE_ENCODING(lp));
-
-    for (off = fp_offset; off < lp_offset; off += PAGE_SIZE) {
-        unsigned long mpaddr = io_ports_base + off;
-        unsigned long port;
+    for (; mmio_start < mmio_end; mmio_start += PAGE_SIZE) {
+        unsigned int port, range;
+        unsigned long mpaddr;
         volatile pte_t *pte;
         pte_t old_pte;
 
-        port = IO_SPACE_SPARSE_DECODING (off);
-        if (port < fp || port + IO_SPACE_SPARSE_PORTS_PER_PAGE - 1 > lp) {
+        if (space->sparse) {
+            port = IO_SPACE_SPARSE_DECODING(mmio_start);
+            range = IO_SPACE_SPARSE_PORTS_PER_PAGE - 1;
+        } else {
+            port = mmio_start;
+            range = PAGE_SIZE - 1;
+        }
+
+        port |= IO_SPACE_BASE(IO_SPACE_NR(fp));
+
+        if (port < fp || port + range > lp) {
             /* Maybe this covers an allowed port.  */
-            if (ioports_has_allowed(d, port,
-                                    port + IO_SPACE_SPARSE_PORTS_PER_PAGE - 1))
+            if (ioports_has_allowed(d, port, port + range))
                 continue;
         }
 
+        mpaddr = mmio_start | mmio_base;
         pte = lookup_noalloc_domain_pte_none(d, mpaddr);
         BUG_ON(pte == NULL);
         BUG_ON(pte_none(*pte));
 
-        // clear pte
+        /* clear pte */
         old_pte = ptep_get_and_clear(mm, mpaddr, pte);
     }
     domain_flush_vtlb_all(d);
@@ -1310,7 +1396,7 @@ __dom0vp_add_physmap(struct domain* d, unsigned long gpfn,
             break;
         default:
             gdprintk(XENLOG_INFO, "d 0x%p domid %d "
-                    "pgfn 0x%lx mfn_or_gmfn 0x%lx flags 0x%lx domid %d\n",
+                    "gpfn 0x%lx mfn_or_gmfn 0x%lx flags 0x%lx domid %d\n",
                     d, d->domain_id, gpfn, mfn_or_gmfn, flags, domid);
             return -ESRCH;
         }
@@ -1360,10 +1446,19 @@ dom0vp_add_physmap_with_gmfn(struct domain* d, unsigned long gpfn,
 #ifdef CONFIG_XEN_IA64_EXPOSE_P2M
 static struct page_info* p2m_pte_zero_page = NULL;
 
-void
+/* This must called before dom0 p2m table allocation */
+void __init
 expose_p2m_init(void)
 {
     pte_t* pte;
+
+    /*
+     * Initialise our DOMID_P2M domain.
+     * This domain owns m2p table pages.
+     */
+    dom_p2m = alloc_domain(DOMID_P2M);
+    BUG_ON(dom_p2m == NULL);
+    dom_p2m->max_pages = ~0U;
 
     pte = pte_alloc_one_kernel(NULL, 0);
     BUG_ON(pte == NULL);
@@ -1374,13 +1469,8 @@ expose_p2m_init(void)
 static int
 expose_p2m_page(struct domain* d, unsigned long mpaddr, struct page_info* page)
 {
-    // we can't get_page(page) here.
-    // pte page is allocated form xen heap.(see pte_alloc_one_kernel().)
-    // so that the page has NULL page owner and it's reference count
-    // is useless.
-    // see also mm_teardown_pte()'s page_get_owner() == NULL check.
-    BUG_ON(page_get_owner(page) != NULL);
-
+    int ret = get_page(page, dom_p2m);
+    BUG_ON(ret != 1);
     return __assign_domain_page(d, mpaddr, page_to_maddr(page),
                                 ASSIGN_readonly);
 }
@@ -1520,13 +1610,55 @@ replace_grant_host_mapping(unsigned long gpaddr,
     volatile pte_t* pte;
     unsigned long cur_arflags;
     pte_t cur_pte;
-    pte_t new_pte;
+    pte_t new_pte = __pte(0);
     pte_t old_pte;
     struct page_info* page = mfn_to_page(mfn);
+    struct page_info* new_page = NULL;
+    volatile pte_t* new_page_pte = NULL;
 
     if (new_gpaddr) {
-        gdprintk(XENLOG_INFO, "%s: new_gpaddr 0x%lx\n", __func__, new_gpaddr);
-    	return GNTST_general_error;
+        new_page_pte = lookup_noalloc_domain_pte_none(d, new_gpaddr);
+        if (likely(new_page_pte != NULL)) {
+            new_pte = ptep_get_and_clear(&d->arch.mm,
+                                         new_gpaddr, new_page_pte);
+            if (likely(pte_present(new_pte))) {
+                unsigned long new_page_mfn;
+                struct domain* page_owner;
+
+                new_page_mfn = pte_pfn(new_pte);
+                new_page = mfn_to_page(new_page_mfn);
+                page_owner = page_get_owner(new_page);
+                if (unlikely(page_owner == NULL)) {
+                    gdprintk(XENLOG_INFO,
+                             "%s: page_owner == NULL "
+                             "gpaddr 0x%lx mfn 0x%lx "
+                             "new_gpaddr 0x%lx mfn 0x%lx\n",
+                             __func__, gpaddr, mfn, new_gpaddr, new_page_mfn);
+                    new_page = NULL; /* prevent domain_put_page() */
+                    goto out;
+                }
+
+                /*
+		 * domain_put_page(clear_PGC_allcoated = 0)
+                 * doesn't decrement refcount of page with
+                 * pte_ptc_allocated() = 1. Be carefull.
+		 */
+                if (unlikely(!pte_pgc_allocated(new_pte))) {
+                    /* domain_put_page() decrements page refcount. adjust it. */
+                    if (get_page(new_page, page_owner)) {
+                        gdprintk(XENLOG_INFO,
+                                 "%s: get_page() failed. "
+                                 "gpaddr 0x%lx mfn 0x%lx "
+                                 "new_gpaddr 0x%lx mfn 0x%lx\n",
+                                 __func__, gpaddr, mfn,
+                                 new_gpaddr, new_page_mfn);
+                        goto out;
+                    }
+                }
+                domain_put_page(d, new_gpaddr, new_page_pte, new_pte, 0);
+            } else
+                new_pte = __pte(0);
+        }
     }
 
     if (flags & (GNTMAP_application_map | GNTMAP_contains_pte)) {
@@ -1538,7 +1670,7 @@ replace_grant_host_mapping(unsigned long gpaddr,
     if (pte == NULL) {
         gdprintk(XENLOG_INFO, "%s: gpaddr 0x%lx mfn 0x%lx\n",
                 __func__, gpaddr, mfn);
-        return GNTST_general_error;
+        goto out;
     }
 
  again:
@@ -1548,16 +1680,15 @@ replace_grant_host_mapping(unsigned long gpaddr,
         (page_get_owner(page) == d && get_gpfn_from_mfn(mfn) == gpfn)) {
         gdprintk(XENLOG_INFO, "%s: gpaddr 0x%lx mfn 0x%lx cur_pte 0x%lx\n",
                 __func__, gpaddr, mfn, pte_val(cur_pte));
-        return GNTST_general_error;
+        goto out;
     }
-    new_pte = __pte(0);
 
     old_pte = ptep_cmpxchg_rel(&d->arch.mm, gpaddr, pte, cur_pte, new_pte);
     if (unlikely(!pte_present(old_pte))) {
         gdprintk(XENLOG_INFO, "%s: gpaddr 0x%lx mfn 0x%lx"
                          " cur_pte 0x%lx old_pte 0x%lx\n",
                 __func__, gpaddr, mfn, pte_val(cur_pte), pte_val(old_pte));
-        return GNTST_general_error;
+        goto out;
     }
     if (unlikely(pte_val(cur_pte) != pte_val(old_pte))) {
         if (pte_pfn(old_pte) == mfn) {
@@ -1566,7 +1697,7 @@ replace_grant_host_mapping(unsigned long gpaddr,
         gdprintk(XENLOG_INFO, "%s gpaddr 0x%lx mfn 0x%lx cur_pte "
                 "0x%lx old_pte 0x%lx\n",
                 __func__, gpaddr, mfn, pte_val(cur_pte), pte_val(old_pte));
-        return GNTST_general_error;
+        goto out;
     }
     BUG_ON(pte_pfn(old_pte) != mfn);
 
@@ -1578,6 +1709,11 @@ replace_grant_host_mapping(unsigned long gpaddr,
 
     perfc_incr(replace_grant_host_mapping);
     return GNTST_okay;
+
+ out:
+    if (new_page)
+        domain_put_page(d, new_gpaddr, new_page_pte, new_pte, 1);
+    return GNTST_general_error;
 }
 
 // heavily depends on the struct page layout.
@@ -1904,8 +2040,10 @@ boolean_param("p2m_xenheap", opt_p2m_xenheap);
 void *pgtable_quicklist_alloc(void)
 {
     void *p;
+
+    BUG_ON(dom_p2m == NULL);
     if (!opt_p2m_xenheap) {
-        struct page_info *page = alloc_domheap_page(NULL);
+        struct page_info *page = alloc_domheap_page(dom_p2m);
         if (page == NULL)
             return NULL;
         p = page_to_virt(page);
@@ -1913,16 +2051,26 @@ void *pgtable_quicklist_alloc(void)
         return p;
     }
     p = alloc_xenheap_pages(0);
-    if (p)
+    if (p) {
         clear_page(p);
+        /*
+         * This page should be read only.  At this moment, the third
+         * argument doesn't make sense.  It should be 1 when supported.
+         */
+        share_xen_page_with_guest(virt_to_page(p), dom_p2m, 0);
+    }
     return p;
 }
 
 void pgtable_quicklist_free(void *pgtable_entry)
 {
-    if (!opt_p2m_xenheap)
-        free_domheap_page(virt_to_page(pgtable_entry));
-    else
+    struct page_info* page = virt_to_page(pgtable_entry);
+
+    BUG_ON(page_get_owner(page) != dom_p2m);
+    BUG_ON(page->count_info != (1 | PGC_allocated));
+
+    put_page(page);
+    if (opt_p2m_xenheap)
         free_xenheap_page(pgtable_entry);
 }
 

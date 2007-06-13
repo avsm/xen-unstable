@@ -1,8 +1,6 @@
 #ifndef	_IA64_CONFIG_H_
 #define _IA64_CONFIG_H_
 
-#define VHPT_GLOBAL
-
 #undef DEBUG_PFMON
 
 // manufactured from component pieces
@@ -29,7 +27,7 @@
 #define NR_CPUS 64
 #define CONFIG_NUMA
 #define CONFIG_ACPI_NUMA
-#define NODES_SHIFT 3
+#define NODES_SHIFT 8
 #define MAX_NUMNODES (1 << NODES_SHIFT)
 #define NR_NODE_MEMBLKS (MAX_NUMNODES*2)
 #define MAX_PXM_DOMAINS 256
@@ -43,6 +41,8 @@
 #define supervisor_mode_kernel (0)
 
 #define CONFIG_DMA_BITSIZE 32
+
+#define PADDR_BITS	48
 
 /* If PERFC is used, include privop maps.  */
 #ifdef PERF_COUNTERS
@@ -83,8 +83,6 @@ typedef unsigned long paddr_t;
 extern unsigned long xenheap_phys_end;
 extern unsigned long xen_pstart;
 extern unsigned long xenheap_size;
-//extern struct domain *dom0;
-extern unsigned long dom0_size;
 
 // from linux/include/linux/mm.h
 extern struct page_info *mem_map;

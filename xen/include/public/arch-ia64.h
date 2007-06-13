@@ -79,6 +79,10 @@ typedef unsigned long xen_ulong_t;
 #define MEM_M   (1UL << 20)
 #define MEM_K   (1UL << 10)
 
+/* Guest physical address of IO ports space.  */
+#define IO_PORTS_PADDR          0x00000ffffc000000UL
+#define IO_PORTS_SIZE           0x0000000004000000UL
+
 #define MMIO_START       (3 * MEM_G)
 #define MMIO_SIZE        (512 * MEM_M)
 
@@ -344,7 +348,12 @@ struct arch_shared_info {
     /* Interrupt vector for event channel.  */
     int evtchn_vector;
 
-    uint64_t pad[32];
+    /* PFN of memmap_info page */
+    unsigned int memmap_info_num_pages;/* currently only = 1 case is
+                                          supported. */
+    unsigned long memmap_info_pfn;
+
+    uint64_t pad[31];
 };
 typedef struct arch_shared_info arch_shared_info_t;
 
@@ -460,8 +469,18 @@ struct vcpu_guest_context_regs {
 
         struct vcpu_tr_regs tr;
 
+#if 0
+	/*
+	 * The vcpu_guest_context structure is allocated on the stack in
+	 * a few places.  With this array for RBS storage, that structure
+	 * is a bit over 21k.  It looks like maybe we're blowing the stack
+	 * and causing rather random looking failures on a couple systems.
+	 * Remove since we're not actually using it for now.
+	 */
+
         /* Note: loadrs is 2**14 bytes == 2**11 slots.  */
         unsigned long rbs[2048];
+#endif
 };
 
 struct vcpu_guest_context {
@@ -508,6 +527,12 @@ DEFINE_XEN_GUEST_HANDLE(vcpu_guest_context_t);
 
 /* gmfn version of IA64_DOM0VP_add_physmap */
 #define IA64_DOM0VP_add_physmap_with_gmfn       9
+
+/* get fpswa revision */
+#define IA64_DOM0VP_fpswa_revision      10
+
+/* Add an I/O port space range */
+#define IA64_DOM0VP_add_io_space        11
 
 // flags for page assignement to pseudo physical address space
 #define _ASSIGN_readonly                0

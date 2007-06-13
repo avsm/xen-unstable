@@ -29,11 +29,12 @@
 #include <xen/softirq.h>
 #include <xen/rcupdate.h>
 #include <acm/acm_hooks.h>
+#include <asm/sn/simulator.h>
 
 unsigned long xenheap_phys_end, total_pages;
 
 char saved_command_line[COMMAND_LINE_SIZE];
-char dom0_command_line[COMMAND_LINE_SIZE];
+char __initdata dom0_command_line[COMMAND_LINE_SIZE];
 
 cpumask_t cpu_present_map;
 
@@ -58,17 +59,17 @@ static int opt_nosmp;
 boolean_param("nosmp", opt_nosmp);
 
 /* maxcpus: maximum number of CPUs to activate. */
-static unsigned int max_cpus = NR_CPUS;
+static unsigned int __initdata max_cpus = NR_CPUS;
 integer_param("maxcpus", max_cpus); 
 
 /* xencons: if true enable xenconsole input (and irq).
    Note: you have to disable 8250 serials in domains (to avoid use of the
    same resource).  */
-static int opt_xencons = 1;
+static int __initdata opt_xencons = 1;
 integer_param("xencons", opt_xencons);
 
 /* Toggle to allow non-legacy xencons UARTs to run in polling mode */
-static int opt_xencons_poll;
+static int __initdata opt_xencons_poll;
 boolean_param("xencons_poll", opt_xencons_poll);
 
 /*
@@ -85,9 +86,9 @@ unsigned int opt_xenheap_megabytes = XENHEAP_DEFAULT_MB;
 unsigned long xenheap_size = XENHEAP_DEFAULT_SIZE;
 extern long running_on_sim;
 unsigned long xen_pstart;
-void *xen_heap_start __read_mostly;
+void *xen_pickle_offset __read_mostly;
 
-static int
+static int __init
 xen_count_pages(u64 start, u64 end, void *arg)
 {
     unsigned long *count = arg;
@@ -119,7 +120,7 @@ static void __init do_initcalls(void)
  */
 static char null[4] = { 0 };
 
-void early_cmdline_parse(char **cmdline_p)
+void __init early_cmdline_parse(char **cmdline_p)
 {
     char *guest_cmd;
     static const char * const split = "--";
@@ -164,11 +165,11 @@ struct ns16550_defaults ns16550_com2 = {
 };
 
 /* efi_print: print efi table at boot */
-static int opt_efi_print;
+static int __initdata opt_efi_print;
 boolean_param("efi_print", opt_efi_print);
 
 /* print EFI memory map: */
-static void
+static void __init
 efi_print(void)
 {
     void *efi_map_start, *efi_map_end;
@@ -242,7 +243,19 @@ md_overlaps(efi_memory_desc_t *md, unsigned long phys_addr)
 
 #define MD_SIZE(md) (md->num_pages << EFI_PAGE_SHIFT)
 
-void start_kernel(void)
+extern char __init_begin[], __init_end[];
+static void noinline init_done(void)
+{
+    memset(__init_begin, 0, __init_end - __init_begin);
+    flush_icache_range((unsigned long)__init_begin, (unsigned long)__init_end);
+    init_xenheap_pages(__pa(__init_begin), __pa(__init_end));
+    printk("Freed %ldkB init memory.\n",
+           (long)(__init_end-__init_begin)>>10);
+    
+    startup_cpu_idle_loop();
+}
+
+void __init start_kernel(void)
 {
     char *cmdline;
     unsigned long nr_pages;
@@ -252,6 +265,7 @@ void start_kernel(void)
     struct domain *idle_domain;
     struct vcpu *dom0_vcpu0;
     efi_memory_desc_t *kern_md, *last_md, *md;
+    void *xen_heap_start;
 #ifdef CONFIG_SMP
     int i;
 #endif
@@ -391,6 +405,14 @@ void start_kernel(void)
     efi_memmap_walk(find_max_pfn, &max_page);
     printk("find_memory: efi_memmap_walk returns max_page=%lx\n",max_page);
     efi_print();
+    
+    /*
+     * later [__init_begin, __init_end) will be freed up as xen heap
+     * so that struct domain might be allocated from the init area
+     * which is < xen_heap_start. so we can't simply set
+     * xen_pickle_offset = xen_heap_start.
+     */
+    xen_pickle_offset = ia64_imva(__init_begin);
 
     xen_heap_start = memguard_init(ia64_imva(&_end));
     printk("Before xen_heap_start: %p\n", xen_heap_start);
@@ -411,12 +433,12 @@ void start_kernel(void)
 
     alloc_dom0();
 
-    end_boot_allocator();
-
     init_xenheap_pages(__pa(xen_heap_start), xenheap_phys_end);
     printk("Xen heap: %luMB (%lukB)\n",
 	(xenheap_phys_end-__pa(xen_heap_start)) >> 20,
 	(xenheap_phys_end-__pa(xen_heap_start)) >> 10);
+
+    end_boot_allocator();
 
     late_setup_arch(&cmdline);
 
@@ -532,7 +554,7 @@ printk("num_online_cpus=%d, max_cpus=%d\n",num_online_cpus(),max_cpus);
   			0) != 0)
         panic("Could not set up DOM0 guest OS\n");
 
-    if (!running_on_sim)  // slow on ski and pages are pre-initialized to zero
+    if (!running_on_sim && !IS_MEDUSA())  // slow on ski and pages are pre-initialized to zero
 	scrub_heap_pages();
 
     init_trace_bufs();
@@ -546,7 +568,7 @@ printk("num_online_cpus=%d, max_cpus=%d\n",num_online_cpus(),max_cpus);
 
     domain_unpause_by_systemcontroller(dom0);
 
-    startup_cpu_idle_loop();
+    init_done();
 }
 
 void arch_get_xen_caps(xen_capabilities_info_t *info)

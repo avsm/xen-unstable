@@ -1,8 +1,11 @@
+#include <asm/kregs.h>
 #include "xg_private.h"
 #include "xenguest.h"
 #include "xc_private.h"
 #include "xc_elf.h"
+#include "xc_efi.h"
 #include <stdlib.h>
+#include <assert.h>
 #include <zlib.h>
 #include "xen/arch-ia64.h"
 #include <xen/hvm/ioreq.h>
@@ -39,11 +42,11 @@ xc_set_hvm_param(int handle, domid_t dom, int param, unsigned long value)
     arg.index = param;
     arg.value = value;
 
-    if (mlock(&arg, sizeof(arg)) != 0)
+    if (lock_pages(&arg, sizeof(arg)) != 0)
         return -1;
 
     rc = do_xen_hypercall(handle, &hypercall);
-    safe_munlock(&arg, sizeof(arg));
+    unlock_pages(&arg, sizeof(arg));
 
     return rc;
 }
@@ -62,11 +65,11 @@ xc_get_hvm_param(int handle, domid_t dom, int param, unsigned long *value)
     arg.domid = dom;
     arg.index = param;
 
-    if (mlock(&arg, sizeof(arg)) != 0)
+    if (lock_pages(&arg, sizeof(arg)) != 0)
         return -1;
 
     rc = do_xen_hypercall(handle, &hypercall);
-    safe_munlock(&arg, sizeof(arg));
+    unlock_pages(&arg, sizeof(arg));
 
     *value = arg.value;
     return rc;
@@ -122,7 +125,7 @@ typedef enum {
     HOB_TYPE_PAL_VM_INFO,
     HOB_TYPE_PAL_VM_PAGE_SIZE,
     HOB_TYPE_NR_VCPU,
-	HOB_TYPE_NVRAM,
+    HOB_TYPE_NVRAM,
     HOB_TYPE_MAX
 } hob_type_t;
 
@@ -133,14 +136,14 @@ static int add_vcpus_hob(void* hob_buf, unsigned long nr_vcpu);
 static int add_nvram_hob(void* hob_buf, unsigned long nvram_addr);
 static int build_hob(void* hob_buf, unsigned long hob_buf_size,
                      unsigned long dom_mem_size, unsigned long vcpus,
-					 unsigned long nvram_addr);
+                     unsigned long nvram_addr);
 static int load_hob(int xc_handle,uint32_t dom, void *hob_buf,
                     unsigned long dom_mem_size);
 
 static int
 xc_ia64_build_hob(int xc_handle, uint32_t dom,
                   unsigned long memsize, unsigned long vcpus,
-				  unsigned long nvram_addr)
+                  unsigned long nvram_addr)
 {
     char   *hob_buf;
 
@@ -249,7 +252,7 @@ get_hob_size(void* hob_buf)
 static int
 build_hob(void* hob_buf, unsigned long hob_buf_size,
           unsigned long dom_mem_size, unsigned long vcpus,
-		  unsigned long nvram_addr)
+          unsigned long nvram_addr)
 {
     //Init HOB List
     if (hob_init(hob_buf, hob_buf_size) < 0) {
@@ -272,10 +275,10 @@ build_hob(void* hob_buf, unsigned long hob_buf_size,
         goto err_out;
     }
 
-	if (add_nvram_hob( hob_buf, nvram_addr ) < 0) {
-		PERROR("Add nvram hob failed, buffer too small");
-		goto err_out;
-	}
+    if (add_nvram_hob( hob_buf, nvram_addr ) < 0) {
+        PERROR("Add nvram hob failed, buffer too small");
+        goto err_out;
+    }
 
     return 0;
 
@@ -340,7 +343,7 @@ add_vcpus_hob(void* hob_buf, unsigned long vcpus)
 static int
 add_nvram_hob(void *hob_buf, unsigned long nvram_addr)
 {
-	return hob_add(hob_buf, HOB_TYPE_NVRAM, &nvram_addr, sizeof(nvram_addr));
+    return hob_add(hob_buf, HOB_TYPE_NVRAM, &nvram_addr, sizeof(nvram_addr));
 }
 
 static const unsigned char config_pal_bus_get_features_data[24] = {
@@ -574,49 +577,48 @@ add_pal_hob(void* hob_buf)
 static uint64_t 
 nvram_init(const char *nvram_path)
 {
-	uint64_t fd = 0;
-	fd = open(nvram_path, O_CREAT|O_RDWR, 0666);
+    uint64_t fd = 0;
+    fd = open(nvram_path, O_CREAT|O_RDWR, 0666);
 
-	if ( fd < 0 )
-	{
-		PERROR("Nvram open failed at %s. Guest will boot without"
-				" nvram support!\n", nvram_path);	
-		return -1;
-	}
+    if ( fd < 0 )
+    {
+        PERROR("Nvram open failed at %s. Guest will boot without"
+               " nvram support!\n", nvram_path);	
+        return -1;
+    }
 
-	return VALIDATE_NVRAM_FD(fd);
+    return VALIDATE_NVRAM_FD(fd);
 }
 
 static int 
 copy_from_nvram_to_GFW(int xc_handle, uint32_t dom, int nvram_fd)
 {
-	unsigned int nr_pages = NVRAM_SIZE >> PAGE_SHIFT;
-	struct stat file_stat;
-	char buf[NVRAM_SIZE] = {0};
+    unsigned int nr_pages = NVRAM_SIZE >> PAGE_SHIFT;
+    struct stat file_stat;
+    char buf[NVRAM_SIZE] = {0};
 	
-	if ( fstat(nvram_fd, &file_stat) < 0 )
-	{
-		PERROR("Cannot get Nvram file info! Guest will boot without "
-			   "nvram support!\n");
-		return -1;
-	}
+    if ( fstat(nvram_fd, &file_stat) < 0 )
+    {
+        PERROR("Cannot get Nvram file info! Guest will boot without "
+               "nvram support!\n");
+        return -1;
+    }
 
-	if ( 0 == file_stat.st_size )
-	{
-		DPRINTF("Nvram file create successful!\n");
-		return 0;
-	}
+    if ( 0 == file_stat.st_size )
+    {
+        DPRINTF("Nvram file create successful!\n");
+        return 0;
+    }
 
-	if ( read(nvram_fd, buf, NVRAM_SIZE) != NVRAM_SIZE )
-	{
-		PERROR("Load nvram fail. guest will boot without"
-			   " nvram support!\n");
-		return -1;
-	}
+    if ( read(nvram_fd, buf, NVRAM_SIZE) != NVRAM_SIZE )
+    {
+        PERROR("Load nvram fail. guest will boot without"
+               " nvram support!\n");
+        return -1;
+    }
 
-	return  xc_ia64_copy_to_domain_pages(xc_handle, dom, buf,
-											NVRAM_START >> PAGE_SHIFT,
-											nr_pages);
+    return  xc_ia64_copy_to_domain_pages(xc_handle, dom, buf,
+                                         NVRAM_START >> PAGE_SHIFT, nr_pages);
 }
 
 
@@ -628,136 +630,252 @@ copy_from_nvram_to_GFW(int xc_handle, uint32_t dom, int nvram_fd)
 static int
 copy_from_GFW_to_nvram(int xc_handle, uint32_t dom, int nvram_fd)
 {
-	xen_pfn_t *pfn_list = NULL;
-	char *tmp_ptr = NULL;
-	unsigned int nr_pages = 0;
-	uint64_t addr_from_GFW_4k_align = 0;
-	uint32_t offset = 0;
-	uint64_t nvram_base_addr = 0;
-	char buf[NVRAM_SIZE] = {0};
-	int i;
+    xen_pfn_t *pfn_list = NULL;
+    char *tmp_ptr = NULL;
+    unsigned int nr_pages = 0;
+    uint64_t addr_from_GFW_4k_align = 0;
+    uint32_t offset = 0;
+    uint64_t nvram_base_addr = 0;
+    char buf[NVRAM_SIZE] = {0};
+    int i;
 
-	
-	// map one more page 
-	nr_pages = (NVRAM_SIZE + PAGE_SIZE) >> PAGE_SHIFT;
-	pfn_list = (xen_pfn_t *)malloc(sizeof(xen_pfn_t) * nr_pages);
-	if ( NULL == pfn_list )
-	{
-		PERROR("Cannot allocate memory for nvram save!\n");
-		close(nvram_fd);
-		return -1;
-	}
+    // map one more page 
+    nr_pages = (NVRAM_SIZE + PAGE_SIZE) >> PAGE_SHIFT;
+    pfn_list = (xen_pfn_t *)malloc(sizeof(xen_pfn_t) * nr_pages);
+    if ( NULL == pfn_list )
+    {
+        PERROR("Cannot allocate memory for nvram save!\n");
+        close(nvram_fd);
+        return -1;
+    }
 
-	/* 
-	 * GFW allocate memory dynamicly to save nvram data
-	 * and save address of the dynamic memory at NVRAM_START. 
-	 * To save nvram data to file, we must get the dynamic
-	 * memory address first.
-	 */
-	pfn_list[0] = NVRAM_START >> PAGE_SHIFT;
-	tmp_ptr = (char *)xc_map_foreign_range(xc_handle, dom, PAGE_SIZE,
-			PROT_READ | PROT_WRITE, pfn_list[0]);
+    /* 
+     * GFW allocate memory dynamicly to save nvram data
+     * and save address of the dynamic memory at NVRAM_START. 
+     * To save nvram data to file, we must get the dynamic
+     * memory address first.
+     */
+    pfn_list[0] = NVRAM_START >> PAGE_SHIFT;
+    tmp_ptr = (char *)xc_map_foreign_range(xc_handle, dom, PAGE_SIZE,
+                                           PROT_READ | PROT_WRITE, pfn_list[0]);
 
-	if ( NULL == tmp_ptr )
-	{
-		PERROR("Cannot get nvram data from GFW!\n");
-		free(pfn_list);
-		close(nvram_fd);
-		return -1;
-	}
+    if ( NULL == tmp_ptr )
+    {
+        PERROR("Cannot get nvram data from GFW!\n");
+        free(pfn_list);
+        close(nvram_fd);
+        return -1;
+    }
 
-	addr_from_GFW_4k_align = *((uint64_t *)tmp_ptr);
-	munmap(tmp_ptr, PAGE_SIZE);
+    addr_from_GFW_4k_align = *((uint64_t *)tmp_ptr);
+    munmap(tmp_ptr, PAGE_SIZE);
 
-	// align address to 16k
-	offset = addr_from_GFW_4k_align % ( 16 * MEM_K );
-	addr_from_GFW_4k_align = addr_from_GFW_4k_align - offset;
-	for ( i=0; i<nr_pages; i++ )
-		pfn_list[i] = (addr_from_GFW_4k_align >> PAGE_SHIFT) + i;
+    // align address to 16k
+    offset = addr_from_GFW_4k_align % ( 16 * MEM_K );
+    addr_from_GFW_4k_align = addr_from_GFW_4k_align - offset;
+    for ( i=0; i<nr_pages; i++ )
+        pfn_list[i] = (addr_from_GFW_4k_align >> PAGE_SHIFT) + i;
 
-	tmp_ptr = (char *)xc_map_foreign_batch(xc_handle, dom,
-						PROT_READ | PROT_WRITE, pfn_list, nr_pages);
-	if ( NULL == tmp_ptr )
-	{
-		PERROR("Cannot get nvram data from GFW!\n");
-		free(pfn_list);
-		close(nvram_fd);
-		return -1;
-	}
+    tmp_ptr = (char *)xc_map_foreign_batch(xc_handle, dom,
+    PROT_READ | PROT_WRITE, pfn_list, nr_pages);
+    if ( NULL == tmp_ptr )
+    {
+        PERROR("Cannot get nvram data from GFW!\n");
+        free(pfn_list);
+        close(nvram_fd);
+        return -1;
+    }
 
-	// calculate nvram data base addrees
-	nvram_base_addr = (uint64_t)(tmp_ptr + offset);
+    // calculate nvram data base addrees
+    nvram_base_addr = (uint64_t)(tmp_ptr + offset);
 
-	memcpy(buf, (void *)nvram_base_addr, NVRAM_SIZE);
-	free(pfn_list);
-	munmap(tmp_ptr, NVRAM_SIZE + PAGE_SIZE);
+    memcpy(buf, (void *)nvram_base_addr, NVRAM_SIZE);
+    free(pfn_list);
+    munmap(tmp_ptr, NVRAM_SIZE + PAGE_SIZE);
 
-	lseek(nvram_fd, 0, SEEK_SET);
-	if ( write(nvram_fd, buf, NVRAM_SIZE) != NVRAM_SIZE )
-	{
-		PERROR("Save to nvram fail!\n");
-		return -1;
-	}
+    lseek(nvram_fd, 0, SEEK_SET);
+    if ( write(nvram_fd, buf, NVRAM_SIZE) != NVRAM_SIZE )
+    {
+        PERROR("Save to nvram fail!\n");
+        return -1;
+    }
 
-	close(nvram_fd);
+    close(nvram_fd);
 
-	DPRINTF("Nvram save successful!\n");
+    DPRINTF("Nvram save successful!\n");
 
-	return 0;
+    return 0;
 }
 
 int xc_ia64_save_to_nvram(int xc_handle, uint32_t dom) 
 {
-	uint64_t nvram_fd = 0;
-	xc_get_hvm_param(xc_handle, dom, HVM_PARAM_NVRAM_FD, &nvram_fd);
+    uint64_t nvram_fd = 0;
+    xc_get_hvm_param(xc_handle, dom, HVM_PARAM_NVRAM_FD, &nvram_fd);
 
-	if ( !IS_VALID_NVRAM_FD(nvram_fd) )
-		PERROR("Nvram not be initialized. Nvram save fail!\n");
-	else
-		copy_from_GFW_to_nvram(xc_handle, dom, (int)nvram_fd);	
+    if ( !IS_VALID_NVRAM_FD(nvram_fd) )
+        PERROR("Nvram not be initialized. Nvram save fail!\n");
+    else
+        copy_from_GFW_to_nvram(xc_handle, dom, (int)nvram_fd);	
 	
-	// although save to nvram maybe fail, we don't return any error number
-	// to Xend. This is quite logical because damage of NVRAM on native would 
-	// not block OS's executive path. Return error number will cause an exception 
-	// of Xend and block XenU when it destroy.
-	return 0;
+    // although save to nvram maybe fail, we don't return any error number
+    // to Xend. This is quite logical because damage of NVRAM on native would 
+    // not block OS's executive path. Return error number will cause an
+    // exception of Xend and block XenU when it destroy.
+    return 0;
 }
 
 #define NVRAM_FILE_PATH	"/usr/lib/xen/boot/nvram_"
 int xc_ia64_nvram_init(int xc_handle, char *dom_name, uint32_t dom)
 {
-	int file_path_len = strlen(NVRAM_FILE_PATH);
-	uint64_t nvram_fd = 0;
-	char nvram_path[100] = {0};
+    int file_path_len = strlen(NVRAM_FILE_PATH);
+    uint64_t nvram_fd = 0;
+    char nvram_path[100] = {0};
 
-	strncpy(nvram_path, NVRAM_FILE_PATH, file_path_len);
-	if ( file_path_len + strlen(dom_name) + 1 > sizeof(nvram_path) )
-	{
-		PERROR("Nvram file path is too long!\n");
-		return -1;
-	}
-	strcpy(nvram_path + file_path_len, dom_name);
+    strncpy(nvram_path, NVRAM_FILE_PATH, file_path_len);
+    if ( file_path_len + strlen(dom_name) + 1 > sizeof(nvram_path) )
+    {
+        PERROR("Nvram file path is too long!\n");
+        return -1;
+    }
+    strcpy(nvram_path + file_path_len, dom_name);
 
-	nvram_fd = nvram_init(nvram_path);
-	if ( nvram_fd == (uint64_t)(-1) )
-	{
-		xc_set_hvm_param(xc_handle, dom, HVM_PARAM_NVRAM_FD, 0);
-		return -1;
-	}
+    nvram_fd = nvram_init(nvram_path);
+    if ( nvram_fd == (uint64_t)(-1) )
+    {
+        xc_set_hvm_param(xc_handle, dom, HVM_PARAM_NVRAM_FD, 0);
+        return -1;
+    }
 
-	xc_set_hvm_param(xc_handle, dom, HVM_PARAM_NVRAM_FD, nvram_fd);
-	return 0; 
+    xc_set_hvm_param(xc_handle, dom, HVM_PARAM_NVRAM_FD, nvram_fd);
+    return 0; 
 }
 
 #define GFW_PAGES (GFW_SIZE >> PAGE_SHIFT)
 #define VGA_START_PAGE (VGA_IO_START >> PAGE_SHIFT)
 #define VGA_END_PAGE ((VGA_IO_START + VGA_IO_SIZE) >> PAGE_SHIFT)
+
+static void
+xc_ia64_setup_md(efi_memory_desc_t *md,
+                 unsigned long start, unsigned long end)
+{
+    md->type = EFI_CONVENTIONAL_MEMORY;
+    md->pad = 0;
+    md->phys_addr = start;
+    md->virt_addr = 0;
+    md->num_pages = (end - start) >> EFI_PAGE_SHIFT;
+    md->attribute = EFI_MEMORY_WB;
+}
+
+static inline unsigned long 
+min(unsigned long lhs, unsigned long rhs)
+{
+    return (lhs < rhs)? lhs: rhs;
+}
+
+static int
+xc_ia64_setup_memmap_info(int xc_handle, uint32_t dom,
+                          unsigned long dom_memsize, /* in bytes */
+                          unsigned long *pfns_special_pages, 
+                          unsigned long nr_special_pages,
+                          unsigned long memmap_info_pfn,
+                          unsigned long memmap_info_num_pages)
+{
+    xen_ia64_memmap_info_t* memmap_info;
+    efi_memory_desc_t *md;
+    uint64_t nr_mds;
+    
+    memmap_info = xc_map_foreign_range(xc_handle, dom,
+                                       PAGE_SIZE * memmap_info_num_pages,
+                                       PROT_READ | PROT_WRITE,
+                                       memmap_info_pfn);
+    if (memmap_info == NULL) {
+        PERROR("Could not map memmmap_info page.\n");
+        return -1;
+    }
+    memset(memmap_info, 0, PAGE_SIZE * memmap_info_num_pages);
+
+    /*
+     * [0, VGA_IO_START = 0xA0000)
+     * [VGA_IO_START + VGA_IO_SIZE = 0xC0000, MMIO_START = 3GB)
+     * [IO_PAGE_START (> 3GB), IO_PAGE_START + IO_PAGE_SIZE)
+     * [STORE_PAGE_START, STORE_PAGE_START + STORE_PAGE_SIZE)
+     * [BUFFER_IO_PAGE_START, BUFFER_IO_PAGE_START + BUFFER_IO_PAGE_SIZE)
+     * [BUFFER_PIO_PAGE_START, BUFFER_PIO_PAGE_START + BUFFER_PIO_PAGE_SIZE)
+     * [memmap_info_pfn << PAGE_SHIFT,
+     *                          (memmap_info_pfn << PAGE_SHIFT) + PAGE_SIZE)
+     * [GFW_START=4GB - GFW_SIZE, GFW_START + GFW_SIZE = 4GB)
+     * [4GB, ...)
+     */ 
+    md = (efi_memory_desc_t*)&memmap_info->memdesc;
+    xc_ia64_setup_md(md, 0, min(VGA_IO_START, dom_memsize));
+    md++;
+    if (dom_memsize > (VGA_IO_START + VGA_IO_SIZE)) {
+        xc_ia64_setup_md(md, VGA_IO_START + VGA_IO_SIZE,
+                         min(MMIO_START, dom_memsize));
+        md++;
+    }
+    xc_ia64_setup_md(md, IO_PAGE_START, IO_PAGE_START + IO_PAGE_SIZE);
+    md++;
+    xc_ia64_setup_md(md, STORE_PAGE_START, STORE_PAGE_START + STORE_PAGE_SIZE);
+    md++;
+    xc_ia64_setup_md(md, BUFFER_IO_PAGE_START,
+                     BUFFER_IO_PAGE_START + BUFFER_IO_PAGE_SIZE);
+    md++;
+    xc_ia64_setup_md(md, BUFFER_PIO_PAGE_START,
+                     BUFFER_PIO_PAGE_START + BUFFER_PIO_PAGE_SIZE);
+    md++;
+    xc_ia64_setup_md(md, memmap_info_pfn << PAGE_SHIFT,
+                     (memmap_info_pfn << PAGE_SHIFT) +
+                     PAGE_SIZE * memmap_info_num_pages);
+    md++;
+    xc_ia64_setup_md(md, GFW_START, GFW_START + GFW_SIZE);
+    md++;
+    if (dom_memsize > MMIO_START) {
+        xc_ia64_setup_md(md, 4 * MEM_G, dom_memsize + (1 * MEM_G));
+        md++;
+    }
+    nr_mds = md - (efi_memory_desc_t*)&memmap_info->memdesc;
+    
+    assert(nr_mds <=
+           (PAGE_SIZE * memmap_info_num_pages -
+            offsetof(typeof(*memmap_info), memdesc))/sizeof(*md));
+    memmap_info->efi_memmap_size = nr_mds * sizeof(*md);
+    memmap_info->efi_memdesc_size = sizeof(*md);
+    memmap_info->efi_memdesc_version = EFI_MEMORY_DESCRIPTOR_VERSION;
+
+    munmap(memmap_info, PAGE_SIZE * memmap_info_num_pages);
+    return 0;
+}
+
+/* setup shared_info page */
+static int
+xc_ia64_setup_shared_info(int xc_handle, uint32_t dom,
+                          unsigned long shared_info_pfn,
+                          unsigned long memmap_info_pfn,
+                          unsigned long memmap_info_num_pages)
+{
+    shared_info_t *shared_info;
+
+    shared_info = xc_map_foreign_range(xc_handle, dom, PAGE_SIZE,
+                                       PROT_READ | PROT_WRITE,
+                                       shared_info_pfn);
+    if (shared_info == NULL) {
+        PERROR("Could not map shared_info");
+        return -1;
+    }
+    memset(shared_info, 0, sizeof(*shared_info));
+    shared_info->arch.memmap_info_num_pages = memmap_info_num_pages;
+    shared_info->arch.memmap_info_pfn = memmap_info_pfn;
+    munmap(shared_info, PAGE_SIZE);
+    return 0;
+}
+
 /*
  * In this function, we will allocate memory and build P2M/M2P table for VTI
  * guest.  Frist, a pfn list will be initialized discontiguous, normal memory
- * begins with 0, GFW memory and other three pages at their place defined in
+ * begins with 0, GFW memory and other five pages at their place defined in
  * xen/include/public/arch-ia64.h xc_domain_memory_populate_physmap() called
- * three times, to set parameter 'extent_order' to different value, this is
+ * five times, to set parameter 'extent_order' to different value, this is
  * convenient to allocate discontiguous memory with different size.
  */
 static int
@@ -771,7 +889,10 @@ setup_guest(int xc_handle, uint32_t dom, unsigned long memsize,
     unsigned long dom_memsize = memsize << 20;
     unsigned long nr_pages = memsize << (20 - PAGE_SHIFT);
     unsigned long vcpus;
-	unsigned long nvram_start = NVRAM_START, nvram_fd = 0; 
+    unsigned long nr_special_pages;
+    unsigned long memmap_info_pfn;
+    unsigned long memmap_info_num_pages;
+    unsigned long nvram_start = NVRAM_START, nvram_fd = 0; 
     int rc;
     long i;
     DECLARE_DOMCTL;
@@ -813,7 +934,7 @@ setup_guest(int xc_handle, uint32_t dom, unsigned long memsize,
         goto error_out;
     }
 
-    // We allocate additional pfn for GFW and other three pages, so
+    // We allocate additional pfn for GFW and other five pages, so
     // the pfn_list is not contiguous.  Due to this we must support
     // old interface xc_ia64_get_pfn_list().
     for (i = 0; i < GFW_PAGES; i++) 
@@ -826,12 +947,22 @@ setup_guest(int xc_handle, uint32_t dom, unsigned long memsize,
         goto error_out;
     }
 
-	pfn_list[0] = IO_PAGE_START >> PAGE_SHIFT;
-    pfn_list[1] = STORE_PAGE_START >> PAGE_SHIFT;
-    pfn_list[2] = BUFFER_IO_PAGE_START >> PAGE_SHIFT;
-    pfn_list[3] = BUFFER_PIO_PAGE_START >> PAGE_SHIFT;
+    nr_special_pages = 0;
+    pfn_list[nr_special_pages] = IO_PAGE_START >> PAGE_SHIFT;
+    nr_special_pages++;
+    pfn_list[nr_special_pages] = STORE_PAGE_START >> PAGE_SHIFT;
+    nr_special_pages++;
+    pfn_list[nr_special_pages] = BUFFER_IO_PAGE_START >> PAGE_SHIFT;
+    nr_special_pages++;
+    pfn_list[nr_special_pages] = BUFFER_PIO_PAGE_START >> PAGE_SHIFT;
 
-    rc = xc_domain_memory_populate_physmap(xc_handle, dom, 4,
+    memmap_info_pfn = pfn_list[nr_special_pages] + 1;
+    memmap_info_num_pages = 1;
+    nr_special_pages++;
+    pfn_list[nr_special_pages] = memmap_info_pfn;
+    nr_special_pages++;
+
+    rc = xc_domain_memory_populate_physmap(xc_handle, dom, nr_special_pages,
                                            0, 0, &pfn_list[0]);
     if (rc != 0) {
         PERROR("Could not allocate IO page or store page or buffer io page.\n");
@@ -861,15 +992,26 @@ setup_guest(int xc_handle, uint32_t dom, unsigned long memsize,
         goto error_out;
     }
 
-	xc_get_hvm_param(xc_handle, dom, HVM_PARAM_NVRAM_FD, &nvram_fd);
-	if ( !IS_VALID_NVRAM_FD(nvram_fd) )
-		nvram_start = 0;
-	else
-		if ( copy_from_nvram_to_GFW(xc_handle, dom, (int)nvram_fd ) == -1 )
-		{
-			nvram_start = 0;
-			close(nvram_fd);
-		}
+    if (xc_ia64_setup_memmap_info(xc_handle, dom, dom_memsize,
+                                  pfn_list, nr_special_pages,
+                                  memmap_info_pfn, memmap_info_num_pages)) {
+        PERROR("Could not build memmap info\n");
+        goto error_out;
+    }
+    if (xc_ia64_setup_shared_info(xc_handle, dom,
+                                  domctl.u.getdomaininfo.shared_info_frame,
+                                  memmap_info_pfn, memmap_info_num_pages)) {
+        PERROR("Could not setup shared_info\n");
+        goto error_out;
+    }
+
+    xc_get_hvm_param(xc_handle, dom, HVM_PARAM_NVRAM_FD, &nvram_fd);
+    if ( !IS_VALID_NVRAM_FD(nvram_fd) )
+        nvram_start = 0;
+    else if ( copy_from_nvram_to_GFW(xc_handle, dom, (int)nvram_fd ) == -1 ) {
+        nvram_start = 0;
+        close(nvram_fd);
+    }
 
     vcpus = domctl.u.getdomaininfo.max_vcpu_id + 1;
 
@@ -932,8 +1074,8 @@ xc_hvm_build(int xc_handle, uint32_t domid, int memsize, const char *image_name)
 
     image_size = (image_size + PAGE_SIZE - 1) & PAGE_MASK;
 
-    if (mlock(&st_ctxt, sizeof(st_ctxt))) {
-        PERROR("Unable to mlock ctxt");
+    if (lock_pages(&st_ctxt, sizeof(st_ctxt))) {
+        PERROR("Unable to lock_pages ctxt");
         return 1;
     }
 
@@ -948,6 +1090,11 @@ xc_hvm_build(int xc_handle, uint32_t domid, int memsize, const char *image_name)
     free(image);
 
     ctxt->regs.ip = 0x80000000ffffffb0UL;
+    ctxt->regs.ar.fpsr = xc_ia64_fpsr_default();
+    ctxt->regs.cr.isr = 1UL << 63;
+    ctxt->regs.psr = IA64_PSR_AC | IA64_PSR_BN;
+    ctxt->regs.cr.dcr = 0;
+    ctxt->regs.cr.pta = 15 << 2;
 
     memset(&launch_domctl, 0, sizeof(launch_domctl));
 
@@ -957,10 +1104,12 @@ xc_hvm_build(int xc_handle, uint32_t domid, int memsize, const char *image_name)
 
     launch_domctl.cmd = XEN_DOMCTL_setvcpucontext;
     rc = do_domctl(xc_handle, &launch_domctl);
+    unlock_pages(&st_ctxt, sizeof(st_ctxt));
     return rc;
 
 error_out:
     free(image);
+    unlock_pages(&st_ctxt, sizeof(st_ctxt));
     return -1;
 }
 

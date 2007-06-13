@@ -52,10 +52,10 @@
 #include <asm/perfmon.h>
 #include <public/vcpu.h>
 
-unsigned long dom0_size = 512*1024*1024;
+static unsigned long __initdata dom0_size = 512*1024*1024;
 
 /* dom0_max_vcpus: maximum number of VCPUs to create for dom0.  */
-static unsigned int dom0_max_vcpus = 1;
+static unsigned int __initdata dom0_max_vcpus = 1;
 integer_param("dom0_max_vcpus", dom0_max_vcpus); 
 
 extern unsigned long running_on_sim;
@@ -622,12 +622,10 @@ void arch_get_info_guest(struct vcpu *v, vcpu_guest_context_u c)
 	c.nat->regs.r[10] = uregs->r10;
 	c.nat->regs.r[11] = uregs->r11;
 
-	if (is_hvm) {
-		c.nat->regs.psr = vmx_vcpu_get_psr (v);
-	} else {
-		/* FIXME: get the vpsr.  */
-		c.nat->regs.psr = uregs->cr_ipsr;
-	}
+	if (is_hvm)
+		c.nat->regs.psr = vmx_vcpu_get_psr(v);
+	else
+		c.nat->regs.psr = vcpu_get_psr(v);
 
 	c.nat->regs.ip = uregs->cr_iip;
 	c.nat->regs.cfm = uregs->cr_ifs;
@@ -717,6 +715,26 @@ int arch_set_info_guest(struct vcpu *v, vcpu_guest_context_u c)
 	struct domain *d = v->domain;
 	int rc;
 
+	/* Finish vcpu initialization.  */
+	if (!v->is_initialised) {
+		if (d->arch.is_vti)
+			rc = vmx_final_setup_guest(v);
+		else
+			rc = vcpu_late_initialise(v);
+		if (rc != 0)
+			return rc;
+
+		vcpu_init_regs(v);
+
+		v->is_initialised = 1;
+		/* Auto-online VCPU0 when it is initialised. */
+		if (v->vcpu_id == 0)
+			clear_bit(_VPF_down, &v->pause_flags);
+	}
+
+	if (c.nat == NULL)
+		return 0;
+
 	uregs->b6 = c.nat->regs.b[6];
 	uregs->b7 = c.nat->regs.b[7];
 	
@@ -727,8 +745,11 @@ int arch_set_info_guest(struct vcpu *v, vcpu_guest_context_u c)
 	uregs->r9 = c.nat->regs.r[9];
 	uregs->r10 = c.nat->regs.r[10];
 	uregs->r11 = c.nat->regs.r[11];
-	
-	uregs->cr_ipsr = c.nat->regs.psr;
+
+ 	if (!d->arch.is_vti)
+		vcpu_set_psr(v, c.nat->regs.psr);
+	else
+		vmx_vcpu_set_psr(v, c.nat->regs.psr);
 	uregs->cr_iip = c.nat->regs.ip;
 	uregs->cr_ifs = c.nat->regs.cfm;
 	
@@ -811,32 +832,6 @@ int arch_set_info_guest(struct vcpu *v, vcpu_guest_context_u c)
 		}
 		v->arch.event_callback_ip = c.nat->event_callback_ip;
 		v->arch.iva = c.nat->regs.cr.iva;
-	}
-
-	if (v->is_initialised)
-		return 0;
-
-	if (d->arch.is_vti) {
-		rc = vmx_final_setup_guest(v);
-		if (rc != 0)
-			return rc;
-	} else {
-		rc = vcpu_late_initialise(v);
-		if (rc != 0)
-			return rc;
-		VCPU(v, interrupt_mask_addr) = 
-			(unsigned char *) d->arch.shared_info_va +
-			INT_ENABLE_OFFSET(v);
-	}
-
-	/* This overrides some registers. */
-	vcpu_init_regs(v);
-
-	if (!v->is_initialised) {
-		v->is_initialised = 1;
-		/* Auto-online VCPU0 when it is initialised. */
-		if (v->vcpu_id == 0)
-			clear_bit(_VPF_down, &v->pause_flags);
 	}
 
 	return 0;
@@ -1109,7 +1104,7 @@ int shadow_mode_control(struct domain *d, xen_domctl_shadow_op_t *sc)
 #define	privify_memory(x,y) do {} while(0)
 #endif
 
-static void loaddomainelfimage(struct domain *d, struct elf_binary *elf)
+static void __init loaddomainelfimage(struct domain *d, struct elf_binary *elf)
 {
 	const elf_phdr *phdr;
 	int phnum, h, filesz, memsz;
@@ -1163,7 +1158,7 @@ static void loaddomainelfimage(struct domain *d, struct elf_binary *elf)
 	}
 }
 
-void alloc_dom0(void)
+void __init alloc_dom0(void)
 {
 	/* Check dom0 size.  */
 	if (dom0_size < 4 * 1024 * 1024) {
@@ -1187,7 +1182,7 @@ void alloc_dom0(void)
  * handled with order > 0 request. Dom0 requires that bit set to
  * allocate memory for other domains.
  */
-static void physdev_init_dom0(struct domain *d)
+static void __init physdev_init_dom0(struct domain *d)
 {
 	if (iomem_permit_access(d, 0UL, ~0UL))
 		BUG();
@@ -1197,10 +1192,10 @@ static void physdev_init_dom0(struct domain *d)
 		BUG();
 }
 
-int construct_dom0(struct domain *d, 
-	               unsigned long image_start, unsigned long image_len, 
-	               unsigned long initrd_start, unsigned long initrd_len,
-	               char *cmdline)
+int __init construct_dom0(struct domain *d, 
+			  unsigned long image_start, unsigned long image_len, 
+			  unsigned long initrd_start, unsigned long initrd_len,
+			  char *cmdline)
 {
 	int i, rc;
 	start_info_t *si;
@@ -1353,7 +1348,9 @@ int construct_dom0(struct domain *d,
 	   Note: Linux kernel reserve memory used by start_info, so there is
 	   no need to remove it from MDT.  */
 	bp_mpa = pstart_info + sizeof(struct start_info);
-	dom_fw_setup(d, bp_mpa, max_pages * PAGE_SIZE);
+	rc = dom_fw_setup(d, bp_mpa, max_pages * PAGE_SIZE);
+	if (rc != 0)
+		return rc;
 
 	/* Fill boot param.  */
 	strlcpy((char *)si->cmd_line, dom0_command_line, sizeof(si->cmd_line));
@@ -1462,7 +1459,7 @@ arch_do_vcpu_op(int cmd, struct vcpu *v, XEN_GUEST_HANDLE(void) arg)
 	return rc;
 }
 
-static void parse_dom0_mem(char *s)
+static void __init parse_dom0_mem(char *s)
 {
 	dom0_size = parse_size_and_unit(s, NULL);
 }

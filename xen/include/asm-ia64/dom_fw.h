@@ -5,12 +5,11 @@
  *	Dan Magenheimer (dan.magenheimer@hp.com)
  */
 
-#include <linux/efi.h>
-
 /* Portion of guest physical memory space reserved for PAL/SAL/EFI/ACPI
    data and code.  */
 #define FW_BASE_PADDR		0x0000UL
-#define FW_END_PADDR		0x3000UL
+/* It is assumed that FW_END_PADDR_MIN = FW_TABLES_END_PADDR_MIN */
+#define FW_END_PADDR_MIN	0x3000UL
 
 /* This is used to determined the portion of a domain's metaphysical memory
    space reserved for the hypercall patch table. */
@@ -31,7 +30,7 @@
 
 /* Base and end guest physical address of EFI and SAL (non-ACPI) tables.  */
 #define FW_TABLES_BASE_PADDR	0x2000UL
-#define FW_TABLES_END_PADDR	0x3000UL
+#define FW_TABLES_END_PADDR_MIN	0x3000UL
 
 
 /* Hypercalls number have a low part and a high part.
@@ -59,7 +58,8 @@
  * rp=b0 indicates the return point.
  *
  * A single hypercall is used for all PAL calls.
- * The hypercall stub is pal_call_stub (xenasm.S).  Its size is 2 bundles.
+ * The hypercall stub is xen_ia64_pal_call_stub (dom_fw_asm.S). 
+ * Its size is 2 bundles.
  */
 
 #define FW_HYPERCALL_PAL_CALL_INDEX	0x80UL
@@ -183,9 +183,12 @@
 /* Additionnal OEM SAL.  */
 #define SAL_XEN_SAL_RETURN	0x02000000
 
+#ifdef __XEN__
+#include <linux/efi.h>
 extern struct ia64_pal_retval xen_pal_emulator(u64, u64, u64, u64);
 extern struct sal_ret_values sal_emulator (long index, unsigned long in1, unsigned long in2, unsigned long in3, unsigned long in4, unsigned long in5, unsigned long in6, unsigned long in7);
 extern struct ia64_pal_retval pal_emulator_static (unsigned long);
 extern efi_status_t efi_emulator (struct pt_regs *regs, unsigned long *fault);
 
-extern void dom_fw_setup (struct domain *, unsigned long bp_mpa, unsigned long maxmem);
+extern int dom_fw_setup (struct domain *, unsigned long bp_mpa, unsigned long maxmem);
+#endif

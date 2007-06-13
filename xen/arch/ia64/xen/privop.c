@@ -31,6 +31,15 @@ Privileged operation emulation routines
 
 static IA64FAULT priv_rfi(VCPU * vcpu, INST64 inst)
 {
+	REGS *regs = vcpu_regs(vcpu);
+	if (PSCB(vcpu, ifs) > 0x8000000000000000UL
+	    && regs->cr_ifs > 0x8000000000000000UL) {
+		panic_domain(regs,
+			     "rfi emulation with double uncover is "
+			     "impossible - use hyperprivop\n"
+			     " ip=0x%lx vifs=0x%lx ifs=0x%lx\n",
+			     regs->cr_iip, PSCB(vcpu, ifs), regs->cr_ifs);
+	}
 	return vcpu_rfi(vcpu);
 }
 
@@ -524,7 +533,7 @@ static IA64FAULT priv_mov_from_psr(VCPU * vcpu, INST64 inst)
 	u64 val;
 	IA64FAULT fault;
 
-	fault = vcpu_get_psr(vcpu, &val);
+	fault = vcpu_get_psr_masked(vcpu, &val);
 	if (fault == IA64_NO_FAULT)
 		return vcpu_set_gr(vcpu, tgt, val, 0);
 	else
@@ -702,7 +711,7 @@ static IA64FAULT priv_handle_op(VCPU * vcpu, REGS * regs, int privlvl)
 			perfc_incr(bsw1);
 			return priv_bsw1(vcpu, inst);
 		}
-		if (inst.B8.x6 == 0x0) {
+		if (privify_en && inst.B8.x6 == 0x0) {
 			// break instr for privified cover
 			perfc_incr(cover);
 			return priv_cover(vcpu, inst);
@@ -883,7 +892,7 @@ int ia64_hyperprivop(unsigned long iim, REGS * regs)
 		vcpu_reset_psr_sm(v, IA64_PSR_BE);
 		return 1;
 	case HYPERPRIVOP_GET_PSR:
-		vcpu_get_psr(v, &val);
+		vcpu_get_psr_masked(v, &val);
 		regs->r8 = val;
 		return 1;
 	}

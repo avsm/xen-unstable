@@ -89,7 +89,7 @@ long arch_do_domctl(xen_domctl_t *op, XEN_GUEST_HANDLE(xen_domctl_t) u_domctl)
                 ds->flags |= XEN_DOMAINSETUP_hvm_guest;
             /* Set params.  */
             ds->bp = 0;		/* unknown.  */
-            ds->maxmem = 0; /* unknown.  */
+            ds->maxmem = d->arch.convmem_end;
             ds->xsi_va = d->arch.shared_info_va;
             ds->hypercall_imm = d->arch.breakimm;
             /* Copy back.  */
@@ -101,34 +101,35 @@ long arch_do_domctl(xen_domctl_t *op, XEN_GUEST_HANDLE(xen_domctl_t) u_domctl)
                 if (!vmx_enabled) {
                     printk("No VMX hardware feature for vmx domain.\n");
                     ret = -EINVAL;
-                    break;
+                } else {
+                    d->arch.is_vti = 1;
+                    vmx_setup_platform(d);
                 }
-                d->arch.is_vti = 1;
-                vmx_setup_platform(d);
             }
             else {
-                dom_fw_setup(d, ds->bp, ds->maxmem);
-                if (ds->xsi_va)
-                    d->arch.shared_info_va = ds->xsi_va;
                 if (ds->hypercall_imm) {
+                    /* dom_fw_setup() reads d->arch.breakimm */
                     struct vcpu *v;
                     d->arch.breakimm = ds->hypercall_imm;
                     for_each_vcpu (d, v)
                         v->arch.breakimm = d->arch.breakimm;
                 }
-                {
-                    /*
-                     * XXX IA64_SHARED_INFO_PADDR
-                     * assign these pages into guest psudo physical address
-                     * space for dom0 to map this page by gmfn.
-                     * this is necessary for domain build, save, restore and 
-                     * dump-core.
-                     */
-                    unsigned long i;
-                    for (i = 0; i < XSI_SIZE; i += PAGE_SIZE)
-                        assign_domain_page(d, IA64_SHARED_INFO_PADDR + i,
-                                           virt_to_maddr(d->shared_info + i));
-                }
+                if (ds->xsi_va)
+                    d->arch.shared_info_va = ds->xsi_va;
+                ret = dom_fw_setup(d, ds->bp, ds->maxmem);
+            }
+            if (ret == 0) {
+                /*
+                 * XXX IA64_SHARED_INFO_PADDR
+                 * assign these pages into guest psudo physical address
+                 * space for dom0 to map this page by gmfn.
+                 * this is necessary for domain build, save, restore and 
+                 * dump-core.
+                 */
+                unsigned long i;
+                for (i = 0; i < XSI_SIZE; i += PAGE_SIZE)
+                    assign_domain_page(d, IA64_SHARED_INFO_PADDR + i,
+                                       virt_to_maddr(d->shared_info + i));
             }
         }
 
@@ -352,6 +353,50 @@ dom0vp_ioremap(struct domain *d, unsigned long mpaddr, unsigned long size)
                                    ASSIGN_writable | ASSIGN_nocache);
 }
 
+static unsigned long
+dom0vp_fpswa_revision(XEN_GUEST_HANDLE(uint) revision)
+{
+    if (fpswa_interface == NULL)
+        return -ENOSYS;
+    if (copy_to_guest(revision, &fpswa_interface->revision, 1))
+        return -EFAULT;
+    return 0;
+}
+
+static unsigned long
+dom0vp_add_io_space(struct domain *d, unsigned long phys_base,
+                    unsigned long sparse, unsigned long space_number)
+{
+    unsigned int fp, lp;
+
+    /*
+     * Registering new io_space roughly based on linux
+     * arch/ia64/pci/pci.c:new_space()
+     */
+
+    /* Skip legacy I/O port space, we already know about it */
+    if (phys_base == 0)
+        return 0;
+
+    /*
+     * Dom0 Linux initializes io spaces sequentially, if that changes,
+     * we'll need to add thread protection and the ability to handle
+     * a sparsely populated io_space array.
+     */
+    if (space_number > MAX_IO_SPACES || space_number != num_io_spaces)
+        return -EINVAL;
+
+    io_space[space_number].mmio_base = phys_base;
+    io_space[space_number].sparse = sparse;
+
+    num_io_spaces++;
+
+    fp = space_number << IO_SPACE_BITS;
+    lp = fp | 0xffff;
+
+    return ioports_permit_access(d, fp, lp);
+}
+
 unsigned long
 do_dom0vp_op(unsigned long cmd,
              unsigned long arg0, unsigned long arg1, unsigned long arg2,
@@ -402,6 +447,15 @@ do_dom0vp_op(unsigned long cmd,
         ret = do_perfmon_op(arg0, hnd, arg2);
         break;
     }
+    case IA64_DOM0VP_fpswa_revision: {
+        XEN_GUEST_HANDLE(uint) hnd;
+        set_xen_guest_handle(hnd, (uint*)arg0);
+        ret = dom0vp_fpswa_revision(hnd);
+        break;
+    }
+    case IA64_DOM0VP_add_io_space:
+        ret = dom0vp_add_io_space(d, arg0, arg1, arg2);
+        break;
     default:
         ret = -1;
 		printk("unknown dom0_vp_op 0x%lx\n", cmd);
