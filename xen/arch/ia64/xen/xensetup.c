@@ -18,6 +18,7 @@
 #include <xen/serial.h>
 #include <xen/trace.h>
 #include <xen/keyhandler.h>
+#include <xen/vga.h>
 #include <asm/meminit.h>
 #include <asm/page.h>
 #include <asm/setup.h>
@@ -311,6 +312,20 @@ void __init start_kernel(void)
     }
     serial_init_preirq();
 
+#ifdef CONFIG_VGA
+    /* Plug in a default VGA mode */
+    vga_console_info.video_type = XEN_VGATYPE_TEXT_MODE_3;
+    vga_console_info.u.text_mode_3.font_height = 16; /* generic VGA? */
+    vga_console_info.u.text_mode_3.cursor_x =
+                                        ia64_boot_param->console_info.orig_x;
+    vga_console_info.u.text_mode_3.cursor_y =
+                                        ia64_boot_param->console_info.orig_y;
+    vga_console_info.u.text_mode_3.rows =
+                                        ia64_boot_param->console_info.num_rows;
+    vga_console_info.u.text_mode_3.columns =
+                                        ia64_boot_param->console_info.num_cols;
+#endif
+
     init_console();
     set_printk_prefix("(XEN) ");
 
@@ -546,9 +561,6 @@ printk("num_online_cpus=%d, max_cpus=%d\n",num_online_cpus(),max_cpus);
             }
         }
         serial_init_postirq();
-
-        /* Hide the HCDP table from dom0 */
-        efi.hcdp = NULL;
     }
 
     expose_p2m_init();
