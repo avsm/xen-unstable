@@ -36,19 +36,10 @@
 
 thash_data_t *__alloc_chain(thash_cb_t *);
 
-static void cch_mem_init(thash_cb_t *hcb)
+static inline void cch_mem_init(thash_cb_t *hcb)
 {
-    int num;
-    thash_data_t *p;
-
-    hcb->cch_freelist = p = hcb->cch_buf;
-    num = (hcb->cch_sz/sizeof(thash_data_t))-1;
-    do{
-        p->next =p+1;
-        p++;
-        num--;
-    }while(num);
-    p->next = NULL;
+    hcb->cch_free_idx = 0;
+    hcb->cch_freelist = NULL;
 }
 
 static thash_data_t *cch_alloc(thash_cb_t *hcb)
@@ -56,8 +47,16 @@ static thash_data_t *cch_alloc(thash_cb_t *hcb)
     thash_data_t *p;
     if ( (p = hcb->cch_freelist) != NULL ) {
         hcb->cch_freelist = p->next;
+        return p;
     }
-    return p;
+    if (hcb->cch_free_idx < hcb->cch_sz/sizeof(thash_data_t)) {
+        p = &((thash_data_t *)hcb->cch_buf)[hcb->cch_free_idx++];
+        p->page_flags = 0;
+        p->itir = 0;
+        p->next = NULL;
+        return p;
+    }
+    return NULL;
 }
 
 /*
@@ -200,7 +199,7 @@ void thash_vhpt_insert(VCPU *v, u64 pte, u64 itir, u64 va, int type)
     } else {
         phy_pte  &= ~PAGE_FLAGS_RV_MASK;
         psr = ia64_clear_ic();
-        ia64_itc(type + 1, va, phy_pte, itir_ps(itir));
+        ia64_itc(type + 1, va, phy_pte, itir);
         ia64_set_psr(psr);
         ia64_srlz_i();
     }
@@ -531,10 +530,10 @@ int thash_purge_and_insert(VCPU *v, u64 pte, u64 itir, u64 ifa, int type)
 {
     u64 ps;//, va;
     u64 phy_pte;
-    ia64_rr vrr, mrr;
+    ia64_rr mrr;
     int ret = 0;
+
     ps = itir_ps(itir);
-    vcpu_get_rr(current, ifa, &vrr.rrval);
     mrr.rrval = ia64_get_rr(ifa);
     if(VMX_DOMAIN(v)){
         phy_pte = translate_phy_pte(v, &pte, itir, ifa);
@@ -563,7 +562,7 @@ int thash_purge_and_insert(VCPU *v, u64 pte, u64 itir, u64 ifa, int type)
             u64 psr;
             phy_pte  &= ~PAGE_FLAGS_RV_MASK;
             psr = ia64_clear_ic();
-            ia64_itc(type + 1, ifa, phy_pte, ps);
+            ia64_itc(type + 1, ifa, phy_pte, IA64_ITIR_PS_KEY(ps, 0));
             ia64_set_psr(psr);
             ia64_srlz_i();
             // ps < mrr.ps, this is not supported
@@ -668,13 +667,12 @@ thash_data_t *vtlb_lookup(VCPU *v, u64 va,int is_data)
 void thash_init(thash_cb_t *hcb, u64 sz)
 {
     int num;
-    thash_data_t *head, *p;
+    thash_data_t *head;
 
     hcb->pta.val = (unsigned long)hcb->hash;
     hcb->pta.vf = 1;
     hcb->pta.ve = 1;
     hcb->pta.size = sz;
-    hcb->cch_rec_head = hcb->hash;
     
     head=hcb->hash;
     num = (hcb->hash_sz/sizeof(thash_data_t));
@@ -686,16 +684,7 @@ void thash_init(thash_cb_t *hcb, u64 sz)
         head++;
         num--;
     }while(num);
-    
-    hcb->cch_freelist = p = hcb->cch_buf;
-    num = hcb->cch_sz / sizeof(thash_data_t);
-    do{
-        p->page_flags = 0;
-        p->itir = 0;
-        p->next =p+1;
-        p++;
-        num--;
-    }while(num);
 
-    (p - 1)->next = NULL;
+    hcb->cch_free_idx = 0;
+    hcb->cch_freelist = NULL;
 }
