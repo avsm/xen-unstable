@@ -24,15 +24,12 @@
 #define XEN_TLBthash_H
 
 #define     MAX_CCN_DEPTH       (15)       // collision chain depth
-#define     VCPU_VTLB_SHIFT     (20)    // 1M for VTLB
-#define     VCPU_VTLB_SIZE      (1UL<<VCPU_VTLB_SHIFT)
-#define     VCPU_VTLB_ORDER     (VCPU_VTLB_SHIFT - PAGE_SHIFT)
-#define     VCPU_VHPT_SHIFT     (24)    // 16M for VTLB
-#define     VCPU_VHPT_SIZE      (1UL<<VCPU_VHPT_SHIFT)
-#define     VCPU_VHPT_ORDER     (VCPU_VHPT_SHIFT - PAGE_SHIFT)
+#define     DEFAULT_VTLB_SZ     (19) // 512K hash + 512K c-chain for VTLB
+#define     DEFAULT_VHPT_SZ     (23) // 8M hash + 8M c-chain for VHPT
 #define     VTLB(v,_x)          (v->arch.vtlb._x)
 #define     VHPT(v,_x)          (v->arch.vhpt._x)
 #define     _PAGE_PL_PRIV       (CONFIG_CPL0_EMUL << 7)
+
 #ifndef __ASSEMBLY__
 
 #include <xen/config.h>
@@ -75,10 +72,14 @@ enum {
     ISIDE_TLB=0,
     DSIDE_TLB=1
 };
+#endif /* __ASSEMBLY__ */
+
 #define VTLB_PTE_P_BIT      0
 #define VTLB_PTE_IO_BIT     60
 #define VTLB_PTE_IO         (1UL<<VTLB_PTE_IO_BIT)
 #define VTLB_PTE_P         (1UL<<VTLB_PTE_P_BIT)
+
+#ifndef __ASSEMBLY__
 typedef struct thash_data {
     union {
         struct {
@@ -196,15 +197,17 @@ typedef struct thash_cb {
     u64     hash_sz;        // size of above data.
     void    *cch_buf;       // base address of collision chain.
     u64     cch_sz;         // size of above data.
+    u64     cch_free_idx;   // index of free entry.
     thash_data_t *cch_freelist;
-    thash_data_t *cch_rec_head;  // cch recycle header
     PTA     pta;
 } thash_cb_t;
 
 /*
- * Initialize internal control data before service.
+ * Allocate and initialize internal control data before service.
  */
-extern void thash_init(thash_cb_t *hcb, u64 sz);
+extern int thash_alloc(thash_cb_t *hcb, u64 sz, char *what);
+
+extern void thash_free(thash_cb_t *hcb);
 
 /*
  * Insert an entry to hash table. 
