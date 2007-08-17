@@ -71,7 +71,7 @@ vhpt_erase(unsigned long vhpt_maddr)
 	// initialize cache too???
 }
 
-void vhpt_insert (unsigned long vadr, unsigned long pte, unsigned long logps)
+void vhpt_insert (unsigned long vadr, unsigned long pte, unsigned long itir)
 {
 	struct vhpt_lf_entry *vlfe = (struct vhpt_lf_entry *)ia64_thash(vadr);
 	unsigned long tag = ia64_ttag (vadr);
@@ -80,21 +80,24 @@ void vhpt_insert (unsigned long vadr, unsigned long pte, unsigned long logps)
 	 * because the processor may support speculative VHPT walk.  */
 	vlfe->ti_tag = INVALID_TI_TAG;
 	wmb();
-	vlfe->itir = logps;
+	vlfe->itir = itir;
 	vlfe->page_flags = pte | _PAGE_P;
 	*(volatile unsigned long*)&vlfe->ti_tag = tag;
 }
 
-void vhpt_multiple_insert(unsigned long vaddr, unsigned long pte, unsigned long logps)
+void vhpt_multiple_insert(unsigned long vaddr, unsigned long pte,
+			   unsigned long itir)
 {
-	unsigned long mask = (1L << logps) - 1;
+	unsigned char ps = current->arch.vhpt_pg_shift;
+	ia64_itir_t _itir = {.itir = itir};
+	unsigned long mask = (1L << _itir.ps) - 1;
 	int i;
 
-	if (logps-PAGE_SHIFT > 10 && !running_on_sim) {
+	if (_itir.ps - ps > 10 && !running_on_sim) {
 		// if this happens, we may want to revisit this algorithm
 		panic("vhpt_multiple_insert:logps-PAGE_SHIFT>10,spinning..\n");
 	}
-	if (logps-PAGE_SHIFT > 2) {
+	if (_itir.ps - ps > 2) {
 		// FIXME: Should add counter here to see how often this
 		//  happens (e.g. for 16MB pages!) and determine if it
 		//  is a performance problem.  On a quick look, it takes
@@ -109,9 +112,9 @@ void vhpt_multiple_insert(unsigned long vaddr, unsigned long pte, unsigned long 
 	}
 	vaddr &= ~mask;
 	pte = ((pte & _PFN_MASK) & ~mask) | (pte & ~_PFN_MASK);
-	for (i = 1L << (logps-PAGE_SHIFT); i > 0; i--) {
-		vhpt_insert(vaddr,pte,logps<<2);
-		vaddr += PAGE_SIZE;
+	for (i = 1L << (_itir.ps - ps); i > 0; i--) {
+		vhpt_insert(vaddr, pte, _itir.itir);
+		vaddr += (1L << ps);
 	}
 }
 
@@ -289,6 +292,7 @@ static void
 __flush_vhpt_range(unsigned long vhpt_maddr, u64 vadr, u64 addr_range)
 {
 	void *vhpt_base = __va(vhpt_maddr);
+	u64 pgsz = 1L << current->arch.vhpt_pg_shift;
 
 	while ((long)addr_range > 0) {
 		/* Get the VHPT entry.  */
@@ -296,8 +300,8 @@ __flush_vhpt_range(unsigned long vhpt_maddr, u64 vadr, u64 addr_range)
 			__va_ul(vcpu_vhpt_maddr(current));
 		struct vhpt_lf_entry *v = vhpt_base + off;
 		v->ti_tag = INVALID_TI_TAG;
-		addr_range -= PAGE_SIZE;
-		vadr += PAGE_SIZE;
+		addr_range -= pgsz;
+		vadr += pgsz;
 	}
 }
 
@@ -360,7 +364,8 @@ void domain_flush_vtlb_range (struct domain *d, u64 vadr, u64 addr_range)
 	// ptc.ga has release semantics.
 
 	/* ptc.ga  */
-	platform_global_tlb_purge(vadr, vadr + addr_range, PAGE_SHIFT);
+	platform_global_tlb_purge(vadr, vadr + addr_range,
+				  current->arch.vhpt_pg_shift);
 	perfc_incr(domain_flush_vtlb_range);
 }
 
@@ -379,6 +384,7 @@ __domain_flush_vtlb_track_entry(struct domain* d,
 	int cpu;
 	int vcpu;
 	int local_purge = 1;
+	unsigned char ps = current->arch.vhpt_pg_shift;
 	
 	BUG_ON((vaddr >> VRN_SHIFT) != VRN7);
 	/*
@@ -411,7 +417,7 @@ __domain_flush_vtlb_track_entry(struct domain* d,
 				continue;
 
 			/* Invalidate VHPT entries.  */
-			vcpu_flush_vhpt_range(v, vaddr, PAGE_SIZE);
+			vcpu_flush_vhpt_range(v, vaddr, 1L << ps);
 
 			/*
 			 * current->processor == v->processor
@@ -425,7 +431,7 @@ __domain_flush_vtlb_track_entry(struct domain* d,
 	} else {
 		for_each_cpu_mask(cpu, entry->pcpu_dirty_mask) {
 			/* Invalidate VHPT entries.  */
-			cpu_flush_vhpt_range(cpu, vaddr, PAGE_SIZE);
+			cpu_flush_vhpt_range(cpu, vaddr, 1L << ps);
 
 			if (d->vcpu[cpu] != current)
 				local_purge = 0;
@@ -434,12 +440,11 @@ __domain_flush_vtlb_track_entry(struct domain* d,
 
 	/* ptc.ga  */
 	if (local_purge) {
-		ia64_ptcl(vaddr, PAGE_SHIFT << 2);
+		ia64_ptcl(vaddr, ps << 2);
 		perfc_incr(domain_flush_vtlb_local);
 	} else {
 		/* ptc.ga has release semantics. */
-		platform_global_tlb_purge(vaddr, vaddr + PAGE_SIZE,
-		                          PAGE_SHIFT);
+		platform_global_tlb_purge(vaddr, vaddr + (1L << ps), ps);
 		perfc_incr(domain_flush_vtlb_global);
 	}
 

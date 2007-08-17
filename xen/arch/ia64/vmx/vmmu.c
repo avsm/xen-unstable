@@ -19,22 +19,47 @@
  *  Xuefei Xu (Anthony Xu) (Anthony.xu@intel.com)
  *  Yaozu Dong (Eddie Dong) (Eddie.dong@intel.com)
  */
-#include <linux/sched.h>
-#include <linux/mm.h>
-#include <asm/tlb.h>
-#include <asm/gcc_intrin.h>
-#include <asm/vcpu.h>
-#include <linux/interrupt.h>
 #include <asm/vmx_vcpu.h>
-#include <asm/vmx_mm_def.h>
-#include <asm/vmx.h>
-#include <asm/hw_irq.h>
 #include <asm/vmx_pal_vsa.h>
-#include <asm/kregs.h>
-#include <asm/vcpu.h>
-#include <xen/irq.h>
-#include <xen/errno.h>
 #include <xen/sched-if.h>
+
+static int default_vtlb_sz = DEFAULT_VTLB_SZ;
+static int default_vhpt_sz = DEFAULT_VHPT_SZ;
+
+static void __init parse_vtlb_size(char *s)
+{
+    int sz = parse_size_and_unit(s, NULL);
+
+    if (sz > 0) {
+        default_vtlb_sz = fls(sz - 1);
+        /* minimum 16KB (for tag uniqueness) */
+        if (default_vtlb_sz < 14)
+            default_vtlb_sz = 14;
+    }
+}
+
+static int canonicalize_vhpt_size(int sz)
+{
+    /* minimum 32KB */
+    if (sz < 15)
+        return 15;
+    /* maximum 8MB (since purging TR is hard coded) */
+    if (sz > IA64_GRANULE_SHIFT - 1)
+        return IA64_GRANULE_SHIFT - 1;
+    return sz;
+}
+
+static void __init parse_vhpt_size(char *s)
+{
+    int sz = parse_size_and_unit(s, NULL);
+    if (sz > 0) {
+        default_vhpt_sz = fls(sz - 1);
+        default_vhpt_sz = canonicalize_vhpt_size(default_vhpt_sz);
+    }
+}
+
+custom_param("vti_vtlb_size", parse_vtlb_size);
+custom_param("vti_vhpt_size", parse_vhpt_size);
 
 /*
  * Get the machine page frame number in 16KB unit
@@ -132,66 +157,33 @@ purge_machine_tc_by_domid(domid_t domid)
 
 static int init_domain_vhpt(struct vcpu *v)
 {
-    struct page_info *page;
-    void * vbase;
-    page = alloc_domheap_pages (NULL, VCPU_VHPT_ORDER, 0);
-    if ( page == NULL ) {
-        printk("No enough contiguous memory for init_domain_vhpt\n");
-        return -ENOMEM;
-    }
-    vbase = page_to_virt(page);
-    memset(vbase, 0, VCPU_VHPT_SIZE);
-    printk(XENLOG_DEBUG "Allocate domain vhpt at 0x%p\n", vbase);
-    
-    VHPT(v,hash) = vbase;
-    VHPT(v,hash_sz) = VCPU_VHPT_SIZE/2;
-    VHPT(v,cch_buf) = (void *)((u64)vbase + VHPT(v,hash_sz));
-    VHPT(v,cch_sz) = VCPU_VHPT_SIZE - VHPT(v,hash_sz);
-    thash_init(&(v->arch.vhpt),VCPU_VHPT_SHIFT-1);
-    v->arch.arch_vmx.mpta = v->arch.vhpt.pta.val;
+    int rc;
 
-    return 0;
+    rc = thash_alloc(&(v->arch.vhpt), default_vhpt_sz, "vhpt");
+    v->arch.arch_vmx.mpta = v->arch.vhpt.pta.val;
+    return rc;
 }
 
 
 static void free_domain_vhpt(struct vcpu *v)
 {
-    struct page_info *page;
-
-    if (v->arch.vhpt.hash) {
-        page = virt_to_page(v->arch.vhpt.hash);
-        free_domheap_pages(page, VCPU_VHPT_ORDER);
-        v->arch.vhpt.hash = 0;
-    }
-
-    return;
+    if (v->arch.vhpt.hash)
+        thash_free(&(v->arch.vhpt));
 }
 
 int init_domain_tlb(struct vcpu *v)
 {
-    struct page_info *page;
-    void * vbase;
     int rc;
 
     rc = init_domain_vhpt(v);
     if (rc)
         return rc;
 
-    page = alloc_domheap_pages (NULL, VCPU_VTLB_ORDER, 0);
-    if ( page == NULL ) {
-        printk("No enough contiguous memory for init_domain_tlb\n");
+    rc = thash_alloc(&(v->arch.vtlb), default_vtlb_sz, "vtlb");
+    if (rc) {
         free_domain_vhpt(v);
-        return -ENOMEM;
+        return rc;
     }
-    vbase = page_to_virt(page);
-    memset(vbase, 0, VCPU_VTLB_SIZE);
-    printk(XENLOG_DEBUG "Allocate domain vtlb at 0x%p\n", vbase);
-    
-    VTLB(v,hash) = vbase;
-    VTLB(v,hash_sz) = VCPU_VTLB_SIZE/2;
-    VTLB(v,cch_buf) = (void *)((u64)vbase + VTLB(v,hash_sz));
-    VTLB(v,cch_sz) = VCPU_VTLB_SIZE - VTLB(v,hash_sz);
-    thash_init(&(v->arch.vtlb),VCPU_VTLB_SHIFT-1);
     
     return 0;
 }
@@ -199,12 +191,8 @@ int init_domain_tlb(struct vcpu *v)
 
 void free_domain_tlb(struct vcpu *v)
 {
-    struct page_info *page;
-
-    if ( v->arch.vtlb.hash) {
-        page = virt_to_page(v->arch.vtlb.hash);
-        free_domheap_pages(page, VCPU_VTLB_ORDER);
-    }
+    if (v->arch.vtlb.hash)
+        thash_free(&(v->arch.vtlb));
 
     free_domain_vhpt(v);
 }
@@ -232,10 +220,10 @@ void machine_tlb_insert(struct vcpu *v, thash_data_t *tlb)
 
     psr = ia64_clear_ic();
     if ( cl == ISIDE_TLB ) {
-        ia64_itc(1, mtlb.ifa, mtlb.page_flags, mtlb.ps);
+        ia64_itc(1, mtlb.ifa, mtlb.page_flags, IA64_ITIR_PS_KEY(mtlb.ps, 0));
     }
     else {
-        ia64_itc(2, mtlb.ifa, mtlb.page_flags, mtlb.ps);
+        ia64_itc(2, mtlb.ifa, mtlb.page_flags, IA64_ITIR_PS_KEY(mtlb.ps, 0));
     }
     ia64_set_psr(psr);
     ia64_srlz_i();
@@ -252,40 +240,8 @@ void machine_tlb_insert(struct vcpu *v, thash_data_t *tlb)
  */
 void machine_tlb_purge(u64 va, u64 ps)
 {
-//    u64       psr;
-//    psr = ia64_clear_ic();
     ia64_ptcl(va, ps << 2);
-//    ia64_set_psr(psr);
-//    ia64_srlz_i();
-//    return;
 }
-/*
-u64 machine_thash(u64 va)
-{
-    return ia64_thash(va);
-}
-
-u64 machine_ttag(u64 va)
-{
-    return ia64_ttag(va);
-}
-*/
-thash_data_t * vsa_thash(PTA vpta, u64 va, u64 vrr, u64 *tag)
-{
-    u64 index,pfn,rid,pfn_bits;
-    pfn_bits = vpta.size-5-8;
-    pfn = REGION_OFFSET(va)>>_REGION_PAGE_SIZE(vrr);
-    rid = _REGION_ID(vrr);
-    index = ((rid&0xff)<<pfn_bits)|(pfn&((1UL<<pfn_bits)-1));
-    *tag = ((rid>>8)&0xffff) | ((pfn >>pfn_bits)<<16);
-    return (thash_data_t *)((vpta.base<<PTA_BASE_SHIFT)+(index<<5));
-//    return ia64_call_vsa(PAL_VPS_THASH,va,vrr,vpta,0,0,0,0);
-}
-
-//u64 vsa_ttag(u64 va, u64 vrr)
-//{
-//    return ia64_call_vsa(PAL_VPS_TTAG,va,vrr,0,0,0,0,0);
-//}
 
 int vhpt_enabled(VCPU *vcpu, uint64_t vadr, vhpt_ref_t ref)
 {

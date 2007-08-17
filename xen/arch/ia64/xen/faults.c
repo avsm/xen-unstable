@@ -168,7 +168,7 @@ void ia64_do_page_fault(unsigned long address, unsigned long isr,
 	unsigned long is_data = !((isr >> IA64_ISR_X_BIT) & 1UL);
 	IA64FAULT fault;
 	int is_ptc_l_needed = 0;
-	u64 logps;
+	ia64_itir_t _itir = {.itir = itir};
 
 	if ((isr & IA64_ISR_SP)
 	    || ((isr & IA64_ISR_NA)
@@ -190,14 +190,14 @@ void ia64_do_page_fault(unsigned long address, unsigned long isr,
 		struct p2m_entry entry;
 		unsigned long m_pteval;
 		m_pteval = translate_domain_pte(pteval, address, itir,
-		                                &logps, &entry);
+		                                &(_itir.itir), &entry);
 		vcpu_itc_no_srlz(current, is_data ? 2 : 1, address,
-		                 m_pteval, pteval, logps, &entry);
+		                 m_pteval, pteval, _itir.itir, &entry);
 		if ((fault == IA64_USE_TLB && !current->arch.dtlb.pte.p) ||
 		    p2m_entry_retry(&entry)) {
 			/* dtlb has been purged in-between.  This dtlb was
 			   matching.  Undo the work.  */
-			vcpu_flush_tlb_vhpt_range(address, logps);
+			vcpu_flush_tlb_vhpt_range(address, _itir.ps);
 
 			// the stale entry which we inserted above
 			// may remains in tlb cache.
@@ -209,7 +209,7 @@ void ia64_do_page_fault(unsigned long address, unsigned long isr,
 	}
 
 	if (is_ptc_l_needed)
-		vcpu_ptc_l(current, address, logps);
+		vcpu_ptc_l(current, address, _itir.ps);
 	if (!guest_mode(regs)) {
 		/* The fault occurs inside Xen.  */
 		if (!ia64_done_with_exception(regs)) {
@@ -239,6 +239,8 @@ void ia64_do_page_fault(unsigned long address, unsigned long isr,
 		    (regs->cr_ipsr & ~DELIVER_PSR_CLR) | DELIVER_PSR_SET;
 		regs->cr_ipsr = vcpu_pl_adjust(regs->cr_ipsr,
 					       IA64_PSR_CPL0_BIT);
+		if (PSCB(current, dcr) & IA64_DCR_BE)
+			regs->cr_ipsr |= IA64_PSR_BE;
 
 		if (PSCB(current, hpsr_dfh))
 			regs->cr_ipsr |= IA64_PSR_DFH;  
@@ -572,6 +574,12 @@ ia64_handle_reflection(unsigned long ifa, struct pt_regs *regs,
 	BUG_ON(!(psr & IA64_PSR_CPL));
 
 	switch (vector) {
+	case 6:
+		vector = IA64_INST_KEY_MISS_VECTOR;
+		break;
+	case 7:
+		vector = IA64_DATA_KEY_MISS_VECTOR;
+		break;
 	case 8:
 		vector = IA64_DIRTY_BIT_VECTOR;
 		break;
@@ -735,7 +743,8 @@ ia64_shadow_fault(unsigned long ifa, unsigned long itir,
 	pte = vlfe->page_flags;
 	if (vlfe->ti_tag == ia64_ttag(ifa)) {
 		/* The VHPT entry is valid.  */
-		gpfn = get_gpfn_from_mfn((pte & _PAGE_PPN_MASK) >> PAGE_SHIFT);
+		gpfn = get_gpfn_from_mfn((pte & _PAGE_PPN_MASK) >>
+					 v->arch.vhpt_pg_shift);
 		BUG_ON(gpfn == INVALID_M2P_ENTRY);
 	} else {
 		unsigned long itir, iha;
@@ -751,10 +760,10 @@ ia64_shadow_fault(unsigned long ifa, unsigned long itir,
 		/* Try again!  */
 		if (fault != IA64_NO_FAULT) {
 			/* This will trigger a dtlb miss.  */
-			ia64_ptcl(ifa, PAGE_SHIFT << 2);
+			ia64_ptcl(ifa, v->arch.vhpt_pg_shift << 2);
 			return;
 		}
-		gpfn = ((pte & _PAGE_PPN_MASK) >> PAGE_SHIFT);
+		gpfn = ((pte & _PAGE_PPN_MASK) >> v->arch.vhpt_pg_shift);
 		if (pte & _PAGE_D)
 			pte |= _PAGE_VIRT_D;
 	}
@@ -782,7 +791,7 @@ ia64_shadow_fault(unsigned long ifa, unsigned long itir,
 			/* Purge the TC locally.
 			   It will be reloaded from the VHPT iff the
 			   VHPT entry is still valid.  */
-			ia64_ptcl(ifa, PAGE_SHIFT << 2);
+			ia64_ptcl(ifa, v->arch.vhpt_pg_shift << 2);
 
 			atomic64_inc(&d->arch.shadow_fault_count);
 		} else {
@@ -794,6 +803,6 @@ ia64_shadow_fault(unsigned long ifa, unsigned long itir,
 		/* We don't know wether or not the fault must be
 		   reflected.  The VHPT entry is not valid.  */
 		/* FIXME: in metaphysical mode, we could do an ITC now.  */
-		ia64_ptcl(ifa, PAGE_SHIFT << 2);
+		ia64_ptcl(ifa, v->arch.vhpt_pg_shift << 2);
 	}
 }

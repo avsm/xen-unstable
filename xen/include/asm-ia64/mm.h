@@ -447,7 +447,8 @@ extern unsigned long dom0vp_expose_p2m(struct domain* d, unsigned long conv_star
 
 extern volatile unsigned long *mpt_table;
 extern unsigned long gmfn_to_mfn_foreign(struct domain *d, unsigned long gpfn);
-extern u64 translate_domain_pte(u64 pteval, u64 address, u64 itir__, u64* logps, struct p2m_entry* entry);
+extern u64 translate_domain_pte(u64 pteval, u64 address, u64 itir__,
+				u64* itir, struct p2m_entry* entry);
 #define machine_to_phys_mapping	mpt_table
 
 #define INVALID_M2P_ENTRY        (~0UL)
@@ -497,6 +498,9 @@ extern u64 translate_domain_pte(u64 pteval, u64 address, u64 itir__, u64* logps,
 #define __mpa_to_gpa(madr) \
     ((get_gpfn_from_mfn((madr) >> PAGE_SHIFT) << PAGE_SHIFT) | \
     ((madr) & ~PAGE_MASK))
+
+/* Internal use only: returns 0 in case of bad address.  */
+extern unsigned long paddr_to_maddr(unsigned long paddr);
 
 /* Arch-specific portion of memory_op hypercall. */
 long arch_memory_op(int op, XEN_GUEST_HANDLE(void) arg);

@@ -18,6 +18,7 @@
 #include <xen/serial.h>
 #include <xen/trace.h>
 #include <xen/keyhandler.h>
+#include <xen/vga.h>
 #include <asm/meminit.h>
 #include <asm/page.h>
 #include <asm/setup.h>
@@ -45,7 +46,6 @@ int find_max_pfn (unsigned long, unsigned long, void *);
 extern void early_setup_arch(char **);
 extern void late_setup_arch(char **);
 extern void hpsim_serial_init(void);
-extern void alloc_dom0(void);
 extern void setup_per_cpu_areas(void);
 extern void mem_init(void);
 extern void init_IRQ(void);
@@ -311,6 +311,20 @@ void __init start_kernel(void)
     }
     serial_init_preirq();
 
+#ifdef CONFIG_VGA
+    /* Plug in a default VGA mode */
+    vga_console_info.video_type = XEN_VGATYPE_TEXT_MODE_3;
+    vga_console_info.u.text_mode_3.font_height = 16; /* generic VGA? */
+    vga_console_info.u.text_mode_3.cursor_x =
+                                        ia64_boot_param->console_info.orig_x;
+    vga_console_info.u.text_mode_3.cursor_y =
+                                        ia64_boot_param->console_info.orig_y;
+    vga_console_info.u.text_mode_3.rows =
+                                        ia64_boot_param->console_info.num_rows;
+    vga_console_info.u.text_mode_3.columns =
+                                        ia64_boot_param->console_info.num_cols;
+#endif
+
     init_console();
     set_printk_prefix("(XEN) ");
 
@@ -454,8 +468,6 @@ void __init start_kernel(void)
 
     trap_init();
 
-    alloc_dom0();
-
     init_xenheap_pages(__pa(xen_heap_start), xenheap_phys_end);
     printk("Xen heap: %luMB (%lukB)\n",
 	(xenheap_phys_end-__pa(xen_heap_start)) >> 20,
@@ -546,9 +558,6 @@ printk("num_online_cpus=%d, max_cpus=%d\n",num_online_cpus(),max_cpus);
             }
         }
         serial_init_postirq();
-
-        /* Hide the HCDP table from dom0 */
-        efi.hcdp = NULL;
     }
 
     expose_p2m_init();

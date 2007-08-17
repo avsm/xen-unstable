@@ -49,7 +49,6 @@ typedef union {
 #define	IA64_PTA_SZ_BIT		2
 #define	IA64_PTA_VF_BIT		8
 #define	IA64_PTA_BASE_BIT	15
-#define	IA64_PTA_LFMT		(1UL << IA64_PTA_VF_BIT)
 #define	IA64_PTA_SZ(x)		(x##UL << IA64_PTA_SZ_BIT)
 
 #define IA64_PSR_NON_VIRT_BITS				\
@@ -242,6 +241,42 @@ IA64FAULT vcpu_get_ar(VCPU * vcpu, u64 reg, u64 * val)
 }
 
 /**************************************************************************
+ VCPU protection key emulating for PV
+ This first implementation reserves 1 pkr for the hypervisor key.
+ On setting psr.pk the hypervisor key is loaded in pkr[15], therewith the
+ hypervisor may run with psr.pk==1. The key for the hypervisor is 0.
+ Furthermore the VCPU is flagged to use the protection keys.
+ Currently the domU has to take care of the used keys, because on setting
+ a pkr there is no check against other pkr's whether this key is already
+ used.
+**************************************************************************/
+
+/* The function loads the protection key registers from the struct arch_vcpu
+ * into the processor pkr's! Called in context_switch().
+ * TODO: take care of the order of writing pkr's!
+ */
+void vcpu_pkr_load_regs(VCPU * vcpu)
+{
+	int i;
+
+	for (i = 0; i <= XEN_IA64_NPKRS; i++)
+		ia64_set_pkr(i, PSCBX(vcpu, pkrs[i]));
+}
+
+/* The function activates the pkr handling. */
+static void vcpu_pkr_set_psr_handling(VCPU * vcpu)
+{
+	if (PSCBX(vcpu, pkr_flags) & XEN_IA64_PKR_IN_USE)
+		return;
+
+	vcpu_pkr_use_set(vcpu);
+	PSCBX(vcpu, pkrs[XEN_IA64_NPKRS]) = XEN_IA64_PKR_VAL;
+
+	/* Write the special key for the hypervisor into pkr[15]. */
+	ia64_set_pkr(XEN_IA64_NPKRS, XEN_IA64_PKR_VAL);
+}
+
+/**************************************************************************
  VCPU processor status register access routines
 **************************************************************************/
 
@@ -284,7 +319,7 @@ IA64FAULT vcpu_reset_psr_sm(VCPU * vcpu, u64 imm24)
 	// just handle psr.up and psr.pp for now
 	if (imm24 & ~(IA64_PSR_BE | IA64_PSR_PP | IA64_PSR_UP | IA64_PSR_SP |
 		      IA64_PSR_I | IA64_PSR_IC | IA64_PSR_DT |
-		      IA64_PSR_DFL | IA64_PSR_DFH))
+		      IA64_PSR_DFL | IA64_PSR_DFH | IA64_PSR_PK))
 		return IA64_ILLOP_FAULT;
 	if (imm.dfh) {
 		ipsr->dfh = PSCB(vcpu, hpsr_dfh);
@@ -309,6 +344,10 @@ IA64FAULT vcpu_reset_psr_sm(VCPU * vcpu, u64 imm24)
 		ipsr->be = 0;
 	if (imm.dt)
 		vcpu_set_metaphysical_mode(vcpu, TRUE);
+	if (imm.pk) {
+		ipsr->pk = 0;
+		vcpu_pkr_use_unset(vcpu);
+	}
 	__asm__ __volatile(";; mov psr.l=%0;; srlz.d"::"r"(psr):"memory");
 	return IA64_NO_FAULT;
 }
@@ -340,7 +379,8 @@ IA64FAULT vcpu_set_psr_sm(VCPU * vcpu, u64 imm24)
 	// just handle psr.sp,pp and psr.i,ic (and user mask) for now
 	mask =
 	    IA64_PSR_PP | IA64_PSR_SP | IA64_PSR_I | IA64_PSR_IC | IA64_PSR_UM |
-	    IA64_PSR_DT | IA64_PSR_DFL | IA64_PSR_DFH | IA64_PSR_BE;
+	    IA64_PSR_DT | IA64_PSR_DFL | IA64_PSR_DFH | IA64_PSR_BE |
+	    IA64_PSR_PK;
 	if (imm24 & ~mask)
 		return IA64_ILLOP_FAULT;
 	if (imm.dfh) {
@@ -388,6 +428,10 @@ IA64FAULT vcpu_set_psr_sm(VCPU * vcpu, u64 imm24)
 		ipsr->be = 1;
 	if (imm.dt)
 		vcpu_set_metaphysical_mode(vcpu, FALSE);
+	if (imm.pk) {
+		vcpu_pkr_set_psr_handling(vcpu);
+		ipsr->pk = 1;
+	}
 	__asm__ __volatile(";; mov psr.l=%0;; srlz.d"::"r"(psr):"memory");
 	if (enabling_interrupts &&
 	    vcpu_check_pending_interrupts(vcpu) != SPURIOUS_VECTOR)
@@ -448,6 +492,11 @@ IA64FAULT vcpu_set_psr_l(VCPU * vcpu, u64 val)
 		vcpu_set_metaphysical_mode(vcpu, TRUE);
 	if (newpsr.be)
 		ipsr->be = 1;
+	if (newpsr.pk) {
+		vcpu_pkr_set_psr_handling(vcpu);
+		ipsr->pk = 1;
+	} else
+		vcpu_pkr_use_unset(vcpu);
 	if (enabling_interrupts &&
 	    vcpu_check_pending_interrupts(vcpu) != SPURIOUS_VECTOR)
 		PSCB(vcpu, pending_interruption) = 1;
@@ -504,6 +553,11 @@ IA64FAULT vcpu_set_psr(VCPU * vcpu, u64 val)
 		else
 			vcpu_bsw0(vcpu);
 	}
+	if (vpsr.pk) {
+		vcpu_pkr_set_psr_handling(vcpu);
+		newpsr.pk = 1;
+	} else
+		vcpu_pkr_use_unset(vcpu);
 
 	regs->cr_ipsr = newpsr.val;
 
@@ -700,10 +754,6 @@ IA64FAULT vcpu_set_iva(VCPU * vcpu, u64 val)
 
 IA64FAULT vcpu_set_pta(VCPU * vcpu, u64 val)
 {
-	if (val & IA64_PTA_LFMT) {
-		printk("*** No support for VHPT long format yet!!\n");
-		return IA64_ILLOP_FAULT;
-	}
 	if (val & (0x3f << 9))	/* reserved fields */
 		return IA64_RSVDREG_FAULT;
 	if (val & 2)		/* reserved fields */
@@ -1623,7 +1673,7 @@ IA64FAULT vcpu_translate(VCPU * vcpu, u64 address, BOOLEAN is_data,
 			 u64 * pteval, u64 * itir, u64 * iha)
 {
 	unsigned long region = address >> 61;
-	unsigned long pta, rid, rr;
+	unsigned long pta, rid, rr, key = 0;
 	union pte_flags pte;
 	TR_ENTRY *trp;
 
@@ -1647,7 +1697,7 @@ IA64FAULT vcpu_translate(VCPU * vcpu, u64 address, BOOLEAN is_data,
 		} else {
 			*pteval = (address & _PAGE_PPN_MASK) |
 				__DIRTY_BITS | _PAGE_PL_PRIV | _PAGE_AR_RWX;
-			*itir = PAGE_SHIFT << 2;
+			*itir = vcpu->arch.vhpt_pg_shift << 2;
 			perfc_incr(phys_translate);
 			return IA64_NO_FAULT;
 		}
@@ -1698,10 +1748,6 @@ IA64FAULT vcpu_translate(VCPU * vcpu, u64 address, BOOLEAN is_data,
 
 	/* check guest VHPT */
 	pta = PSCB(vcpu, pta);
-	if (pta & IA64_PTA_VF) { /* long format VHPT - not implemented */
-		panic_domain(vcpu_regs(vcpu), "can't do long format VHPT\n");
-		//return is_data ? IA64_DATA_TLB_VECTOR:IA64_INST_TLB_VECTOR;
-	}
 
 	*itir = rr & (RR_RID_MASK | RR_PS_MASK);
 	// note: architecturally, iha is optionally set for alt faults but
@@ -1716,12 +1762,20 @@ IA64FAULT vcpu_translate(VCPU * vcpu, u64 address, BOOLEAN is_data,
 		    region == 7 && ia64_psr(regs)->cpl == CONFIG_CPL0_EMUL) {
 			pte.val = address & _PAGE_PPN_MASK;
 			pte.val = pte.val | optf->im_reg7.pgprot;
+			key = optf->im_reg7.key;
 			goto out;
 		}
 		return is_data ? IA64_ALT_DATA_TLB_VECTOR :
 			IA64_ALT_INST_TLB_VECTOR;
 	}
 
+	if (pta & IA64_PTA_VF) { /* long format VHPT - not implemented */
+		/*
+		 * minimal support: vhpt walker is really dumb and won't find
+		 * anything
+		 */
+		return is_data ? IA64_DATA_TLB_VECTOR : IA64_INST_TLB_VECTOR;
+	}
 	/* avoid recursively walking (short format) VHPT */
 	if (((address ^ pta) & ((itir_mask(pta) << 3) >> 3)) == 0)
 		return is_data ? IA64_DATA_TLB_VECTOR : IA64_INST_TLB_VECTOR;
@@ -1741,7 +1795,7 @@ IA64FAULT vcpu_translate(VCPU * vcpu, u64 address, BOOLEAN is_data,
 
 	/* found mapping in guest VHPT! */
 out:
-	*itir = rr & RR_PS_MASK;
+	*itir = (rr & RR_PS_MASK) | (key << IA64_ITIR_KEY);
 	*pteval = pte.val;
 	perfc_incr(vhpt_translate);
 	return IA64_NO_FAULT;
@@ -2051,34 +2105,61 @@ IA64FAULT vcpu_get_rr(VCPU * vcpu, u64 reg, u64 * pval)
 	return IA64_NO_FAULT;
 }
 
+IA64FAULT vcpu_set_rr0_to_rr4(VCPU * vcpu, u64 val0, u64 val1, u64 val2,
+			      u64 val3, u64 val4)
+{
+	u64 reg0 = 0x0000000000000000UL;
+	u64 reg1 = 0x2000000000000000UL;
+	u64 reg2 = 0x4000000000000000UL;
+	u64 reg3 = 0x6000000000000000UL;
+	u64 reg4 = 0x8000000000000000UL;
+
+	PSCB(vcpu, rrs)[reg0 >> 61] = val0;
+	PSCB(vcpu, rrs)[reg1 >> 61] = val1;
+	PSCB(vcpu, rrs)[reg2 >> 61] = val2;
+	PSCB(vcpu, rrs)[reg3 >> 61] = val3;
+	PSCB(vcpu, rrs)[reg4 >> 61] = val4;
+	if (vcpu == current) {
+		set_one_rr(reg0, val0);
+		set_one_rr(reg1, val1);
+		set_one_rr(reg2, val2);
+		set_one_rr(reg3, val3);
+		set_one_rr(reg4, val4);
+	}
+	return IA64_NO_FAULT;
+}
+
 /**************************************************************************
  VCPU protection key register access routines
 **************************************************************************/
 
 IA64FAULT vcpu_get_pkr(VCPU * vcpu, u64 reg, u64 * pval)
 {
-#ifndef PKR_USE_FIXED
-	printk("vcpu_get_pkr: called, not implemented yet\n");
-	return IA64_ILLOP_FAULT;
-#else
-	u64 val = (u64) ia64_get_pkr(reg);
-	*pval = val;
+	if (reg > XEN_IA64_NPKRS)
+		return IA64_RSVDREG_FAULT;	/* register index to large */
+
+	*pval = (u64) PSCBX(vcpu, pkrs[reg]);
 	return IA64_NO_FAULT;
-#endif
 }
 
 IA64FAULT vcpu_set_pkr(VCPU * vcpu, u64 reg, u64 val)
 {
-#ifndef PKR_USE_FIXED
-	printk("vcpu_set_pkr: called, not implemented yet\n");
-	return IA64_ILLOP_FAULT;
-#else
-//      if (reg >= NPKRS)
-//		return IA64_ILLOP_FAULT;
-	vcpu->pkrs[reg] = val;
-	ia64_set_pkr(reg, val);
+	ia64_pkr_t pkr_new;
+
+	if (reg >= XEN_IA64_NPKRS)
+		return IA64_RSVDREG_FAULT;	/* index to large */
+
+	pkr_new.val = val;
+	if (pkr_new.reserved1)
+		return IA64_RSVDREG_FAULT;	/* reserved field */
+
+	if (pkr_new.reserved2)
+		return IA64_RSVDREG_FAULT;	/* reserved field */
+
+	PSCBX(vcpu, pkrs[reg]) = pkr_new.val;
+	ia64_set_pkr(reg, pkr_new.val);
+
 	return IA64_NO_FAULT;
-#endif
 }
 
 /**************************************************************************
@@ -2211,25 +2292,43 @@ IA64FAULT vcpu_set_dtr(VCPU * vcpu, u64 slot, u64 pte,
  VCPU translation cache access routines
 **************************************************************************/
 
+static void
+vcpu_rebuild_vhpt(VCPU * vcpu, u64 ps)
+{
+#ifdef CONFIG_XEN_IA64_PERVCPU_VHPT
+	printk("vhpt rebuild: using page_shift %d\n", (int)ps);
+	vcpu->arch.vhpt_pg_shift = ps;
+	vcpu_purge_tr_entry(&PSCBX(vcpu, dtlb));
+	vcpu_purge_tr_entry(&PSCBX(vcpu, itlb));
+	local_vhpt_flush();
+	load_region_regs(vcpu);
+#else
+	panic_domain(NULL, "domain trying to use smaller page size!\n");
+#endif
+}
+
 void
 vcpu_itc_no_srlz(VCPU * vcpu, u64 IorD, u64 vaddr, u64 pte,
-                 u64 mp_pte, u64 logps, struct p2m_entry *entry)
+                 u64 mp_pte, u64 itir, struct p2m_entry *entry)
 {
+	ia64_itir_t _itir = {.itir = itir};
 	unsigned long psr;
-	unsigned long ps = (vcpu->domain == dom0) ? logps : PAGE_SHIFT;
+	unsigned long ps = (vcpu->domain == dom0) ? _itir.ps :
+						    vcpu->arch.vhpt_pg_shift;
 
-	check_xen_space_overlap("itc", vaddr, 1UL << logps);
+	check_xen_space_overlap("itc", vaddr, 1UL << _itir.ps);
 
 	// FIXME, must be inlined or potential for nested fault here!
-	if ((vcpu->domain == dom0) && (logps < PAGE_SHIFT))
+	if ((vcpu->domain == dom0) && (_itir.ps < PAGE_SHIFT))
 		panic_domain(NULL, "vcpu_itc_no_srlz: domain trying to use "
 		             "smaller page size!\n");
 
-	BUG_ON(logps > PAGE_SHIFT);
+	BUG_ON(_itir.ps > vcpu->arch.vhpt_pg_shift);
 	vcpu_tlb_track_insert_or_dirty(vcpu, vaddr, entry);
 	psr = ia64_clear_ic();
 	pte &= ~(_PAGE_RV2 | _PAGE_RV1);	// Mask out the reserved bits.
-	ia64_itc(IorD, vaddr, pte, ps);	// FIXME: look for bigger mappings
+					// FIXME: look for bigger mappings
+	ia64_itc(IorD, vaddr, pte, IA64_ITIR_PS_KEY(ps, _itir.key));
 	ia64_set_psr(psr);
 	// ia64_srlz_i(); // no srls req'd, will rfi later
 	if (vcpu->domain == dom0 && ((vaddr >> 61) == 7)) {
@@ -2237,39 +2336,41 @@ vcpu_itc_no_srlz(VCPU * vcpu, u64 IorD, u64 vaddr, u64 pte,
 		// addresses never get flushed.  More work needed if this
 		// ever happens.
 //printk("vhpt_insert(%p,%p,%p)\n",vaddr,pte,1L<<logps);
-		if (logps > PAGE_SHIFT)
-			vhpt_multiple_insert(vaddr, pte, logps);
+		if (_itir.ps > vcpu->arch.vhpt_pg_shift)
+			vhpt_multiple_insert(vaddr, pte, _itir.itir);
 		else
-			vhpt_insert(vaddr, pte, logps << 2);
+			vhpt_insert(vaddr, pte, _itir.itir);
 	}
 	// even if domain pagesize is larger than PAGE_SIZE, just put
 	// PAGE_SIZE mapping in the vhpt for now, else purging is complicated
-	else
-		vhpt_insert(vaddr, pte, PAGE_SHIFT << 2);
+	else {
+		_itir.ps = vcpu->arch.vhpt_pg_shift;
+		vhpt_insert(vaddr, pte, _itir.itir);
+	}
 }
 
 IA64FAULT vcpu_itc_d(VCPU * vcpu, u64 pte, u64 itir, u64 ifa)
 {
-	unsigned long pteval, logps = itir_ps(itir);
+	unsigned long pteval;
 	BOOLEAN swap_rr0 = (!(ifa >> 61) && PSCB(vcpu, metaphysical_mode));
 	struct p2m_entry entry;
+	ia64_itir_t _itir = {.itir = itir};
 
-	if (logps < PAGE_SHIFT)
-		panic_domain(NULL, "vcpu_itc_d: domain trying to use "
-		             "smaller page size!\n");
+	if (_itir.ps < vcpu->arch.vhpt_pg_shift)
+		vcpu_rebuild_vhpt(vcpu, _itir.ps);
 
  again:
-	//itir = (itir & ~0xfc) | (PAGE_SHIFT<<2); // ignore domain's pagesize
-	pteval = translate_domain_pte(pte, ifa, itir, &logps, &entry);
+	//itir = (itir & ~0xfc) | (vcpu->arch.vhpt_pg_shift<<2); // ign dom pgsz
+	pteval = translate_domain_pte(pte, ifa, itir, &(_itir.itir), &entry);
 	if (!pteval)
 		return IA64_ILLOP_FAULT;
 	if (swap_rr0)
 		set_one_rr(0x0, PSCB(vcpu, rrs[0]));
-	vcpu_itc_no_srlz(vcpu, 2, ifa, pteval, pte, logps, &entry);
+	vcpu_itc_no_srlz(vcpu, 2, ifa, pteval, pte, _itir.itir, &entry);
 	if (swap_rr0)
 		set_metaphysical_rr0();
 	if (p2m_entry_retry(&entry)) {
-		vcpu_flush_tlb_vhpt_range(ifa, logps);
+		vcpu_flush_tlb_vhpt_range(ifa, _itir.ps);
 		goto again;
 	}
 	vcpu_set_tr_entry(&PSCBX(vcpu, dtlb), pte, itir, ifa);
@@ -2278,25 +2379,26 @@ IA64FAULT vcpu_itc_d(VCPU * vcpu, u64 pte, u64 itir, u64 ifa)
 
 IA64FAULT vcpu_itc_i(VCPU * vcpu, u64 pte, u64 itir, u64 ifa)
 {
-	unsigned long pteval, logps = itir_ps(itir);
+	unsigned long pteval;
 	BOOLEAN swap_rr0 = (!(ifa >> 61) && PSCB(vcpu, metaphysical_mode));
 	struct p2m_entry entry;
+	ia64_itir_t _itir = {.itir = itir};
 
-	if (logps < PAGE_SHIFT)
-		panic_domain(NULL, "vcpu_itc_i: domain trying to use "
-		             "smaller page size!\n");
+	if (_itir.ps < vcpu->arch.vhpt_pg_shift)
+		vcpu_rebuild_vhpt(vcpu, _itir.ps);
+
       again:
-	//itir = (itir & ~0xfc) | (PAGE_SHIFT<<2); // ignore domain's pagesize
-	pteval = translate_domain_pte(pte, ifa, itir, &logps, &entry);
+	//itir = (itir & ~0xfc) | (vcpu->arch.vhpt_pg_shift<<2); // ign dom pgsz
+	pteval = translate_domain_pte(pte, ifa, itir, &(_itir.itir), &entry);
 	if (!pteval)
 		return IA64_ILLOP_FAULT;
 	if (swap_rr0)
 		set_one_rr(0x0, PSCB(vcpu, rrs[0]));
-	vcpu_itc_no_srlz(vcpu, 1, ifa, pteval, pte, logps, &entry);
+	vcpu_itc_no_srlz(vcpu, 1, ifa, pteval, pte, _itir.itir, &entry);
 	if (swap_rr0)
 		set_metaphysical_rr0();
 	if (p2m_entry_retry(&entry)) {
-		vcpu_flush_tlb_vhpt_range(ifa, logps);
+		vcpu_flush_tlb_vhpt_range(ifa, _itir.ps);
 		goto again;
 	}
 	vcpu_set_tr_entry(&PSCBX(vcpu, itlb), pte, itir, ifa);

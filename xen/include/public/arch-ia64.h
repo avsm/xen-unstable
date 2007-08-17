@@ -236,8 +236,7 @@ struct mapped_regs {
             int banknum; // 0 or 1, which virtual register bank is active
             unsigned long rrs[8]; // region registers
             unsigned long krs[8]; // kernel registers
-            unsigned long pkrs[8]; // protection key registers
-            unsigned long tmp[8]; // temp registers (e.g. for hyperprivops)
+            unsigned long tmp[16]; // temp registers (e.g. for hyperprivops)
         };
     };
 };
@@ -544,7 +543,8 @@ struct xen_ia64_boot_param {
 #define HYPERPRIVOP_SET_EFLAG		(HYPERPRIVOP_START + 0x16)
 #define HYPERPRIVOP_RSM_BE		(HYPERPRIVOP_START + 0x17)
 #define HYPERPRIVOP_GET_PSR		(HYPERPRIVOP_START + 0x18)
-#define HYPERPRIVOP_MAX			(0x19)
+#define HYPERPRIVOP_SET_RR0_TO_RR4	(HYPERPRIVOP_START + 0x19)
+#define HYPERPRIVOP_MAX			(0x1a)
 
 /* Fast and light hypercalls.  */
 #define __HYPERVISOR_ia64_fast_eoi	__HYPERVISOR_arch_1
@@ -552,11 +552,6 @@ struct xen_ia64_boot_param {
 /* Xencomm macros.  */
 #define XENCOMM_INLINE_MASK 0xf800000000000000UL
 #define XENCOMM_INLINE_FLAG 0x8000000000000000UL
-
-#define XENCOMM_IS_INLINE(addr) \
-  (((unsigned long)(addr) & XENCOMM_INLINE_MASK) == XENCOMM_INLINE_FLAG)
-#define XENCOMM_INLINE_ADDR(addr) \
-  ((unsigned long)(addr) & ~XENCOMM_INLINE_MASK)
 
 #ifndef __ASSEMBLY__
 
