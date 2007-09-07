@@ -1,6 +1,7 @@
 /******************************************************************************
+ * xc_ia64_save_restore.h
  *
- * Copyright (c) 2007 Isaku Yamahata <yamahata at valinux co jp>
+ * Copyright (c) 2006 Isaku Yamahata <yamahata at valinux co jp>
  *                    VA Linux Systems Japan K.K.
  *
  * This program is free software; you can redistribute it and/or modify
@@ -18,21 +19,19 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  *
  */
-#ifndef __ASM_XEN_IA64_DOM_FW_UTILS_H__
-#define __ASM_XEN_IA64_DOM_FW_UTILS_H__
 
-uint32_t xen_ia64_version(struct domain *unused); 
-int xen_ia64_fpswa_revision(struct domain *d, unsigned int *revision); 
-int xen_ia64_is_vcpu_allocated(struct domain *d, uint32_t vcpu); 
-int xen_ia64_is_running_on_sim(struct domain *unused);
-int xen_ia64_is_dom0(struct domain *d);
-void xen_ia64_set_convmem_end(struct domain *d, uint64_t convmem_end);
-void dom_fw_copy_to(struct domain *d, unsigned long dest_gpaddr,
-                    void *src, size_t size); 
-void dom_fw_copy_from(void* dest, struct domain *d, unsigned long src_gpaddr,
-                      size_t size); 
+#ifndef XC_IA64_SAVE_RESTORE_H
+#define XC_IA64_SR_H
 
-#endif /* __ASM_XEN_IA64_DOM_FW_UTILS_H__ */
+        /* introduced changeset 10692:306d7857928c of xen-ia64-unstable.ht */
+#define XC_IA64_SR_FORMAT_VER_ONE       1UL
+        /* using foreign p2m exposure version */
+#define XC_IA64_SR_FORMAT_VER_TWO       2UL
+#define XC_IA64_SR_FORMAT_VER_MAX       2UL
+
+#define XC_IA64_SR_FORMAT_VER_CURRENT   XC_IA64_SR_FORMAT_VER_TWO
+
+#endif /* XC_IA64_SAVE_RESTORE_H */
 
 /*
  * Local variables:

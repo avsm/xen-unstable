@@ -23,6 +23,7 @@
 #include <xen/iocap.h>
 #include <xen/errno.h>
 #include <xen/nodemask.h>
+#include <asm/dom_fw_utils.h>
 
 #define get_xen_guest_handle(val, hnd)  do { val = (hnd).p; } while (0)
 
@@ -104,6 +105,7 @@ long arch_do_domctl(xen_domctl_t *op, XEN_GUEST_HANDLE(xen_domctl_t) u_domctl)
                 } else {
                     d->arch.is_vti = 1;
                     vmx_setup_platform(d);
+                    xen_ia64_set_convmem_end(d, ds->maxmem);
                 }
             }
             else {
@@ -412,6 +414,15 @@ do_dom0vp_op(unsigned long cmd,
     }
     case IA64_DOM0VP_add_io_space:
         ret = dom0vp_add_io_space(d, arg0, arg1, arg2);
+        break;
+    case IA64_DOM0VP_expose_foreign_p2m: {
+        XEN_GUEST_HANDLE(char) hnd;
+        set_xen_guest_handle(hnd, (char*)arg2);
+        ret = dom0vp_expose_foreign_p2m(d, arg0, (domid_t)arg1, hnd, arg3);
+        break;
+    }
+    case IA64_DOM0VP_unexpose_foreign_p2m:
+        ret = dom0vp_unexpose_foreign_p2m(d, arg0, arg1);
         break;
     default:
         ret = -1;
