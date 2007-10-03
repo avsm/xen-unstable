@@ -32,38 +32,6 @@
 #define VPD_SHIFT	16
 #define VPD_SIZE	(1 << VPD_SHIFT)
 
-typedef struct {
-	unsigned long	dcr;		// CR0
-	unsigned long	itm;
-	unsigned long	iva;
-	unsigned long	rsv1[5];
-	unsigned long	pta;		// CR8
-	unsigned long	rsv2[7];
-	unsigned long	ipsr;		// CR16
-	unsigned long	isr;
-	unsigned long	rsv3;
-	unsigned long	iip;
-	unsigned long	ifa;
-	unsigned long	itir;
-	unsigned long	iipa;
-	unsigned long	ifs;
-	unsigned long	iim;		// CR24
-	unsigned long	iha;
-	unsigned long	rsv4[38];
-	unsigned long	lid;		// CR64
-	unsigned long	ivr;
-	unsigned long	tpr;
-	unsigned long	eoi;
-	unsigned long	irr[4];
-	unsigned long	itv;		// CR72
-	unsigned long	pmv;
-	unsigned long	cmcv;
-	unsigned long	rsv5[5];
-	unsigned long	lrr0;		// CR80
-	unsigned long	lrr1;
-	unsigned long	rsv6[46];
-} cr_t;
-
 #ifdef VTI_DEBUG
 struct ivt_debug{
     unsigned long iip;
@@ -87,10 +55,11 @@ struct arch_vmx_struct {
     unsigned long   cause;
     unsigned long   opcode;
     unsigned long   mpta;
-    unsigned long   flags;
     unsigned long   xen_port;
+    unsigned char   flags;
     unsigned char   xtp;
     unsigned char   pal_init_pending;
+    unsigned char   mmu_mode; /* Current mmu mode.  See vmx_phy_mode.h  */
 #ifdef VTI_DEBUG
     unsigned long  ivt_current;
     struct ivt_debug ivt_debug[IVT_DEBUG_MAX];
@@ -99,8 +68,7 @@ struct arch_vmx_struct {
 
 #define VMX_DOMAIN(v)   v->arch.arch_vmx.flags
 
-#define ARCH_VMX_IO_WAIT        3       /* Waiting for I/O completion */
-#define ARCH_VMX_DOMAIN         5       /* Need it to indicate VTi domain */
+#define ARCH_VMX_DOMAIN         0       /* Need it to indicate VTi domain */
 
 #endif //__ASSEMBLY__
 

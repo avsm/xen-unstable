@@ -6,15 +6,19 @@
  * 04/11/17 Ashok Raj	<ashok.raj@intel.com> Added CPU Hotplug Support
  */
 #ifdef XEN
+#include <linux/cpu.h>
+#include <linux/notifier.h>
 #include <xen/types.h>
 #include <xen/lib.h>
 #include <xen/symbols.h>
 #include <xen/smp.h>
 #include <xen/sched.h>
+#include <asm/elf.h>
 #include <asm/uaccess.h>
 #include <asm/processor.h>
 #include <asm/ptrace.h>
 #include <asm/unwind.h>
+#include <asm/sal.h>
 #else
 #define __KERNEL_SYSCALLS__	/* see <asm/unistd.h> */
 #include <linux/config.h>
@@ -236,10 +240,15 @@ default_idle (void)
 		else
 			cpu_relax();
 }
+#endif
 
 #ifdef CONFIG_HOTPLUG_CPU
 /* We don't actually take CPU down, just spin without interrupts. */
+#ifndef XEN
 static inline void play_dead(void)
+#else
+void play_dead(void)
+#endif
 {
 	extern void ia64_cpu_local_tick (void);
 	unsigned int this_cpu = smp_processor_id();
@@ -249,7 +258,6 @@ static inline void play_dead(void)
 
 	max_xtp();
 	local_irq_disable();
-	idle_domain_exit();
 	ia64_jump_to_sal(&sal_boot_rendez_state[this_cpu]);
 	/*
 	 * The above is a point of no-return, the processor is
@@ -258,12 +266,17 @@ static inline void play_dead(void)
 	BUG();
 }
 #else
+#ifndef XEN
 static inline void play_dead(void)
+#else
+void play_dead(void)
+#endif
 {
 	BUG();
 }
 #endif /* CONFIG_HOTPLUG_CPU */
 
+#ifndef XEN
 void cpu_idle_wait(void)
 {
 	unsigned int cpu, this_cpu = get_cpu();
@@ -530,6 +543,8 @@ copy_thread (int nr, unsigned long clone_flags,
 	return retval;
 }
 
+#endif /* !XEN */
+
 static void
 do_copy_task_regs (struct task_struct *task, struct unw_frame_info *info, void *arg)
 {
@@ -547,6 +562,9 @@ do_copy_task_regs (struct task_struct *task, struct unw_frame_info *info, void *
 	unw_get_sp(info, &sp);
 	pt = (struct pt_regs *) (sp + 16);
 
+#ifndef XEN
+	/* FIXME: Is this needed by XEN when it makes its crash notes
+	 * during kdump? */
 	urbs_end = ia64_get_user_rbs_end(task, pt, &cfm);
 
 	if (ia64_sync_user_rbs(task, info->sw, pt->ar_bspstore, urbs_end) < 0)
@@ -554,6 +572,11 @@ do_copy_task_regs (struct task_struct *task, struct unw_frame_info *info, void *
 
 	ia64_peek(task, info->sw, urbs_end, (long) ia64_rse_rnat_addr((long *) urbs_end),
 		  &ar_rnat);
+#else
+
+	ia64_peek(task, info->sw, urbs_end, (long) ia64_rse_rnat_addr((u64 *) urbs_end),
+		  (long *)&ar_rnat);
+#endif
 
 	/*
 	 * coredump format:
@@ -602,6 +625,8 @@ do_copy_task_regs (struct task_struct *task, struct unw_frame_info *info, void *
 	unw_get_ar(info, UNW_AR_SSD, &dst[56]);
 }
 
+#ifndef XEN
+
 void
 do_dump_task_fpu (struct task_struct *task, struct unw_frame_info *info, void *arg)
 {
@@ -623,11 +648,15 @@ do_dump_task_fpu (struct task_struct *task, struct unw_frame_info *info, void *a
 		memcpy(dst + 32, task->thread.fph, 96*16);
 }
 
+#endif /* !XEN */
+
 void
 do_copy_regs (struct unw_frame_info *info, void *arg)
 {
 	do_copy_task_regs(current, info, arg);
 }
+
+#ifndef XEN
 
 void
 do_dump_fpu (struct unw_frame_info *info, void *arg)
@@ -650,11 +679,15 @@ dump_task_regs(struct task_struct *task, elf_gregset_t *regs)
 	return 1;
 }
 
+#endif /* !XEN */
+
 void
 ia64_elf_core_copy_regs (struct pt_regs *pt, elf_gregset_t dst)
 {
 	unw_init_running(do_copy_regs, dst);
 }
+
+#ifndef XEN
 
 int
 dump_task_fpu (struct task_struct *task, elf_fpregset_t *dst)

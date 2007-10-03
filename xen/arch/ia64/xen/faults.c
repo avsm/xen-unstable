@@ -38,18 +38,6 @@ extern void die_if_kernel(char *str, struct pt_regs *regs, long err);
 extern int ia64_hyperprivop(unsigned long, REGS *);
 extern IA64FAULT ia64_hypercall(struct pt_regs *regs);
 
-// note IA64_PSR_PK removed from following, why is this necessary?
-#define	DELIVER_PSR_SET	(IA64_PSR_IC | IA64_PSR_I | \
-			IA64_PSR_DT | IA64_PSR_RT | \
-			IA64_PSR_IT | IA64_PSR_BN)
-
-#define	DELIVER_PSR_CLR	(IA64_PSR_AC | IA64_PSR_DFL | IA64_PSR_DFH |	\
-			 IA64_PSR_SP | IA64_PSR_DI | IA64_PSR_SI |	\
-			 IA64_PSR_DB | IA64_PSR_LP | IA64_PSR_TB |	\
-			 IA64_PSR_CPL| IA64_PSR_MC | IA64_PSR_IS |	\
-			 IA64_PSR_ID | IA64_PSR_DA | IA64_PSR_DD |	\
-			 IA64_PSR_SS | IA64_PSR_RI | IA64_PSR_ED | IA64_PSR_IA)
-
 extern void do_ssc(unsigned long ssc, struct pt_regs *regs);
 
 // should never panic domain... if it does, stack may have been overrun
@@ -94,7 +82,9 @@ static void reflect_interruption(unsigned long isr, struct pt_regs *regs,
 	regs->cr_ipsr = vcpu_pl_adjust(regs->cr_ipsr, IA64_PSR_CPL0_BIT);
 	if (PSCB(v, dcr) & IA64_DCR_BE)
 		regs->cr_ipsr |= IA64_PSR_BE;
-
+	else
+		regs->cr_ipsr &= ~IA64_PSR_BE;
+    
 	if (PSCB(v, hpsr_dfh))
 		regs->cr_ipsr |= IA64_PSR_DFH;  
 	PSCB(v, vpsr_dfh) = 0;
@@ -102,6 +92,9 @@ static void reflect_interruption(unsigned long isr, struct pt_regs *regs,
 	PSCB(v, interrupt_collection_enabled) = 0;
 
 	perfc_incra(slow_reflect, vector >> 8);
+
+	debugger_event(vector == IA64_EXTINT_VECTOR ?
+		       XEN_IA64_DEBUG_ON_EXTINT : XEN_IA64_DEBUG_ON_EXCEPT);
 }
 
 void reflect_event(void)
@@ -140,12 +133,17 @@ void reflect_event(void)
 	regs->cr_ipsr = vcpu_pl_adjust(regs->cr_ipsr, IA64_PSR_CPL0_BIT);
 	if (PSCB(v, dcr) & IA64_DCR_BE)
 		regs->cr_ipsr |= IA64_PSR_BE;
+	else
+		regs->cr_ipsr &= ~IA64_PSR_BE;
+
 
 	if (PSCB(v, hpsr_dfh))
 		regs->cr_ipsr |= IA64_PSR_DFH;
 	PSCB(v, vpsr_dfh) = 0;
 	v->vcpu_info->evtchn_upcall_mask = 1;
 	PSCB(v, interrupt_collection_enabled) = 0;
+
+	debugger_event(XEN_IA64_DEBUG_ON_EVENT);
 }
 
 static int handle_lazy_cover(struct vcpu *v, struct pt_regs *regs)
@@ -241,6 +239,9 @@ void ia64_do_page_fault(unsigned long address, unsigned long isr,
 					       IA64_PSR_CPL0_BIT);
 		if (PSCB(current, dcr) & IA64_DCR_BE)
 			regs->cr_ipsr |= IA64_PSR_BE;
+		else
+			regs->cr_ipsr &= ~IA64_PSR_BE;
+
 
 		if (PSCB(current, hpsr_dfh))
 			regs->cr_ipsr |= IA64_PSR_DFH;  
@@ -594,6 +595,9 @@ ia64_handle_reflection(unsigned long ifa, struct pt_regs *regs,
 		check_lazy_cover = 1;
 		vector = IA64_PAGE_NOT_PRESENT_VECTOR;
 		break;
+	case 21:
+		vector = IA64_KEY_PERMISSION_VECTOR;
+		break;
 	case 22:
 		vector = IA64_INST_ACCESS_RIGHTS_VECTOR;
 		break;
@@ -659,7 +663,7 @@ ia64_handle_reflection(unsigned long ifa, struct pt_regs *regs,
 		break;
 	case 29:
 		vector = IA64_DEBUG_VECTOR;
-		if (debugger_trap_entry(vector,regs))
+		if (debugger_kernel_event(regs, XEN_IA64_DEBUG_ON_KERN_DEBUG))
 			return;
 		break;
 	case 30:
@@ -697,12 +701,12 @@ ia64_handle_reflection(unsigned long ifa, struct pt_regs *regs,
 		break;
 	case 35:
 		vector = IA64_TAKEN_BRANCH_TRAP_VECTOR;
-		if (debugger_trap_entry(vector,regs))
+		if (debugger_kernel_event(regs, XEN_IA64_DEBUG_ON_KERN_TBRANCH))
 			return;
 		break;
 	case 36:
 		vector = IA64_SINGLE_STEP_TRAP_VECTOR;
-		if (debugger_trap_entry(vector,regs))
+		if (debugger_kernel_event(regs, XEN_IA64_DEBUG_ON_KERN_SSTEP))
 			return;
 		break;
 

@@ -66,7 +66,7 @@ custom_param("vti_vhpt_size", parse_vhpt_size);
  * Input:
  *  d: 
  */
-u64 get_mfn(struct domain *d, u64 gpfn)
+static u64 get_mfn(struct domain *d, u64 gpfn)
 {
 //    struct domain *d;
     u64    xen_gppn, xen_mppn, mpfn;
@@ -91,68 +91,6 @@ u64 get_mfn(struct domain *d, u64 gpfn)
     mpfn = mpfn | (((1UL <<(PAGE_SHIFT-ARCH_PAGE_SHIFT))-1)&gpfn);
     return mpfn;
     
-}
-
-/*
- * The VRN bits of va stand for which rr to get.
- */
-//ia64_rr vmmu_get_rr(struct vcpu *vcpu, u64 va)
-//{
-//    ia64_rr   vrr;
-//    vcpu_get_rr(vcpu, va, &vrr.rrval);
-//    return vrr;
-//}
-
-/*
-void recycle_message(thash_cb_t *hcb, u64 para)
-{
-    if(hcb->ht == THASH_VHPT)
-    {
-        printk("ERROR : vhpt recycle happenning!!!\n");
-    }
-    printk("hcb=%p recycled with %lx\n",hcb,para);
-}
- */
-
-/*
- * Purge all guest TCs in logical processor.
- * Instead of purging all LP TCs, we should only purge   
- * TCs that belong to this guest.
- */
-void
-purge_machine_tc_by_domid(domid_t domid)
-{
-#ifndef PURGE_GUEST_TC_ONLY
-    // purge all TCs
-    struct ia64_pal_retval  result;
-    u64 addr;
-    u32 count1,count2;
-    u32 stride1,stride2;
-    u32 i,j;
-    u64 psr;
-
-    result = ia64_pal_call_static(PAL_PTCE_INFO,0,0,0, 0);
-    if ( result.status != 0 ) {
-        panic ("PAL_PTCE_INFO failed\n");
-    }
-    addr = result.v0;
-    count1 = HIGH_32BITS(result.v1);
-    count2 = LOW_32BITS (result.v1);
-    stride1 = HIGH_32BITS(result.v2);
-    stride2 = LOW_32BITS (result.v2);
-
-    local_irq_save(psr);
-    for (i=0; i<count1; i++) {
-        for (j=0; j<count2; j++) {
-            ia64_ptce(addr);
-            addr += stride2;
-        }
-        addr += stride1;
-    }
-    local_irq_restore(psr);
-#else
-    // purge all TCs belong to this guest.
-#endif
 }
 
 static int init_domain_vhpt(struct vcpu *v)
@@ -313,7 +251,8 @@ fetch_code(VCPU *vcpu, u64 gip, IA64_BUNDLE *pbundle)
     }
     if( gpip){
         mfn = gmfn_to_mfn(vcpu->domain, gpip >>PAGE_SHIFT);
-        if( mfn == INVALID_MFN )  panic_domain(vcpu_regs(vcpu),"fetch_code: invalid memory\n");
+        if (mfn == INVALID_MFN)
+            panic_domain(vcpu_regs(vcpu), "fetch_code: invalid memory\n");
         maddr = (mfn << PAGE_SHIFT) | (gpip & (PAGE_SIZE - 1));
     }else{
         tlb = vhpt_lookup(gip);
@@ -403,6 +342,12 @@ IA64FAULT vmx_vcpu_itr_i(VCPU *vcpu, u64 slot, u64 pte, u64 itir, u64 ifa)
     }
     thash_purge_entries(vcpu, va, ps);
 #endif
+
+    if (slot >= NITRS) {
+        panic_domain(NULL, "bad itr.i slot (%ld)", slot);
+        return IA64_FAULT;
+    }
+        
     pte &= ~PAGE_FLAGS_RV_MASK;
     vcpu_get_rr(vcpu, va, &rid);
     rid = rid& RR_RID_MASK;
@@ -431,6 +376,12 @@ IA64FAULT vmx_vcpu_itr_d(VCPU *vcpu, u64 slot, u64 pte, u64 itir, u64 ifa)
         return IA64_FAULT;
     }
 #endif   
+
+    if (slot >= NDTRS) {
+        panic_domain(NULL, "bad itr.d slot (%ld)", slot);
+        return IA64_FAULT;
+    }
+
     pte &= ~PAGE_FLAGS_RV_MASK;
 
     /* This is a bad workaround
@@ -720,18 +671,19 @@ IA64FAULT vmx_vcpu_tpa(VCPU *vcpu, u64 vadr, u64 *padr)
 u64 vmx_vcpu_tak(VCPU *vcpu, u64 vadr)
 {
     thash_data_t *data;
-    PTA vpta;
     u64 key;
-    vpta.val = vmx_vcpu_get_pta(vcpu);
-    if(vpta.vf==0 || unimplemented_gva(vcpu, vadr)){
-        key=1;
+
+    if (unimplemented_gva(vcpu, vadr)) {
+        key = 1;
         return key;
     }
+
+    /* FIXME: if psr.dt is set, look in the guest VHPT.  */
     data = vtlb_lookup(vcpu, vadr, DSIDE_TLB);
-    if(!data||!data->p){
+    if (!data || !data->p)
         key = 1;
-    }else{
-        key = data->key;
-    }
+    else
+        key = data->key << 8;
+
     return key;
 }

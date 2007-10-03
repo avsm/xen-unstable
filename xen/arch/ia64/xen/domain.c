@@ -50,7 +50,10 @@
 #include <xen/guest_access.h>
 #include <asm/tlb_track.h>
 #include <asm/perfmon.h>
+#include <asm/sal.h>
 #include <public/vcpu.h>
+#include <linux/cpu.h>
+#include <linux/notifier.h>
 
 /* dom0_size: default memory allocation for dom0 (~4GB) */
 static unsigned long __initdata dom0_size = 4096UL*1024UL*1024UL;
@@ -336,8 +339,12 @@ static void default_idle(void)
 	local_irq_enable();
 }
 
+extern void play_dead(void);
+
 static void continue_cpu_idle_loop(void)
 {
+	int cpu = smp_processor_id();
+
 	for ( ; ; )
 	{
 #ifdef IA64
@@ -346,10 +353,12 @@ static void continue_cpu_idle_loop(void)
 	    irq_stat[cpu].idle_timestamp = jiffies;
 #endif
 	    page_scrub_schedule_work();
-	    while ( !softirq_pending(smp_processor_id()) )
+	    while ( !softirq_pending(cpu) )
 	        default_idle();
 	    raise_softirq(SCHEDULE_SOFTIRQ);
 	    do_softirq();
+	    if (!cpu_online(cpu))
+	        play_dead();
 	}
 }
 
@@ -426,10 +435,11 @@ int vcpu_initialise(struct vcpu *v)
 	struct domain *d = v->domain;
 
 	if (!is_idle_domain(d)) {
-	    v->arch.metaphysical_rr0 = d->arch.metaphysical_rr0;
-	    v->arch.metaphysical_rr4 = d->arch.metaphysical_rr4;
-	    v->arch.metaphysical_saved_rr0 = d->arch.metaphysical_rr0;
-	    v->arch.metaphysical_saved_rr4 = d->arch.metaphysical_rr4;
+	    v->arch.metaphysical_rid_dt = d->arch.metaphysical_rid_dt;
+	    v->arch.metaphysical_rid_d = d->arch.metaphysical_rid_d;
+	    /* Set default values to saved_rr.  */
+	    v->arch.metaphysical_saved_rr0 = d->arch.metaphysical_rid_dt;
+	    v->arch.metaphysical_saved_rr4 = d->arch.metaphysical_rid_dt;
 
 	    /* Is it correct ?
 	       It depends on the domain rid usage.
@@ -711,17 +721,21 @@ void arch_get_info_guest(struct vcpu *v, vcpu_guest_context_u c)
 		vcpu_get_ibr(v, i, &c.nat->regs.ibr[i]);
 	}
 
-	for (i = 0; i < 7; i++)
+	for (i = 0; i < 8; i++)
 		vcpu_get_rr(v, (unsigned long)i << 61, &c.nat->regs.rr[i]);
 
 	/* Fill extra regs.  */
-	for (i = 0; i < 8; i++) {
+	for (i = 0;
+	     (i < sizeof(tr->itrs) / sizeof(tr->itrs[0])) && i < NITRS;
+	     i++) {
 		tr->itrs[i].pte = v->arch.itrs[i].pte.val;
 		tr->itrs[i].itir = v->arch.itrs[i].itir;
 		tr->itrs[i].vadr = v->arch.itrs[i].vadr;
 		tr->itrs[i].rid = v->arch.itrs[i].rid;
 	}
-	for (i = 0; i < 8; i++) {
+	for (i = 0;
+	     (i < sizeof(tr->dtrs) / sizeof(tr->dtrs[0])) && i < NDTRS;
+	     i++) {
 		tr->dtrs[i].pte = v->arch.dtrs[i].pte.val;
 		tr->dtrs[i].itir = v->arch.dtrs[i].itir;
 		tr->dtrs[i].vadr = v->arch.dtrs[i].vadr;
@@ -733,8 +747,30 @@ void arch_get_info_guest(struct vcpu *v, vcpu_guest_context_u c)
  	if (!v->domain->arch.is_vti && v->arch.privregs == NULL)
 		return;
 
-	vcpu_get_dcr (v, &c.nat->regs.cr.dcr);
-	vcpu_get_iva (v, &c.nat->regs.cr.iva);
+	vcpu_get_dcr(v, &c.nat->regs.cr.dcr);
+
+	c.nat->regs.cr.itm = v->domain->arch.is_vti ?
+		vmx_vcpu_get_itm(v) : PSCBX(v, domain_itm);
+	vcpu_get_iva(v, &c.nat->regs.cr.iva);
+	vcpu_get_pta(v, &c.nat->regs.cr.pta);
+
+	vcpu_get_ipsr(v, &c.nat->regs.cr.ipsr);
+	vcpu_get_isr(v, &c.nat->regs.cr.isr);
+	vcpu_get_iip(v, &c.nat->regs.cr.iip);
+	vcpu_get_ifa(v, &c.nat->regs.cr.ifa);
+	vcpu_get_itir(v, &c.nat->regs.cr.itir);
+	vcpu_get_iha(v, &c.nat->regs.cr.iha);
+	vcpu_get_ivr(v, &c.nat->regs.cr.ivr);
+	vcpu_get_iim(v, &c.nat->regs.cr.iim);
+
+	vcpu_get_tpr(v, &c.nat->regs.cr.tpr);
+	vcpu_get_irr0(v, &c.nat->regs.cr.irr[0]);
+	vcpu_get_irr1(v, &c.nat->regs.cr.irr[1]);
+	vcpu_get_irr2(v, &c.nat->regs.cr.irr[2]);
+	vcpu_get_irr3(v, &c.nat->regs.cr.irr[3]);
+	vcpu_get_itv(v, &c.nat->regs.cr.itv);
+	vcpu_get_pmv(v, &c.nat->regs.cr.pmv);
+	vcpu_get_cmcv(v, &c.nat->regs.cr.cmcv);
 }
 
 int arch_set_info_guest(struct vcpu *v, vcpu_guest_context_u c)
@@ -857,13 +893,17 @@ int arch_set_info_guest(struct vcpu *v, vcpu_guest_context_u c)
 	if (c.nat->flags & VGCF_EXTRA_REGS) {
 		struct vcpu_tr_regs *tr = &c.nat->regs.tr;
 
-		for (i = 0; i < 8; i++) {
+		for (i = 0;
+		     (i < sizeof(tr->itrs) / sizeof(tr->itrs[0])) && i < NITRS;
+		     i++) {
 			vcpu_set_itr(v, i, tr->itrs[i].pte,
 			             tr->itrs[i].itir,
 			             tr->itrs[i].vadr,
 			             tr->itrs[i].rid);
 		}
-		for (i = 0; i < 8; i++) {
+		for (i = 0;
+		     (i < sizeof(tr->dtrs) / sizeof(tr->dtrs[0])) && i < NDTRS;
+		     i++) {
 			vcpu_set_dtr(v, i,
 			             tr->dtrs[i].pte,
 			             tr->dtrs[i].itir,

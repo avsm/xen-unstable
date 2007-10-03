@@ -16,6 +16,7 @@
 #include <asm/vmx_pal_vsa.h>
 #include <asm/asm-offsets.h>
 #include <asm-ia64/vmx_mm_def.h>
+#include <asm-ia64/vmx_phy_mode.h>
 
 #define ACCE_MOV_FROM_AR
 #define ACCE_MOV_FROM_RR
@@ -25,7 +26,7 @@
 #define ACCE_MOV_TO_PSR
 #define ACCE_THASH
 
-//mov r1=ar3
+//mov r1=ar3 (only itc is virtualized)
 GLOBAL_ENTRY(vmx_asm_mov_from_ar)
 #ifndef ACCE_MOV_FROM_AR
     br.many vmx_virtualization_fault_back
@@ -131,7 +132,7 @@ vmx_asm_mov_to_rr_back_2:
     ;; //mangling rid 1 and 3
     extr.u r16=r19,8,8
     extr.u r17=r19,24,8
-    extr.u r18=r19,2,6
+    extr.u r18=r19,2,6 // page size
     ;;
     dep r19=r16,r19,24,8
     ;;
@@ -148,15 +149,15 @@ vmx_asm_mov_to_rr_back_2:
     ;;
     cmp.eq.or p6,p0=4,r23
     ;;
-    adds r16=IA64_VCPU_MODE_FLAGS_OFFSET,r21
+    adds r16=IA64_VCPU_MMU_MODE_OFFSET,r21
     (p6) adds r17=IA64_VCPU_META_SAVED_RR0_OFFSET,r21
     ;;
-    ld4 r16=[r16]
+    ld1 r16=[r16]
     cmp.eq p7,p0=r0,r0
     (p6) shladd r17=r23,1,r17
     ;;
     (p6) st8 [r17]=r19
-    (p6) tbit.nz p6,p7=r16,0
+    (p6) cmp.eq p7,p0=VMX_MMU_VIRTUAL,r16 // Set physical rr if in virt mode
     ;;
     (p7) mov rr[r28]=r19
     mov r24=r22
@@ -170,56 +171,55 @@ GLOBAL_ENTRY(vmx_asm_rsm)
     br.many vmx_virtualization_fault_back
 #endif
     add r16=IA64_VPD_BASE_OFFSET,r21
-    extr.u r26=r25,6,21
-    extr.u r27=r25,31,2
+    extr.u r26=r25,6,21 // Imm21
+    extr.u r27=r25,31,2 // I2d
     ;;
     ld8 r16=[r16]
-    extr.u r28=r25,36,1
+    extr.u r28=r25,36,1 // I
     dep r26=r27,r26,21,2
     ;;
     add r17=VPD_VPSR_START_OFFSET,r16
-    add r22=IA64_VCPU_MODE_FLAGS_OFFSET,r21
+    add r22=IA64_VCPU_MMU_MODE_OFFSET,r21
     //r26 is imm24
     dep r26=r28,r26,23,1
     ;;
     ld8 r18=[r17]
     movl r28=IA64_PSR_IC+IA64_PSR_I+IA64_PSR_DT+IA64_PSR_SI
-    ld4 r23=[r22]
-    sub r27=-1,r26
+    ld1 r23=[r22]
+    sub r27=-1,r26 // ~r26
     mov r24=b0
     ;;
     mov r20=cr.ipsr
-    or r28=r27,r28
-    and r19=r18,r27
+    or r28=r27,r28 // Keep IC,I,DT,SI
+    and r19=r18,r27 // Update vpsr
     ;;   
     st8 [r17]=r19
-    and r20=r20,r28
+    and r20=r20,r28 // Update ipsr
     adds r27=IA64_VCPU_FP_PSR_OFFSET,r21
     ;;
     ld8 r27=[r27]
     ;;
-    tbit.nz p8,p0= r27,IA64_PSR_DFH_BIT
+    tbit.nz p8,p0=r27,IA64_PSR_DFH_BIT
     ;;
-    (p8) dep r20=-1,r20,IA64_PSR_DFH_BIT,1
+    (p8) dep r20=-1,r20,IA64_PSR_DFH_BIT,1  // Keep dfh
     ;;
     mov cr.ipsr=r20
-    tbit.nz p6,p0=r23,0
+    cmp.ne p6,p0=VMX_MMU_VIRTUAL,r23
     ;;
     tbit.z.or p6,p0=r26,IA64_PSR_DT_BIT
-    (p6) br.dptk vmx_resume_to_guest
+    (p6) br.dptk vmx_resume_to_guest  // DT not cleared or already in phy mode
     ;;
-    add r26=IA64_VCPU_META_RR0_OFFSET,r21
-    add r27=IA64_VCPU_META_RR0_OFFSET+8,r21
-    dep r23=-1,r23,0,1
+    // Switch to meta physical mode.
+    add r26=IA64_VCPU_META_RID_DT_OFFSET,r21
+    mov r23=VMX_MMU_PHY_DT
     ;;
     ld8 r26=[r26]
-    ld8 r27=[r27]
-    st4 [r22]=r23
+    st1 [r22]=r23 
     dep.z r28=4,61,3
     ;;
     mov rr[r0]=r26
     ;;
-    mov rr[r28]=r27
+    mov rr[r28]=r26
     ;;
     srlz.d
     br.many vmx_resume_to_guest
@@ -245,30 +245,30 @@ GLOBAL_ENTRY(vmx_asm_ssm)
     ld8 r29=[r27]
     mov r24=b0
     ;;
-    add r22=IA64_VCPU_MODE_FLAGS_OFFSET,r21
+    add r22=IA64_VCPU_MMU_MODE_OFFSET,r21
     mov r20=cr.ipsr
     or r19=r29,r26
     ;;
-    ld4 r23=[r22]
-    st8 [r27]=r19
+    ld1 r23=[r22] // mmu_mode
+    st8 [r27]=r19 // vpsr
     or r20=r20,r26
     ;;
     mov cr.ipsr=r20
     movl r28=IA64_PSR_DT+IA64_PSR_RT+IA64_PSR_IT
     ;;
     and r19=r28,r19
-    tbit.z p6,p0=r23,0
+    cmp.eq p6,p0=VMX_MMU_VIRTUAL,r23
     ;;
-    cmp.ne.or p6,p0=r28,r19
+    cmp.ne.or p6,p0=r28,r19 // (vpsr & (it+dt+rt)) /= (it+dt+rt) ie stay in phy
     (p6) br.dptk vmx_asm_ssm_1
     ;;
     add r26=IA64_VCPU_META_SAVED_RR0_OFFSET,r21
     add r27=IA64_VCPU_META_SAVED_RR0_OFFSET+8,r21
-    dep r23=0,r23,0,1
+    mov r23=VMX_MMU_VIRTUAL
     ;;
     ld8 r26=[r26]
     ld8 r27=[r27]
-    st4 [r22]=r23
+    st1 [r22]=r23
     dep.z r28=4,61,3
     ;;
     mov rr[r0]=r26
@@ -320,37 +320,37 @@ GLOBAL_ENTRY(vmx_asm_mov_to_psr)
     br.many b0
     ;;   
 vmx_asm_mov_to_psr_back:
-    ld8 r17=[r27]
-    add r22=IA64_VCPU_MODE_FLAGS_OFFSET,r21
-    dep r19=0,r19,32,32
+    ld8 r17=[r27] // vpsr
+    add r22=IA64_VCPU_MMU_MODE_OFFSET,r21
+    dep r19=0,r19,32,32 // Clear bits 32-63
     ;;   
-    ld4 r23=[r22]
+    ld1 r23=[r22] // mmu_mode
     dep r18=0,r17,0,32
     ;; 
-    add r30=r18,r19
+    or r30=r18,r19
     movl r28=IA64_PSR_DT+IA64_PSR_RT+IA64_PSR_IT
     ;;
-    st8 [r27]=r30
+    st8 [r27]=r30 // set vpsr
     and r27=r28,r30
     and r29=r28,r17
     ;;
-    cmp.eq p5,p0=r29,r27
-    cmp.eq p6,p7=r28,r27
-    (p5) br.many vmx_asm_mov_to_psr_1
+    cmp.eq p5,p0=r29,r27 // (old_vpsr & (dt+rt+it)) == (new_vpsr & (dt+rt+it))
+    cmp.eq p6,p7=r28,r27 // (new_vpsr & (dt+rt+it)) == (dt+rt+it)
+    (p5) br.many vmx_asm_mov_to_psr_1 // no change
     ;;
     //virtual to physical
-    (p7) add r26=IA64_VCPU_META_RR0_OFFSET,r21
-    (p7) add r27=IA64_VCPU_META_RR0_OFFSET+8,r21
-    (p7) dep r23=-1,r23,0,1
+    (p7) add r26=IA64_VCPU_META_RID_DT_OFFSET,r21
+    (p7) add r27=IA64_VCPU_META_RID_DT_OFFSET,r21
+    (p7) mov r23=VMX_MMU_PHY_DT
     ;;
     //physical to virtual
     (p6) add r26=IA64_VCPU_META_SAVED_RR0_OFFSET,r21
     (p6) add r27=IA64_VCPU_META_SAVED_RR0_OFFSET+8,r21
-    (p6) dep r23=0,r23,0,1
+    (p6) mov r23=VMX_MMU_VIRTUAL
     ;;
     ld8 r26=[r26]
     ld8 r27=[r27]
-    st4 [r22]=r23
+    st1 [r22]=r23
     dep.z r28=4,61,3
     ;;
     mov rr[r0]=r26
@@ -443,10 +443,10 @@ GLOBAL_ENTRY(vmx_asm_thash)
 vmx_asm_thash_back1:
     shr.u r23=r19,61		// get RR number
     adds r25=VCPU_VRR0_OFS,r21	// get vcpu->arch.arch_vmx.vrr[0]'s addr
-    adds r16=IA64_VPD_VPTA_OFFSET,r16	// get vpta 
+    adds r16=IA64_VPD_VPTA_OFFSET,r16	// get virtual pta 
     ;;
     shladd r27=r23,3,r25	// get vcpu->arch.arch_vmx.vrr[r23]'s addr
-    ld8 r17=[r16]		// get PTA
+    ld8 r17=[r16]		// get virtual PTA
     mov r26=1
     ;;
     extr.u r29=r17,2,6		// get pta.size
@@ -594,6 +594,7 @@ MOV_FROM_BANK0_REG(31)
 
 
 // mov from reg table
+// r19:	value, r30: return address
 ENTRY(asm_mov_from_reg)
     MOV_FROM_REG(0)
     MOV_FROM_REG(1)
@@ -789,6 +790,7 @@ MOV_TO_BANK0_REG(31)
 
 
 // mov to reg table
+// r19:	value, r30: return address
 ENTRY(asm_mov_to_reg)
     MOV_TO_REG0
     MOV_TO_REG(1)

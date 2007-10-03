@@ -58,7 +58,8 @@ void foo(void)
 	DEFINE(IA64_VCPU_DOMAIN_OFFSET, offsetof (struct vcpu, domain));
 	DEFINE(IA64_VCPU_HYPERCALL_CONTINUATION_OFS, offsetof (struct vcpu, arch.hypercall_continuation));
 	DEFINE(IA64_VCPU_FP_PSR_OFFSET, offsetof (struct vcpu, arch.fp_psr));
-	DEFINE(IA64_VCPU_META_RR0_OFFSET, offsetof (struct vcpu, arch.metaphysical_rr0));
+	DEFINE(IA64_VCPU_META_RID_DT_OFFSET, offsetof (struct vcpu, arch.metaphysical_rid_dt));
+	DEFINE(IA64_VCPU_META_RID_D_OFFSET, offsetof (struct vcpu, arch.metaphysical_rid_d));
 	DEFINE(IA64_VCPU_META_SAVED_RR0_OFFSET, offsetof (struct vcpu, arch.metaphysical_saved_rr0));
 	DEFINE(IA64_VCPU_BREAKIMM_OFFSET, offsetof (struct vcpu, arch.breakimm));
 	DEFINE(IA64_VCPU_IVA_OFFSET, offsetof (struct vcpu, arch.iva));
@@ -149,7 +150,7 @@ void foo(void)
 	DEFINE(SWITCH_MPTA_OFFSET,offsetof(struct vcpu ,arch.arch_vmx.mpta));
 	DEFINE(IA64_PT_REGS_R16_SLOT, (((offsetof(struct pt_regs, r16)-sizeof(struct pt_regs))>>3)&0x3f));
 	DEFINE(IA64_VCPU_FLAGS_OFFSET,offsetof(struct vcpu ,arch.arch_vmx.flags));
-	DEFINE(IA64_VCPU_MODE_FLAGS_OFFSET,offsetof(struct vcpu, arch.mode_flags));
+	DEFINE(IA64_VCPU_MMU_MODE_OFFSET,offsetof(struct vcpu, arch.arch_vmx.mmu_mode));
 
 	BLANK();
 
@@ -202,11 +203,12 @@ void foo(void)
 	DEFINE(IA64_VPD_VIFS_OFFSET, offsetof (mapped_regs_t, ifs));
  	DEFINE(IA64_VLSAPIC_INSVC_BASE_OFFSET, offsetof (struct vcpu, arch.insvc[0]));
 	DEFINE(IA64_VPD_VPTA_OFFSET, offsetof (struct mapped_regs, pta));
-	DEFINE(IA64_VPD_CR_VPTA_OFFSET, offsetof (cr_t, pta));
 	DEFINE(XXX_THASH_SIZE, sizeof (thash_data_t));
 
 	BLANK();
 	DEFINE(IA64_CPUINFO_NSEC_PER_CYC_OFFSET, offsetof (struct cpuinfo_ia64, nsec_per_cyc));
+	DEFINE(IA64_CPUINFO_PTCE_BASE_OFFSET, offsetof (struct cpuinfo_ia64, ptce_base));
+	DEFINE(IA64_CPUINFO_PTCE_COUNT_OFFSET, offsetof (struct cpuinfo_ia64, ptce_count));
 	DEFINE(IA64_TIMESPEC_TV_NSEC_OFFSET, offsetof (struct timespec, tv_nsec));
 
 

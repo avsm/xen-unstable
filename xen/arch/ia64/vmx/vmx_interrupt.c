@@ -24,6 +24,7 @@
 #include <asm/vmx_vcpu.h>
 #include <asm/vmx_mm_def.h>
 #include <asm/vmx_pal_vsa.h>
+#include <asm/debugger.h>
 
 /* SDM vol2 5.5 - IVA based interruption handling */
 #define INITIAL_PSR_VALUE_AT_INTERRUPTION 0x0000001808028034
@@ -107,6 +108,9 @@ inject_guest_interruption(VCPU *vcpu, u64 vec)
 
     viva = vmx_vcpu_get_iva(vcpu);
     regs->cr_iip = viva + vec;
+
+    debugger_event(vec == IA64_EXTINT_VECTOR ?
+                   XEN_IA64_DEBUG_ON_EXTINT : XEN_IA64_DEBUG_ON_EXCEPT);
 }
 
 
@@ -216,8 +220,6 @@ _vhpt_fault(VCPU *vcpu, u64 vadr)
     /* If vPSR.ic, IFA, ITIR, IHA*/
     set_ifa_itir_iha (vcpu, vadr, 1, 1, 1);
     inject_guest_interruption(vcpu,IA64_VHPT_TRANS_VECTOR);
-
-
 }
 
 /*
@@ -421,4 +423,3 @@ data_access_rights(VCPU *vcpu, u64 vadr)
     set_ifa_itir_iha (vcpu, vadr, 1, 1, 0);
     inject_guest_interruption(vcpu, IA64_DATA_ACCESS_RIGHTS_VECTOR);
 }
-

@@ -42,6 +42,7 @@
 #include <asm/hw_irq.h>
 #include <asm/vmx_pal_vsa.h>
 #include <asm/kregs.h>
+#include <linux/efi.h>
 //unsigned long last_guest_rsm = 0x0;
 
 #ifdef	VTI_DEBUG
@@ -135,6 +136,13 @@ vmx_vcpu_set_psr(VCPU *vcpu, unsigned long value)
     if (FP_PSR(vcpu) & IA64_PSR_DFH)
         regs->cr_ipsr |= IA64_PSR_DFH;
 
+    if (unlikely(vcpu->domain->debugger_attached)) {
+        if (vcpu->domain->arch.debug_flags & XEN_IA64_DEBUG_FORCE_SS)
+            regs->cr_ipsr |= IA64_PSR_SS;
+        if (vcpu->domain->arch.debug_flags & XEN_IA64_DEBUG_FORCE_DB)
+            regs->cr_ipsr |= IA64_PSR_DB;
+    }
+
     check_mm_mode_switch(vcpu, old_psr, new_psr);
     return ;
 }
@@ -154,7 +162,6 @@ IA64FAULT vmx_vcpu_cover(VCPU *vcpu)
 IA64FAULT vmx_vcpu_set_rr(VCPU *vcpu, u64 reg, u64 val)
 {
     ia64_rr oldrr,newrr;
-    extern void * pal_vaddr;
     u64 rrval;
 
     vcpu_get_rr(vcpu, reg, &oldrr.rrval);
@@ -165,20 +172,19 @@ IA64FAULT vmx_vcpu_set_rr(VCPU *vcpu, u64 reg, u64 val)
     VMX(vcpu,vrr[reg>>VRN_SHIFT]) = val;
     switch((u64)(reg>>VRN_SHIFT)) {
     case VRN7:
-        vmx_switch_rr7(vrrtomrr(vcpu,val),vcpu->domain->shared_info,
-        (void *)vcpu->arch.privregs,
-        (void *)vcpu->arch.vhpt.hash, pal_vaddr );
+        vmx_switch_rr7(vrrtomrr(vcpu,val),
+                       (void *)vcpu->arch.vhpt.hash, pal_vaddr );
        break;
     case VRN4:
         rrval = vrrtomrr(vcpu,val);
         vcpu->arch.metaphysical_saved_rr4 = rrval;
-        if (!is_physical_mode(vcpu))
+        if (is_virtual_mode(vcpu))
             ia64_set_rr(reg,rrval);
         break;
     case VRN0:
         rrval = vrrtomrr(vcpu,val);
         vcpu->arch.metaphysical_saved_rr0 = rrval;
-        if (!is_physical_mode(vcpu))
+        if (is_virtual_mode(vcpu))
             ia64_set_rr(reg,rrval);
         break;
     default:

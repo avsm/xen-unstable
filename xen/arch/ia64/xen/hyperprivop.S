@@ -56,22 +56,6 @@
 // doesn't appear to be include'able from assembly?
 #define IA64_TIMER_VECTOR 0xef
 
-// Should be included from common header file (also in process.c)
-//  NO PSR_CLR IS DIFFERENT! (CPL)
-#define IA64_PSR_CPL1	(__IA64_UL(1) << IA64_PSR_CPL1_BIT)
-#define IA64_PSR_CPL0	(__IA64_UL(1) << IA64_PSR_CPL0_BIT)
-// note IA64_PSR_PK removed from following, why is this necessary?
-#define	DELIVER_PSR_SET	(IA64_PSR_IC | IA64_PSR_I | \
-			IA64_PSR_DT | IA64_PSR_RT | \
-			IA64_PSR_IT | IA64_PSR_BN)
-
-#define	DELIVER_PSR_CLR	(IA64_PSR_AC | IA64_PSR_DFL | IA64_PSR_DFH | \
-			IA64_PSR_SP | IA64_PSR_DI | IA64_PSR_SI |	\
-			IA64_PSR_DB | IA64_PSR_LP | IA64_PSR_TB | \
-			IA64_PSR_MC | IA64_PSR_IS | \
-			IA64_PSR_ID | IA64_PSR_DA | IA64_PSR_DD | \
-			IA64_PSR_SS | IA64_PSR_RI | IA64_PSR_ED | IA64_PSR_IA)
-
 // Note: not hand-scheduled for now
 //  Registers at entry
 //	r16 == cr.isr
@@ -223,9 +207,6 @@ ENTRY(hyper_ssm_i)
 	// give up for now if: ipsr.be==1, ipsr.pp==1
 	mov r30=cr.ipsr
 	mov r29=cr.iip;;
-	extr.u r21=r30,IA64_PSR_BE_BIT,1 ;;
-	cmp.ne p7,p0=r21,r0
-(p7)	br.sptk.many dispatch_break_fault ;;
 	extr.u r21=r30,IA64_PSR_PP_BIT,1 ;;
 	cmp.ne p7,p0=r21,r0
 (p7)	br.sptk.many dispatch_break_fault ;;
@@ -253,7 +234,7 @@ ENTRY(hyper_ssm_i)
 	// set cr.ipsr
 	mov r29=r30
 	movl r28=DELIVER_PSR_SET
-	movl r27=~DELIVER_PSR_CLR;;
+	movl r27=~(DELIVER_PSR_CLR & (~IA64_PSR_CPL));;
 	and r29=r29,r27;;
 	or r29=r29,r28;;
 	// set hpsr_dfh to ipsr
@@ -268,7 +249,7 @@ ENTRY(hyper_ssm_i)
 	// FOR SSM_I ONLY, also turn on psr.i and psr.ic
 	movl r28=(IA64_PSR_DT|IA64_PSR_IT|IA64_PSR_RT|IA64_PSR_I|IA64_PSR_IC)
 //	movl r27=~(IA64_PSR_BE|IA64_PSR_PP|IA64_PSR_BN);;
-	movl r27=~(IA64_PSR_BE|IA64_PSR_BN);;
+	movl r27=~IA64_PSR_BN;;
 	or r30=r30,r28;;
 	and r30=r30,r27;;
 	mov r20=1
@@ -361,10 +342,7 @@ GLOBAL_ENTRY(fast_tick_reflect)
 	cmp.ltu p6,p0=r26,r27
 (p6)	br.cond.spnt.few rp;;
 	mov r17=cr.ipsr;;
-	// slow path if: ipsr.be==1, ipsr.pp==1
-	extr.u r21=r17,IA64_PSR_BE_BIT,1 ;;
-	cmp.ne p6,p0=r21,r0
-(p6)	br.cond.spnt.few rp;;
+	// slow path if: ipsr.pp==1
 	extr.u r21=r17,IA64_PSR_PP_BIT,1 ;;
 	cmp.ne p6,p0=r21,r0
 (p6)	br.cond.spnt.few rp;;
@@ -444,7 +422,7 @@ GLOBAL_ENTRY(fast_tick_reflect)
 	// set cr.ipsr (make sure cpl==2!)
 	mov r29=r17
 	movl r28=DELIVER_PSR_SET | (CONFIG_CPL0_EMUL << IA64_PSR_CPL0_BIT)
-	movl r27=~(DELIVER_PSR_CLR|IA64_PSR_CPL0|IA64_PSR_CPL1);;
+	movl r27=~DELIVER_PSR_CLR;;
 	and r29=r29,r27;;
 	or r29=r29,r28;;
 	mov cr.ipsr=r29;;
@@ -453,7 +431,7 @@ GLOBAL_ENTRY(fast_tick_reflect)
 	cmp.eq p7,p0=CONFIG_CPL0_EMUL,r29;;
 (p7)	dep r17=0,r17,IA64_PSR_CPL0_BIT,2
 	movl r28=(IA64_PSR_DT|IA64_PSR_IT|IA64_PSR_RT)
-	movl r27=~(IA64_PSR_BE|IA64_PSR_PP|IA64_PSR_BN|IA64_PSR_I|IA64_PSR_IC);;
+	movl r27=~(IA64_PSR_PP|IA64_PSR_BN|IA64_PSR_I|IA64_PSR_IC);;
 	or r17=r17,r28;;
 	and r17=r17,r27
 	ld4 r16=[r18];;
@@ -556,9 +534,6 @@ GLOBAL_ENTRY(fast_break_reflect)
 #endif
 	mov r30=cr.ipsr
 	mov r29=cr.iip;;
-	extr.u r21=r30,IA64_PSR_BE_BIT,1 ;;
-	cmp.ne p7,p0=r21,r0
-(p7)	br.spnt.few dispatch_break_fault ;;
 	extr.u r21=r30,IA64_PSR_PP_BIT,1 ;;
 	cmp.ne p7,p0=r21,r0
 (p7)	br.spnt.few dispatch_break_fault ;;
@@ -620,7 +595,7 @@ ENTRY(fast_reflect)
 	mov r29=r30 ;;
 	ld8 r21=[r21]
 	movl r28=DELIVER_PSR_SET | (CONFIG_CPL0_EMUL << IA64_PSR_CPL0_BIT)
-	movl r27=~(DELIVER_PSR_CLR|IA64_PSR_CPL0|IA64_PSR_CPL1);;
+	movl r27=~DELIVER_PSR_CLR;;
 	and r29=r29,r27;;
 	or r29=r29,r28;;
 	// set hpsr_dfh to ipsr
@@ -633,7 +608,7 @@ ENTRY(fast_reflect)
 	cmp.eq p7,p0=CONFIG_CPL0_EMUL,r29;;
 (p7)	dep r30=0,r30,IA64_PSR_CPL0_BIT,2
 	movl r28=(IA64_PSR_DT|IA64_PSR_IT|IA64_PSR_RT)
-	movl r27=~(IA64_PSR_BE|IA64_PSR_PP|IA64_PSR_BN);;
+	movl r27=~(IA64_PSR_PP|IA64_PSR_BN);;
 	or r30=r30,r28;;
 	and r30=r30,r27
 	// also set shared_mem ipsr.i and ipsr.ic appropriately
@@ -744,9 +719,6 @@ GLOBAL_ENTRY(fast_access_reflect)
 #endif
 	mov r30=cr.ipsr
 	mov r29=cr.iip;;
-	extr.u r21=r30,IA64_PSR_BE_BIT,1 ;;
-	cmp.ne p7,p0=r21,r0
-(p7)	br.spnt.few dispatch_reflection ;;
 	extr.u r21=r30,IA64_PSR_PP_BIT,1 ;;
 	cmp.ne p7,p0=r21,r0
 (p7)	br.spnt.few dispatch_reflection ;;
@@ -794,9 +766,6 @@ GLOBAL_ENTRY(fast_tlb_miss_reflect)
 	cmp.eq p7,p0=r21,r0
 (p7)	br.spnt.few page_fault ;;
 	// slow path if strange ipsr or isr bits set
-	extr.u r21=r30,IA64_PSR_BE_BIT,1 ;;
-	cmp.ne p7,p0=r21,r0
-(p7)	br.spnt.few page_fault ;;
 	extr.u r21=r30,IA64_PSR_PP_BIT,1 ;;
 	cmp.ne p7,p0=r21,r0
 (p7)	br.spnt.few page_fault ;;
@@ -1068,10 +1037,6 @@ ENTRY(hyper_rfi)
 1:
 	adds r20=XSI_IPSR_OFS-XSI_PSR_IC_OFS,r18 ;;
 	ld8 r21=[r20];;		// r21 = vcr.ipsr
-	extr.u r22=r21,IA64_PSR_BE_BIT,1 ;;
-	// if turning on psr.be, give up for now and do it the slow way
-	cmp.ne p7,p0=r22,r0
-(p7)	br.spnt.few slow_vcpu_rfi ;;
 	// if (!(vpsr.dt && vpsr.rt && vpsr.it)), do it the slow way
 	movl r20=(IA64_PSR_DT|IA64_PSR_RT|IA64_PSR_IT);;
 	and r22=r20,r21
@@ -1288,7 +1253,7 @@ ENTRY(rfi_with_interrupt)
 	movl r22=THIS_CPU(current_psr_i_addr)
 	// set cr.ipsr (make sure cpl==2!)
 	mov r29=r17
-	movl r27=~(DELIVER_PSR_CLR|IA64_PSR_CPL0|IA64_PSR_CPL1)
+	movl r27=~DELIVER_PSR_CLR
 	movl r28=DELIVER_PSR_SET | (CONFIG_CPL0_EMUL << IA64_PSR_CPL0_BIT)
 	mov r20=1;;
 	ld8 r22=[r22]
@@ -1442,7 +1407,7 @@ ENTRY(hyper_rsm_dt)
 (p7)	br.spnt.many	1f ;;	// already in metaphysical mode
 	movl r22=THIS_CPU(cpu_kr)+IA64_KR_CURRENT_OFFSET;;
 	ld8 r22=[r22];;
-	adds r22=IA64_VCPU_META_RR0_OFFSET,r22;;
+	adds r22=IA64_VCPU_META_RID_DT_OFFSET,r22;;
 	ld8 r23=[r22];;
 	mov rr[r0]=r23;;
 	srlz.i;;

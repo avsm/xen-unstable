@@ -280,7 +280,7 @@ static void vcpu_pkr_set_psr_handling(VCPU * vcpu)
  VCPU processor status register access routines
 **************************************************************************/
 
-void vcpu_set_metaphysical_mode(VCPU * vcpu, BOOLEAN newmode)
+static void vcpu_set_metaphysical_mode(VCPU * vcpu, BOOLEAN newmode)
 {
 	/* only do something if mode changes */
 	if (!!newmode ^ !!PSCB(vcpu, metaphysical_mode)) {
@@ -288,7 +288,7 @@ void vcpu_set_metaphysical_mode(VCPU * vcpu, BOOLEAN newmode)
 		if (newmode)
 			set_metaphysical_rr0();
 		else if (PSCB(vcpu, rrs[0]) != -1)
-			set_one_rr(0, PSCB(vcpu, rrs[0]));
+			set_virtual_rr0();
 	}
 }
 
@@ -1635,7 +1635,7 @@ vcpu_get_domain_bundle(VCPU * vcpu, REGS * regs, u64 gip,
 		// This may cause tlb miss. see vcpu_translate(). Be careful!
 		swap_rr0 = (!region && PSCB(vcpu, metaphysical_mode));
 		if (swap_rr0) {
-			set_one_rr(0x0, PSCB(vcpu, rrs[0]));
+			set_virtual_rr0();
 		}
 		*bundle = __get_domain_bundle(gip);
 		if (swap_rr0) {
@@ -1817,10 +1817,16 @@ IA64FAULT vcpu_tpa(VCPU * vcpu, u64 vadr, u64 * padr)
 
 IA64FAULT vcpu_tak(VCPU * vcpu, u64 vadr, u64 * key)
 {
-	printk("vcpu_tak: tak instruction unsupported\n");
-	return IA64_ILLOP_FAULT;
-	// HACK ALERT: tak does a thash for now
-	//return vcpu_thash(vcpu,vadr,key);
+	u64 pteval, itir, iha;
+	IA64FAULT fault;
+
+	fault = vcpu_translate(vcpu, vadr, TRUE, &pteval, &itir, &iha);
+	if (fault == IA64_NO_FAULT || fault == IA64_USE_TLB)
+		*key = itir & IA64_ITIR_KEY_MASK;
+	else
+		*key = 1;
+
+	return IA64_NO_FAULT;
 }
 
 /**************************************************************************
@@ -2313,8 +2319,6 @@ vcpu_itc_no_srlz(VCPU * vcpu, u64 IorD, u64 vaddr, u64 pte,
 {
 	ia64_itir_t _itir = {.itir = itir};
 	unsigned long psr;
-	unsigned long ps = (vcpu->domain == dom0) ? _itir.ps :
-						    vcpu->arch.vhpt_pg_shift;
 
 	check_xen_space_overlap("itc", vaddr, 1UL << _itir.ps);
 
@@ -2323,12 +2327,12 @@ vcpu_itc_no_srlz(VCPU * vcpu, u64 IorD, u64 vaddr, u64 pte,
 		panic_domain(NULL, "vcpu_itc_no_srlz: domain trying to use "
 		             "smaller page size!\n");
 
-	BUG_ON(_itir.ps > vcpu->arch.vhpt_pg_shift);
+	BUG_ON(_itir.ps > PAGE_SHIFT);
 	vcpu_tlb_track_insert_or_dirty(vcpu, vaddr, entry);
 	psr = ia64_clear_ic();
 	pte &= ~(_PAGE_RV2 | _PAGE_RV1);	// Mask out the reserved bits.
 					// FIXME: look for bigger mappings
-	ia64_itc(IorD, vaddr, pte, IA64_ITIR_PS_KEY(ps, _itir.key));
+	ia64_itc(IorD, vaddr, pte, _itir.itir);
 	ia64_set_psr(psr);
 	// ia64_srlz_i(); // no srls req'd, will rfi later
 	if (vcpu->domain == dom0 && ((vaddr >> 61) == 7)) {
@@ -2344,7 +2348,6 @@ vcpu_itc_no_srlz(VCPU * vcpu, u64 IorD, u64 vaddr, u64 pte,
 	// even if domain pagesize is larger than PAGE_SIZE, just put
 	// PAGE_SIZE mapping in the vhpt for now, else purging is complicated
 	else {
-		_itir.ps = vcpu->arch.vhpt_pg_shift;
 		vhpt_insert(vaddr, pte, _itir.itir);
 	}
 }
@@ -2365,7 +2368,7 @@ IA64FAULT vcpu_itc_d(VCPU * vcpu, u64 pte, u64 itir, u64 ifa)
 	if (!pteval)
 		return IA64_ILLOP_FAULT;
 	if (swap_rr0)
-		set_one_rr(0x0, PSCB(vcpu, rrs[0]));
+		set_virtual_rr0();
 	vcpu_itc_no_srlz(vcpu, 2, ifa, pteval, pte, _itir.itir, &entry);
 	if (swap_rr0)
 		set_metaphysical_rr0();
@@ -2393,7 +2396,7 @@ IA64FAULT vcpu_itc_i(VCPU * vcpu, u64 pte, u64 itir, u64 ifa)
 	if (!pteval)
 		return IA64_ILLOP_FAULT;
 	if (swap_rr0)
-		set_one_rr(0x0, PSCB(vcpu, rrs[0]));
+		set_virtual_rr0();
 	vcpu_itc_no_srlz(vcpu, 1, ifa, pteval, pte, _itir.itir, &entry);
 	if (swap_rr0)
 		set_metaphysical_rr0();

@@ -66,56 +66,33 @@
  */
 
 
+#ifndef __ASSEMBLY__
+
 #include <asm/vmx_vcpu.h>
 #include <asm/regionreg.h>
 #include <asm/gcc_intrin.h>
 #include <asm/pgtable.h>
-/* Due to change of ia64_set_rr interface */
 
-#define PHY_PAGE_UC (_PAGE_A|_PAGE_D|_PAGE_P|_PAGE_MA_UC|_PAGE_AR_RWX)
 #define PHY_PAGE_WB (_PAGE_A|_PAGE_D|_PAGE_P|_PAGE_MA_WB|_PAGE_AR_RWX)
 
-//#ifdef PHY_16M  /* 16M: large granule for test*/
-//#define EMUL_PHY_PAGE_SHIFT 24
-//#else   /* 4K: emulated physical page granule */
-//#define EMUL_PHY_PAGE_SHIFT 12
-//#endif
-#define IA64_RSC_MODE       0x0000000000000003
-#define XEN_RR7_RID    (0xf00010)
-#define GUEST_IN_PHY    0x1
-#define GUEST_PHY_EMUL	0x2
 extern void physical_mode_init(VCPU *);
 extern void switch_to_physical_rid(VCPU *);
 extern void switch_to_virtual_rid(VCPU *vcpu);
 extern void switch_mm_mode(VCPU *vcpu, IA64_PSR old_psr, IA64_PSR new_psr);
-extern void stlb_phys_lookup(VCPU *vcpu, u64 paddr, u64 type);
 extern void check_mm_mode_switch (VCPU *vcpu,  IA64_PSR old_psr, IA64_PSR new_psr);
 extern void prepare_if_physical_mode(VCPU *vcpu);
 extern void recover_if_physical_mode(VCPU *vcpu);
 extern void vmx_init_all_rr(VCPU *vcpu);
 extern void vmx_load_all_rr(VCPU *vcpu);
 extern void physical_tlb_miss(VCPU *vcpu, u64 vadr, int type);
-/*
- * No sanity check here, since all psr changes have been
- * checked in switch_mm_mode().
- */
-#define is_physical_mode(v) \
-    ((v->arch.mode_flags) & GUEST_IN_PHY)
 
-#define is_virtual_mode(v) \
-    (!is_physical_mode(v))
+#define VMX_MMU_MODE(v)     ((v)->arch.arch_vmx.mmu_mode)
+#define is_virtual_mode(v)  (VMX_MMU_MODE(v) == VMX_MMU_VIRTUAL)
 
-#define MODE_IND(psr)   \
-    (((psr).it << 2) + ((psr).dt << 1) + (psr).rt)
+#endif /* __ASSEMBLY__ */
 
-#define SW_BAD  0   /* Bad mode transitition */
-#define SW_V2P  1   /* Physical emulatino is activated */
-#define SW_P2V  2   /* Exit physical mode emulation */
-#define SW_SELF 3   /* No mode transition */
-#define SW_NOP  4   /* Mode transition, but without action required */
-
-#define INV_MODE    0   /* Invalid mode */
-#define GUEST_VIRT  1   /* Guest in virtual mode */
-#define GUEST_PHYS  2   /* Guest in physical mode, requiring emulation */
+#define VMX_MMU_VIRTUAL    0    /* Full virtual mode: it=dt=1  */
+#define VMX_MMU_PHY_D      1    /* Half physical: it=1,dt=0  */
+#define VMX_MMU_PHY_DT     3    /* Full physical mode: it=0,dt=0  */
 
 #endif /* _PHY_MODE_H_ */

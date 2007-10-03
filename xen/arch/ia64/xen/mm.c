@@ -181,6 +181,7 @@
 #include <asm/dom_fw_common.h>
 #include <public/memory.h>
 #include <asm/event.h>
+#include <asm/debugger.h>
 
 static void domain_page_flush_and_put(struct domain* d, unsigned long mpaddr,
                                       volatile pte_t* ptep, pte_t old_pte, 
@@ -509,25 +510,22 @@ u64 translate_domain_pte(u64 pteval, u64 address, u64 itir__, u64* itir,
 	u64 arflags;
 	u64 arflags2;
 	u64 maflags2;
-	u64 ps;
 
 	pteval &= ((1UL << 53) - 1);// ignore [63:53] bits
 
 	// FIXME address had better be pre-validated on insert
 	mask = ~itir_mask(_itir.itir);
 	mpaddr = ((pteval & _PAGE_PPN_MASK) & ~mask) | (address & mask);
-	ps = current->arch.vhpt_pg_shift ? current->arch.vhpt_pg_shift :
-					   PAGE_SHIFT;
 
-	if (_itir.ps > ps)
-		_itir.ps = ps;
+	if (_itir.ps > PAGE_SHIFT)
+		_itir.ps = PAGE_SHIFT;
 
 	((ia64_itir_t*)itir)->itir = _itir.itir;/* Copy the whole register. */
 	((ia64_itir_t*)itir)->ps = _itir.ps;	/* Overwrite ps part! */
 
 	pteval2 = lookup_domain_mpa(d, mpaddr, entry);
-	if (ps < PAGE_SHIFT)
-		pteval2 |= address & (PAGE_SIZE - 1) & ~((1L << ps) - 1);
+	if (_itir.ps < PAGE_SHIFT)
+		pteval2 |= mpaddr & ~PAGE_MASK & ~((1L << _itir.ps) - 1);
 
 	/* Check access rights.  */
 	arflags  = pteval  & _PAGE_AR_MASK;
@@ -765,6 +763,8 @@ unsigned long lookup_domain_mpa(struct domain *d, unsigned long mpaddr,
                  current->vcpu_id, PSCB(current, iip),
                  d->domain_id, mpaddr, d->arch.convmem_end);
     }
+
+    debugger_event (XEN_IA64_DEBUG_ON_BAD_MPA);
 
     if (entry != NULL)
         p2m_entry_set(entry, NULL, __pte(0));
