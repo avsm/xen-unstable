@@ -242,6 +242,8 @@ sal_emulator (long index, unsigned long in1, unsigned long in2,
 			}
 			e = list_entry(sal_queue[in1].next,
 			               sal_queue_entry_t, list);
+
+			list_del(&e->list);
 			spin_unlock_irqrestore(&sal_queue_lock, flags);
 
 			IA64_SAL_DEBUG("SAL_GET_STATE_INFO(%s <= %s) "
@@ -277,10 +279,12 @@ sal_emulator (long index, unsigned long in1, unsigned long in2,
 			r9 = arg.ret;
 			status = arg.status;
 			if (r9 == 0) {
-				spin_lock_irqsave(&sal_queue_lock, flags);
-				list_del(&e->list);
-				spin_unlock_irqrestore(&sal_queue_lock, flags);
 				xfree(e);
+			} else {
+				/* Re-add the entry to sal_queue */
+				spin_lock_irqsave(&sal_queue_lock, flags);
+				list_add(&e->list, &sal_queue[in1]);
+				spin_unlock_irqrestore(&sal_queue_lock, flags);
 			}
 		} else {
 			status = IA64_SAL_NO_INFORMATION_AVAILABLE;
@@ -316,10 +320,10 @@ sal_emulator (long index, unsigned long in1, unsigned long in2,
 			               "on CPU#%d.\n",
 			               rec_name[e->sal_info_type],
 			               rec_name[in1], e->cpuid);
-			
 
 			arg.type = e->sal_info_type;
 			arg.status = 0;
+
 			if (e->cpuid == smp_processor_id()) {
 				IA64_SAL_DEBUG("SAL_CLEAR_STATE_INFO: local\n");
 				clear_state_info_on(&arg);
@@ -585,6 +589,19 @@ remote_pal_cache_flush(void *v)
 		args->status = status;
 }
 
+static void
+remote_pal_prefetch_visibility(void *v)
+{
+	s64 trans_type = (s64)v;
+	ia64_pal_prefetch_visibility(trans_type);
+}
+
+static void
+remote_pal_mc_drain(void *v)
+{
+	ia64_pal_mc_drain();
+}
+
 struct ia64_pal_retval
 xen_pal_emulator(unsigned long index, u64 in1, u64 in2, u64 in3)
 {
@@ -846,7 +863,35 @@ xen_pal_emulator(unsigned long index, u64 in1, u64 in2, u64 in3)
 		status = PAL_STATUS_SUCCESS;
 		r9 = current->vcpu_id;
 		break;
+	    case PAL_PREFETCH_VISIBILITY:
+		status = ia64_pal_prefetch_visibility(in1);
+		if (status == 0) {
+			/* must be performed on all remote processors 
+			   in the coherence domain. */
+			smp_call_function(remote_pal_prefetch_visibility,
+					  (void *)in1, 1, 1);
+			status = 1; /* no more necessary on remote processor */
+		}
+		break;
+	    case PAL_MC_DRAIN:
+		status = ia64_pal_mc_drain();
+		/* FIXME: All vcpus likely call PAL_MC_DRAIN.
+		   That causes the congestion. */
+		smp_call_function(remote_pal_mc_drain, NULL, 1, 1);
+		break;
+	    case PAL_BRAND_INFO:
+		if (in1 == 0) {
+			char brand_info[128];
+			status = ia64_pal_get_brand_info(brand_info);
+			if (status == PAL_STATUS_SUCCESS)
+				copy_to_user((void *)in2, brand_info, 128);
+		} else {
+			status = PAL_STATUS_EINVAL;
+		}
+		break;
 	    case PAL_LOGICAL_TO_PHYSICAL:
+	    case PAL_GET_PSTATE:
+	    case PAL_CACHE_SHARED_INFO:
 		/* Optional, no need to complain about being unimplemented */
 		break;
 	    default:
