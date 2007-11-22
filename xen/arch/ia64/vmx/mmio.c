@@ -37,6 +37,8 @@
 #include <asm/viosapic.h>
 #include <asm/vlsapic.h>
 #include <asm/hvm/vacpi.h>
+#include <asm/hvm/support.h>
+#include <public/hvm/save.h>
 
 #define HVM_BUFFERED_IO_RANGE_NR 1
 
@@ -252,15 +254,85 @@ static inline void set_os_type(VCPU *v, u64 type)
             optf.on = XEN_IA64_OPTF_ON;
             optf.pgprot = (_PAGE_P|_PAGE_A|_PAGE_D|_PAGE_MA_WB|_PAGE_AR_RW);
             optf.key = 0;
-            domain_opt_feature(&optf);
+            domain_opt_feature(v->domain, &optf);
 
             optf.cmd = XEN_IA64_OPTF_IDENT_MAP_REG5;
             optf.pgprot = (_PAGE_P|_PAGE_A|_PAGE_D|_PAGE_MA_UC|_PAGE_AR_RW);
-            domain_opt_feature(&optf);
+            domain_opt_feature(v->domain, &optf);
         }
     }
 }
 
+static void __vmx_identity_mapping_save(int on,
+        const struct identity_mapping* im,
+        struct hvm_hw_ia64_identity_mapping *im_save)
+{
+    im_save->on = !!on;
+    if (!on) {
+        im_save->pgprot = 0;
+        im_save->key    = 0;
+    } else {
+        im_save->pgprot = im->pgprot;
+        im_save->key    = im->key;
+    }
+}
+
+static int vmx_identity_mappings_save(struct domain *d,
+                                      hvm_domain_context_t *h)
+{
+    const struct opt_feature *optf = &d->arch.opt_feature;
+    struct hvm_hw_ia64_identity_mappings im_save;
+
+    __vmx_identity_mapping_save(optf->mask & XEN_IA64_OPTF_IDENT_MAP_REG4,
+                                &optf->im_reg4, &im_save.im_reg4);
+    __vmx_identity_mapping_save(optf->mask & XEN_IA64_OPTF_IDENT_MAP_REG5,
+                                &optf->im_reg5, &im_save.im_reg5);
+    __vmx_identity_mapping_save(optf->mask & XEN_IA64_OPTF_IDENT_MAP_REG7,
+                                &optf->im_reg7, &im_save.im_reg7);
+
+    return hvm_save_entry(OPT_FEATURE_IDENTITY_MAPPINGS, 0, h, &im_save);
+}
+
+static int __vmx_identity_mapping_load(struct domain *d, unsigned long cmd,
+        const struct hvm_hw_ia64_identity_mapping *im_load)
+{
+    struct xen_ia64_opt_feature optf;
+
+    optf.cmd    = cmd;
+    optf.on     = im_load->on;
+    optf.pgprot = im_load->pgprot;
+    optf.key    = im_load->key;
+
+    return domain_opt_feature(d, &optf);
+}
+
+static int vmx_identity_mappings_load(struct domain *d,
+                                      hvm_domain_context_t *h)
+{
+    struct hvm_hw_ia64_identity_mappings im_load;
+    int rc;
+
+    if (hvm_load_entry(OPT_FEATURE_IDENTITY_MAPPINGS, h, &im_load))
+        return -EINVAL;
+
+    rc = __vmx_identity_mapping_load(d, XEN_IA64_OPTF_IDENT_MAP_REG4,
+                                     &im_load.im_reg4);
+    if (rc)
+        return rc;
+    rc = __vmx_identity_mapping_load(d, XEN_IA64_OPTF_IDENT_MAP_REG5,
+                                     &im_load.im_reg5);
+    if (rc)
+        return rc;
+    rc = __vmx_identity_mapping_load(d, XEN_IA64_OPTF_IDENT_MAP_REG7,
+                                     &im_load.im_reg7);
+
+    return rc;
+}
+
+HVM_REGISTER_SAVE_RESTORE(OPT_FEATURE_IDENTITY_MAPPINGS, 
+                          vmx_identity_mappings_save,
+                          vmx_identity_mappings_load,
+                          1, HVMSR_PER_DOM);
 
 static void legacy_io_access(VCPU *vcpu, u64 pa, u64 *val, size_t s, int dir)
 {
