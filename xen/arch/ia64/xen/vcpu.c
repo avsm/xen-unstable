@@ -804,12 +804,7 @@ IA64FAULT vcpu_set_iip(VCPU * vcpu, u64 val)
 IA64FAULT vcpu_increment_iip(VCPU * vcpu)
 {
 	REGS *regs = vcpu_regs(vcpu);
-	struct ia64_psr *ipsr = (struct ia64_psr *)&regs->cr_ipsr;
-	if (ipsr->ri == 2) {
-		ipsr->ri = 0;
-		regs->cr_iip += 16;
-	} else
-		ipsr->ri++;
+	regs_increment_iip(regs);
 	return IA64_NO_FAULT;
 }
 
@@ -1693,7 +1688,7 @@ vcpu_get_domain_bundle(VCPU * vcpu, REGS * regs, u64 gip,
 IA64FAULT vcpu_translate(VCPU * vcpu, u64 address, BOOLEAN is_data,
 			 u64 * pteval, u64 * itir, u64 * iha)
 {
-	unsigned long region = address >> 61;
+	unsigned long region = REGION_NUMBER(address);
 	unsigned long pta, rid, rr, key = 0;
 	union pte_flags pte;
 	TR_ENTRY *trp;
@@ -1780,7 +1775,8 @@ IA64FAULT vcpu_translate(VCPU * vcpu, u64 address, BOOLEAN is_data,
 
 		/* Optimization for identity mapped region 7 OS (linux) */
 		if (optf->mask & XEN_IA64_OPTF_IDENT_MAP_REG7_FLG &&
-		    region == 7 && ia64_psr(regs)->cpl == CONFIG_CPL0_EMUL) {
+		    region == 7 && ia64_psr(regs)->cpl == CONFIG_CPL0_EMUL &&
+		    REGION_OFFSET(address) < _PAGE_PPN_MASK) {
 			pte.val = address & _PAGE_PPN_MASK;
 			pte.val = pte.val | optf->im_reg7.pgprot;
 			key = optf->im_reg7.key;
