@@ -22,7 +22,9 @@
 
 #include <asm/vmx_vcpu.h>
 #include <asm/vmx_phy_mode.h>
+#include <asm/shadow.h>
 
+static u64 translate_phy_pte(VCPU *v, u64 pte, u64 itir, u64 va);
 static thash_data_t *__alloc_chain(thash_cb_t *);
 
 static inline void cch_mem_init(thash_cb_t *hcb)
@@ -132,7 +134,7 @@ static void vmx_vhpt_insert(thash_cb_t *hcb, u64 pte, u64 itir, u64 ifa)
     ia64_rr rr;
     thash_data_t *head, *cch;
 
-    pte = pte & ~PAGE_FLAGS_RV_MASK;
+    pte &= ((~PAGE_FLAGS_RV_MASK)|_PAGE_VIRT_D);
     rr.rrval = ia64_get_rr(ifa);
     head = (thash_data_t *)ia64_thash(ifa);
     tag = ia64_ttag(ifa);
@@ -182,7 +184,7 @@ void thash_vhpt_insert(VCPU *v, u64 pte, u64 itir, u64 va, int type)
     u64 phy_pte, psr;
     ia64_rr mrr;
 
-    phy_pte = translate_phy_pte(v, &pte, itir, va);
+    phy_pte = translate_phy_pte(v, pte, itir, va);
     mrr.rrval = ia64_get_rr(va);
 
     if (itir_ps(itir) >= mrr.ps && VMX_MMU_MODE(v) != VMX_MMU_PHY_D) {
@@ -270,9 +272,10 @@ thash_data_t * vhpt_lookup(u64 va)
 
 u64 guest_vhpt_lookup(u64 iha, u64 *pte)
 {
-    u64 ret;
+    u64 ret, tmp;
     thash_data_t * data;
 
+    /* Try to fill mTLB for the gVHPT entry.  */
     data = vhpt_lookup(iha);
     if (data == NULL) {
         data = __vtr_lookup(current, iha, DSIDE_TLB);
@@ -283,17 +286,18 @@ u64 guest_vhpt_lookup(u64 iha, u64 *pte)
 
     asm volatile ("rsm psr.ic|psr.i;;"
                   "srlz.d;;"
-                  "ld8.s r9=[%1];;"
-                  "tnat.nz p6,p7=r9;;"
-                  "(p6) mov %0=1;"
-                  "(p6) mov r9=r0;"
-                  "(p7) extr.u r9=r9,0,53;;"
-                  "(p7) mov %0=r0;"
-                  "(p7) st8 [%2]=r9;;"
+                  "ld8.s %1=[%2];;"		/* Read VHPT entry.  */
+                  "tnat.nz p6,p7=%1;;"		/* Success ?  */
+                  "(p6) mov %0=1;"		/* No -> ret = 1.  */
+                  "(p6) mov %1=r0;"
+                  "(p7) extr.u %1=%1,0,53;;"	/* Yes -> mask ig bits.  */
+                  "(p7) mov %0=r0;"		/*     -> ret = 0.  */
+                  "(p7) st8 [%3]=%1;;"		/*     -> save.  */
                   "ssm psr.ic;;"
                   "srlz.d;;"
                   "ssm psr.i;;"
-                  : "=r"(ret) : "r"(iha), "r"(pte):"memory");
+                  : "=r"(ret), "=r"(tmp)
+                  : "r"(iha), "r"(pte):"memory","p6","p7");
     return ret;
 }
 
@@ -509,22 +513,20 @@ void thash_purge_entries_remote(VCPU *v, u64 va, u64 ps)
     vhpt_purge(v, va, ps);
 }
 
-u64 translate_phy_pte(VCPU *v, u64 *pte, u64 itir, u64 va)
+static u64 translate_phy_pte(VCPU *v, u64 pte, u64 itir, u64 va)
 {
     u64 ps, ps_mask, paddr, maddr;
-//    ia64_rr rr;
     union pte_flags phy_pte;
+    struct domain *d = v->domain;
 
     ps = itir_ps(itir);
     ps_mask = ~((1UL << ps) - 1);
-    phy_pte.val = *pte;
-    paddr = *pte;
-    paddr = ((paddr & _PAGE_PPN_MASK) & ps_mask) | (va & ~ps_mask);
-    maddr = lookup_domain_mpa(v->domain, paddr, NULL);
-    if (maddr & GPFN_IO_MASK) {
-        *pte |= VTLB_PTE_IO;
+    phy_pte.val = pte;
+    paddr = ((pte & _PAGE_PPN_MASK) & ps_mask) | (va & ~ps_mask);
+    maddr = lookup_domain_mpa(d, paddr, NULL);
+    if (maddr & GPFN_IO_MASK)
         return -1;
-    }
+
     /* Ensure WB attribute if pte is related to a normal mem page,
      * which is required by vga acceleration since qemu maps shared
      * vram buffer with WB.
@@ -532,10 +534,20 @@ u64 translate_phy_pte(VCPU *v, u64 *pte, u64 itir, u64 va)
     if (phy_pte.ma != VA_MATTR_NATPAGE)
         phy_pte.ma = VA_MATTR_WB;
 
-//    rr.rrval = ia64_get_rr(va);
-//    ps = rr.ps;
     maddr = ((maddr & _PAGE_PPN_MASK) & PAGE_MASK) | (paddr & ~PAGE_MASK);
     phy_pte.ppn = maddr >> ARCH_PAGE_SHIFT;
+
+    /* If shadow mode is enabled, virtualize dirty bit.  */
+    if (shadow_mode_enabled(d) && phy_pte.d) {
+        u64 gpfn = paddr >> PAGE_SHIFT;
+        phy_pte.val |= _PAGE_VIRT_D;
+
+        /* If the page is not already dirty, don't set the dirty bit! */
+        if (gpfn < d->arch.shadow_bitmap_size * 8
+            && !test_bit(gpfn, d->arch.shadow_bitmap))
+            phy_pte.d = 0;
+    }
+
     return phy_pte.val;
 }
 
@@ -553,12 +565,12 @@ int thash_purge_and_insert(VCPU *v, u64 pte, u64 itir, u64 ifa, int type)
     ps = itir_ps(itir);
     mrr.rrval = ia64_get_rr(ifa);
 
-    phy_pte = translate_phy_pte(v, &pte, itir, ifa);
+    phy_pte = translate_phy_pte(v, pte, itir, ifa);
 
     vtlb_purge(v, ifa, ps);
     vhpt_purge(v, ifa, ps);
 
-    if (pte & VTLB_PTE_IO) {
+    if (phy_pte == -1) {
         vtlb_insert(v, pte, itir, ifa);
         return 1;
     }

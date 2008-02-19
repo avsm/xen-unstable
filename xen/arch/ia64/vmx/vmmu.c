@@ -51,37 +51,6 @@ static void __init parse_vhpt_size(char *s)
 custom_param("vti_vtlb_size", parse_vtlb_size);
 custom_param("vti_vhpt_size", parse_vhpt_size);
 
-/*
- * Get the machine page frame number in 16KB unit
- * Input:
- *  d: 
- */
-static u64 get_mfn(struct domain *d, u64 gpfn)
-{
-//    struct domain *d;
-    u64    xen_gppn, xen_mppn, mpfn;
-/*
-    if ( domid == DOMID_SELF ) {
-        d = current->domain;
-    }
-    else {
-        d = get_domain_by_id(domid);
-    }
- */
-    xen_gppn = arch_to_xen_ppn(gpfn);
-    xen_mppn = gmfn_to_mfn(d, xen_gppn);
-/*
-    for (i=0; i<pages; i++) {
-        if ( gmfn_to_mfn(d, gpfn+i) == INVALID_MFN ) {
-            return INVALID_MFN;
-        }
-    }
-*/
-    mpfn= xen_to_arch_ppn(xen_mppn);
-    mpfn = mpfn | (((1UL <<(PAGE_SHIFT-ARCH_PAGE_SHIFT))-1)&gpfn);
-    return mpfn;
-    
-}
 
 static int init_domain_vhpt(struct vcpu *v)
 {
@@ -131,51 +100,6 @@ void free_domain_tlb(struct vcpu *v)
     free_domain_vhpt(v);
 }
 
-/*
- * Insert guest TLB to machine TLB.
- *  data:   In TLB format
- */
-void machine_tlb_insert(struct vcpu *v, thash_data_t *tlb)
-{
-    u64     psr;
-    thash_data_t    mtlb;
-    unsigned int    cl = tlb->cl;
-    unsigned long mtlb_ppn;
-    mtlb.ifa = tlb->vadr;
-    mtlb.itir = tlb->itir & ~ITIR_RV_MASK;
-    mtlb.page_flags = tlb->page_flags & ~PAGE_FLAGS_RV_MASK;
-    mtlb.ppn = get_mfn(v->domain, tlb->ppn);
-    mtlb_ppn=mtlb.ppn;
-
-#if 0
-    if (mtlb_ppn == INVALID_MFN)
-        panic_domain(vcpu_regs(v), "Machine tlb insert with invalid mfn number.\n");
-#endif
-
-    psr = ia64_clear_ic();
-    if ( cl == ISIDE_TLB ) {
-        ia64_itc(1, mtlb.ifa, mtlb.page_flags, IA64_ITIR_PS_KEY(mtlb.ps, 0));
-    }
-    else {
-        ia64_itc(2, mtlb.ifa, mtlb.page_flags, IA64_ITIR_PS_KEY(mtlb.ps, 0));
-    }
-    ia64_set_psr(psr);
-    ia64_srlz_i();
-    return;
-}
-
-/*
- *  Purge machine tlb.
- *  INPUT
- *      rr:     guest rr.
- *      va:     only bits 0:60 is valid
- *      size:   bits format (1<<size) for the address range to purge.
- *
- */
-void machine_tlb_purge(u64 va, u64 ps)
-{
-    ia64_ptcl(va, ps << 2);
-}
 
 int vhpt_enabled(VCPU *vcpu, uint64_t vadr, vhpt_ref_t ref)
 {
@@ -543,16 +467,19 @@ u64 vmx_vcpu_thash(VCPU *vcpu, u64 vadr)
     ia64_rr vrr;
     u64 pval;
     u64 vhpt_offset;
+    u64 mask;
+
     vpta.val = vmx_vcpu_get_pta(vcpu);
     vcpu_get_rr(vcpu, vadr, &vrr.rrval);
-    if(vpta.vf){
-        pval = ia64_call_vsa(PAL_VPS_THASH, vadr, vrr.rrval,
-                             vpta.val, 0, 0, 0, 0);
-        pval = vpta.val & ~0xffff;
-    }else{
-        vhpt_offset=((vadr>>vrr.ps)<<3)&((1UL<<(vpta.size))-1);
+    mask = (1UL << vpta.size) - 1;
+    if (vpta.vf) {
+        vadr = (vadr & 0x1fffffffffffffffUL) >> vrr.ps;
+        vhpt_offset = vadr ^ vrr.rid;
+        pval = (vpta.val & ~0x7fffUL) + ((vhpt_offset << 5) & mask);
+    } else {
+        vhpt_offset=((vadr >> vrr.ps) << 3) & mask;
         pval = (vadr & VRN_MASK) |
-            (vpta.val<<3>>(vpta.size+3)<<(vpta.size))|
+            (vpta.val << 3 >> (vpta.size + 3) << vpta.size) |
             vhpt_offset;
     }
     return  pval;
@@ -564,10 +491,13 @@ u64 vmx_vcpu_ttag(VCPU *vcpu, u64 vadr)
     ia64_rr vrr;
     PTA vpta;
     u64 pval;
+    u64 rid;
     vpta.val = vmx_vcpu_get_pta(vcpu);
     vcpu_get_rr(vcpu, vadr, &vrr.rrval);
     if(vpta.vf){
-        pval = ia64_call_vsa(PAL_VPS_TTAG, vadr, vrr.rrval, 0, 0, 0, 0, 0);
+        vadr = (vadr & 0x1fffffffffffffffUL) >> vrr.ps;
+        rid = vrr.rid;
+        pval = vadr ^ (rid << 39);
     }else{
         pval = 1;
     }
@@ -583,83 +513,85 @@ IA64FAULT vmx_vcpu_tpa(VCPU *vcpu, u64 vadr, u64 *padr)
     REGS *regs;
     u64 vhpt_adr, madr;
     IA64_PSR vpsr;
-    regs=vcpu_regs(vcpu);
-    pt_isr.val=VMX(vcpu,cr_isr);
-    visr.val=0;
-    visr.ei=pt_isr.ei;
-    visr.ir=pt_isr.ir;
+
+    regs = vcpu_regs(vcpu);
+    pt_isr.val = VMX(vcpu, cr_isr);
+    visr.val = 0;
+    visr.ei = pt_isr.ei;
+    visr.ir = pt_isr.ir;
     vpsr.val = VCPU(vcpu, vpsr);
-    visr.na=1;
+    visr.na = 1;
+
+    /* First look in VTLB.  */
     data = vtlb_lookup(vcpu, vadr, DSIDE_TLB);
-    if(data){
-        if(data->p==0){
+    if (data) {
+        if (data->p == 0) {
             vcpu_set_isr(vcpu,visr.val);
             data_page_not_present(vcpu, vadr);
             return IA64_FAULT;
-        }else if(data->ma == VA_MATTR_NATPAGE){
+        } else if (data->ma == VA_MATTR_NATPAGE) {
             vcpu_set_isr(vcpu, visr.val);
             dnat_page_consumption(vcpu, vadr);
             return IA64_FAULT;
-        }else{
+        } else {
             *padr = ((data->ppn >> (data->ps - 12)) << data->ps) |
                     (vadr & (PSIZE(data->ps) - 1));
             return IA64_NO_FAULT;
         }
     }
+
+    /* Look in mVHPT.  */
     data = vhpt_lookup(vadr);
-    if(data){
-        if(data->p==0){
+    if (data) {
+        if (data->p == 0) {
             vcpu_set_isr(vcpu,visr.val);
             data_page_not_present(vcpu, vadr);
             return IA64_FAULT;
-        }else if(data->ma == VA_MATTR_NATPAGE){
+        } else if (data->ma == VA_MATTR_NATPAGE) {
             vcpu_set_isr(vcpu, visr.val);
             dnat_page_consumption(vcpu, vadr);
             return IA64_FAULT;
-        }else{
+        } else {
             madr = (data->ppn >> (data->ps - 12) << data->ps) |
                    (vadr & (PSIZE(data->ps) - 1));
             *padr = __mpa_to_gpa(madr);
             return IA64_NO_FAULT;
         }
     }
-    else{
-        if(!vhpt_enabled(vcpu, vadr, NA_REF)){
-            if(vpsr.ic){
-                vcpu_set_isr(vcpu, visr.val);
-                alt_dtlb(vcpu, vadr);
-                return IA64_FAULT;
-            }
-            else{
-                nested_dtlb(vcpu);
-                return IA64_FAULT;
-            }
+
+    /* If VHPT is not enabled, inject fault.  */
+    if (!vhpt_enabled(vcpu, vadr, NA_REF)) {
+        if (vpsr.ic) {
+            vcpu_set_isr(vcpu, visr.val);
+            alt_dtlb(vcpu, vadr);
+            return IA64_FAULT;
+        } else {
+            nested_dtlb(vcpu);
+            return IA64_FAULT;
         }
-        else{
-            vhpt_adr = vmx_vcpu_thash(vcpu, vadr);
-            data = vtlb_lookup(vcpu, vhpt_adr, DSIDE_TLB);
-            if(data){
-                if(vpsr.ic){
-                    vcpu_set_isr(vcpu, visr.val);
-                    dtlb_fault(vcpu, vadr);
-                    return IA64_FAULT;
-                }
-                else{
-                    nested_dtlb(vcpu);
-                    return IA64_FAULT;
-                }
-            }
-            else{
-                if(vpsr.ic){
-                    vcpu_set_isr(vcpu, visr.val);
-                    dvhpt_fault(vcpu, vadr);
-                    return IA64_FAULT;
-                }
-                else{
-                    nested_dtlb(vcpu);
-                    return IA64_FAULT;
-                }
-            }
+    }
+
+    /* Get gVHPT entry.  */
+    vhpt_adr = vmx_vcpu_thash(vcpu, vadr);
+    data = vtlb_lookup(vcpu, vhpt_adr, DSIDE_TLB);
+    if (data) {
+        /* FIXME: we should read gadr from the entry!  */
+        if (vpsr.ic) {
+            vcpu_set_isr(vcpu, visr.val);
+            dtlb_fault(vcpu, vadr);
+            return IA64_FAULT;
+        } else {
+            nested_dtlb(vcpu);
+            return IA64_FAULT;
+        }
+    } else {
+        if (vpsr.ic) {
+            vcpu_set_isr(vcpu, visr.val);
+            dvhpt_fault(vcpu, vadr);
+            return IA64_FAULT;
+        } else {
+            nested_dtlb(vcpu);
+            return IA64_FAULT;
         }
     }
 }
@@ -674,12 +606,25 @@ u64 vmx_vcpu_tak(VCPU *vcpu, u64 vadr)
         return key;
     }
 
-    /* FIXME: if psr.dt is set, look in the guest VHPT.  */
     data = vtlb_lookup(vcpu, vadr, DSIDE_TLB);
-    if (!data || !data->p)
-        key = 1;
-    else
-        key = data->key << 8;
+    if (data) {
+        if (data->p)
+            return data->key << 8;
+        else
+            return 1;
+    }
 
-    return key;
+    data = vhpt_lookup(vadr);
+    if (data) {
+        if (data->p)
+            return data->key << 8;	/* FIXME: possible mangling/masking.  */
+        else
+            return 1;
+    }
+
+    if (!vhpt_enabled(vcpu, vadr, NA_REF))
+        return 1;
+
+    /* FIXME: look in the guest VHPT.  */
+    return 1;
 }
