@@ -208,8 +208,12 @@ vmx_ia64_handle_break (unsigned long ifa, struct pt_regs *regs, unsigned long is
             vcpu_increment_iip(v);
             return IA64_NO_FAULT;
         } else if (iim == DOMN_SAL_REQUEST) {
-            sal_emul(v);
-            vcpu_increment_iip(v);
+            if (d->arch.is_sioemu)
+                sioemu_sal_assist(v);
+            else {
+                sal_emul(v);
+                vcpu_increment_iip(v);
+            }
             return IA64_NO_FAULT;
         } else if (d->arch.is_sioemu
                    && iim == SIOEMU_HYPERPRIVOP_CALLBACK_RETURN) {
@@ -324,6 +328,11 @@ static int vmx_handle_lds(REGS* regs)
     return IA64_FAULT;
 }
 
+static inline int unimpl_phys_addr (u64 paddr)
+{
+    return (pa_clear_uc(paddr) >> MAX_PHYS_ADDR_BITS) != 0;
+}
+
 /* We came here because the H/W VHPT walker failed to find an entry */
 IA64FAULT
 vmx_hpw_miss(u64 vadr, u64 vec, REGS* regs)
@@ -351,15 +360,24 @@ vmx_hpw_miss(u64 vadr, u64 vec, REGS* regs)
     mmu_mode = VMX_MMU_MODE(v);
     if ((mmu_mode == VMX_MMU_PHY_DT
          || (mmu_mode == VMX_MMU_PHY_D && type == DSIDE_TLB))
-        && !((vadr<<1)>>62)) {
+        && (REGION_NUMBER(vadr) & 3) == 0) {
         if (type == DSIDE_TLB) {
+            u64 pte;
             /* DTLB miss.  */
             if (misr.sp) /* Refer to SDM Vol2 Table 4-11,4-12 */
                 return vmx_handle_lds(regs);
-            /* Clear UC bit in vadr with the shifts.  */
-            if (v->domain != dom0
-                && __gpfn_is_io(v->domain, (vadr << 1) >> (PAGE_SHIFT + 1))) {
-                emulate_io_inst(v, ((vadr << 1) >> 1), 4);
+            if (unlikely(unimpl_phys_addr(vadr))) {
+                unimpl_daddr(v);
+                return IA64_FAULT;
+            }
+            pte = lookup_domain_mpa(v->domain, pa_clear_uc(vadr), NULL);
+            if (v->domain != dom0 && (pte & GPFN_IO_MASK)) {
+                emulate_io_inst(v, pa_clear_uc(vadr), 4, pte);
+                return IA64_FAULT;
+            }
+        } else {
+            if (unlikely(unimpl_phys_addr(vadr))) {
+                unimpl_iaddr_trap(v, vadr);
                 return IA64_FAULT;
             }
         }
@@ -373,18 +391,20 @@ try_again:
     if (data != 0) {
         /* Found.  */
         if (v->domain != dom0 && type == DSIDE_TLB) {
+            u64 pte;
             if (misr.sp) { /* Refer to SDM Vol2 Table 4-10,4-12 */
                 if ((data->ma == VA_MATTR_UC) || (data->ma == VA_MATTR_UCE))
                     return vmx_handle_lds(regs);
             }
             gppa = (vadr & ((1UL << data->ps) - 1)) +
                    (data->ppn >> (data->ps - 12) << data->ps);
-            if (__gpfn_is_io(v->domain, gppa >> PAGE_SHIFT)) {
+            pte = lookup_domain_mpa(v->domain, gppa, NULL);
+            if (pte & GPFN_IO_MASK) {
                 if (misr.sp)
                     panic_domain(NULL, "ld.s on I/O page not with UC attr."
                                  " pte=0x%lx\n", data->page_flags);
                 if (data->pl >= ((regs->cr_ipsr >> IA64_PSR_CPL0_BIT) & 3))
-                    emulate_io_inst(v, gppa, data->ma);
+                    emulate_io_inst(v, gppa, data->ma, pte);
                 else {
                     vcpu_set_isr(v, misr.val);
                     data_access_rights(v, vadr);

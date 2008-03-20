@@ -160,7 +160,7 @@ fetch_code(VCPU *vcpu, u64 gip, IA64_BUNDLE *pbundle)
 
  again:
     if ( !(VCPU(vcpu, vpsr) & IA64_PSR_IT) ) {   // I-side physical mode
-        gpip = gip;
+        gpip = pa_clear_uc(gip);	// clear UC bit
     }
     else {
         tlb = vtlb_lookup(vcpu, gip, ISIDE_TLB);
@@ -283,9 +283,10 @@ IA64FAULT vmx_vcpu_itr_d(VCPU *vcpu, u64 slot, u64 pte, u64 itir, u64 ifa)
 #ifdef VTLB_DEBUG
     int index;
 #endif    
-    u64 gpfn;
+    u64 gpfn, gpte;
     u64 ps, va, rid;
     thash_data_t * p_dtr;
+
     ps = itir_ps(itir);
     va = PAGEALIGN(ifa, ps);
 #ifdef VTLB_DEBUG    
@@ -313,10 +314,11 @@ IA64FAULT vmx_vcpu_itr_d(VCPU *vcpu, u64 slot, u64 pte, u64 itir, u64 ifa)
     if (ps != _PAGE_SIZE_16M)
         thash_purge_entries(vcpu, va, ps);
     gpfn = (pte & _PAGE_PPN_MASK)>> PAGE_SHIFT;
-    if (VMX_DOMAIN(vcpu) && __gpfn_is_io(vcpu->domain, gpfn))
+    gpte = lookup_domain_mpa(vcpu->domain, gpfn, NULL);
+    if (gpte & GPFN_IO_MASK)
         pte |= VTLB_PTE_IO;
     vcpu_get_rr(vcpu, va, &rid);
-    rid = rid& RR_RID_MASK;
+    rid &= RR_RID_MASK;
     p_dtr = (thash_data_t *)&vcpu->arch.dtrs[slot];
     vmx_vcpu_set_tr((thash_data_t *)&vcpu->arch.dtrs[slot], pte, itir, va, rid);
     vcpu_quick_region_set(PSCBX(vcpu,dtr_regions),va);
