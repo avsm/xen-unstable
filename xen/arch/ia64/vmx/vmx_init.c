@@ -52,6 +52,7 @@
 #include <xen/event.h>
 #include <asm/vlsapic.h>
 #include <asm/vhpt.h>
+#include <asm/vmx_pal_vsa.h>
 #include "entry.h"
 
 /* Global flag to identify whether Intel vmx feature is on */
@@ -104,6 +105,8 @@ no_vti:
 }
 
 /*
+ *  ** This function must be called on every processor **
+ *
  * Init virtual environment on current LP
  * vsa_base is the indicator whether it's first LP to be initialized
  * for current domain.
@@ -305,15 +308,9 @@ vmx_create_vp(struct vcpu *v)
 void
 vmx_save_state(struct vcpu *v)
 {
-	u64 status;
-
 	BUG_ON(v != current);
-	/* FIXME: about setting of pal_proc_vector... time consuming */
-	status = ia64_pal_vp_save((u64 *)v->arch.privregs, 0);
-	if (status != PAL_STATUS_SUCCESS){
-		panic_domain(vcpu_regs(v),"Save vp status failed\n");
-	}
-
+	
+	ia64_call_vsa(PAL_VPS_SAVE, (u64)v->arch.privregs, 0, 0, 0, 0, 0, 0);
 
 	/* Need to save KR when domain switch, though HV itself doesn;t
 	 * use them.
@@ -332,17 +329,12 @@ vmx_save_state(struct vcpu *v)
 void
 vmx_load_state(struct vcpu *v)
 {
-	u64 status;
-
 	BUG_ON(v != current);
 
 	vmx_load_all_rr(v);
 
 	/* vmx_load_all_rr() pins down v->arch.privregs with both dtr/itr*/
-	status = ia64_pal_vp_restore((u64 *)v->arch.privregs, 0);
-	if (status != PAL_STATUS_SUCCESS){
-		panic_domain(vcpu_regs(v),"Restore vp status failed\n");
-	}
+	ia64_call_vsa(PAL_VPS_RESTORE, (u64)v->arch.privregs, 0, 0, 0, 0, 0, 0);
 
 	ia64_set_kr(0, v->arch.arch_vmx.vkr[0]);
 	ia64_set_kr(1, v->arch.arch_vmx.vkr[1]);
@@ -545,6 +537,10 @@ vmx_relinquish_vcpu_resources(struct vcpu *v)
 	vtime_t *vtm = &(v->arch.arch_vmx.vtm);
 
 	kill_timer(&vtm->vtm_timer);
+
+	if (v->arch.arch_vmx.sioemu_info_mva)
+		put_page(virt_to_page((unsigned long)
+		                      v->arch.arch_vmx.sioemu_info_mva));
 
 	free_domain_tlb(v);
 	free_vpd(v);

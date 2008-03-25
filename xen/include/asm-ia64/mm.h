@@ -479,29 +479,9 @@ extern u64 translate_domain_pte(u64 pteval, u64 address, u64 itir__,
     gmfn_to_mfn_foreign((_d), (gpfn))
 
 #define __gpfn_invalid(_d, gpfn)			\
-	(lookup_domain_mpa((_d), ((gpfn)<<PAGE_SHIFT), NULL) & GPFN_INV_MASK)
+	(lookup_domain_mpa((_d), ((gpfn)<<PAGE_SHIFT), NULL) == INVALID_MFN)
 
 #define __gmfn_valid(_d, gpfn)	!__gpfn_invalid(_d, gpfn)
-
-/* Return I/O type if trye */
-#define __gpfn_is_io(_d, gpfn)				\
-({                                          \
-    u64 pte, ret=0;                                \
-    pte = lookup_domain_mpa((_d), ((gpfn)<<PAGE_SHIFT), NULL);	\
-    if(!(pte&GPFN_INV_MASK))        \
-        ret = pte & GPFN_IO_MASK;        \
-    ret;                \
-})
-
-#define __gpfn_is_mem(_d, gpfn)				\
-({                                          \
-    u64 pte, ret=0;                                \
-    pte = lookup_domain_mpa((_d), ((gpfn)<<PAGE_SHIFT), NULL);		   \
-    if((!(pte&GPFN_INV_MASK))&&((pte & GPFN_IO_MASK)==GPFN_MEM))   \
-        ret = 1;             \
-    ret;                \
-})
-
 
 #define __gpa_to_mpa(_d, gpa)   \
     ((gmfn_to_mfn((_d),(gpa)>>PAGE_SHIFT)<<PAGE_SHIFT)|((gpa)&~PAGE_MASK))
