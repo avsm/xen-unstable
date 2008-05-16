@@ -211,11 +211,8 @@ vmx_itlb_loop:
     ld8 r18=[r16]
     ;;
     adds r19=VPD(VPSR),r18
-    movl r20=__vsa_base
     ;;
     ld8 r19=[r19]
-    ld8 r20=[r20]
-    ;;
     br.sptk ia64_vmm_entry
     ;;
 vmx_itlb_out:
@@ -289,11 +286,8 @@ vmx_dtlb_loop:
     ld8 r18=[r16]
     ;;
     adds r19=VPD(VPSR),r18
-    movl r20=__vsa_base
     ;;
     ld8 r19=[r19]
-    ld8 r20=[r20]
-    ;;
     br.sptk ia64_vmm_entry
     ;;
 vmx_dtlb_out:
@@ -461,11 +455,8 @@ dirty_bit_tpa_fail:
     ld8 r18=[r16]
     ;;
     adds r19=VPD(VPSR),r18
-    movl r20=__vsa_base
     ;;
     ld8 r19=[r19]
-    ld8 r20=[r20]
-    ;;
     br.sptk ia64_vmm_entry
     ;;
 END(vmx_dirty_bit)
@@ -976,21 +967,13 @@ END(vmx_single_step_trap)
 ENTRY(vmx_virtualization_fault)
 //    VMX_DBG_FAULT(37)
     mov r31=pr
+    movl r30 = virtualization_fault_table
+    mov r23=b0
     ;;
-    cmp.eq p6,p0=EVENT_MOV_FROM_AR,r24
-    cmp.eq p7,p0=EVENT_MOV_FROM_RR,r24
-    cmp.eq p8,p0=EVENT_MOV_TO_RR,r24
-    cmp.eq p9,p0=EVENT_RSM,r24
-    cmp.eq p10,p0=EVENT_SSM,r24
-    cmp.eq p11,p0=EVENT_MOV_TO_PSR,r24
-    cmp.eq p12,p0=EVENT_THASH,r24 
-    (p6) br.dptk.many vmx_asm_mov_from_ar
-    (p7) br.dptk.many vmx_asm_mov_from_rr
-    (p8) br.dptk.many vmx_asm_mov_to_rr
-    (p9) br.dptk.many vmx_asm_rsm
-    (p10) br.dptk.many vmx_asm_ssm
-    (p11) br.dptk.many vmx_asm_mov_to_psr
-    (p12) br.dptk.many vmx_asm_thash
+    shladd r30=r24,4,r30
+    ;;
+    mov b0=r30
+    br.sptk.many b0
     ;;
 vmx_virtualization_fault_back:
     mov r19=37
@@ -999,23 +982,6 @@ vmx_virtualization_fault_back:
     ;;
     st8 [r16] = r24
     st8 [r17] = r25
-    ;;
-    cmp.ne p6,p0=EVENT_RFI, r24
-    (p6) br.sptk vmx_dispatch_virtualization_fault
-    ;;
-    adds r18=IA64_VPD_BASE_OFFSET,r21
-    ;;
-    ld8 r18=[r18]
-    ;;
-    adds r18=IA64_VPD_VIFS_OFFSET,r18
-    ;;
-    ld8 r18=[r18]
-    ;;
-    tbit.z p6,p0=r18,63
-    (p6) br.sptk vmx_dispatch_virtualization_fault
-    ;;
-    //if vifs.v=1 desert current register frame
-    alloc r18=ar.pfs,0,0,0,0
     br.sptk vmx_dispatch_virtualization_fault
 END(vmx_virtualization_fault)
 
