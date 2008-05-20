@@ -54,7 +54,7 @@
 #include <asm/vlsapic.h>
 #include <asm/vhpt.h>
 #include <asm/vmx_pal_vsa.h>
-#include "entry.h"
+#include <asm/patch.h>
 
 /* Global flag to identify whether Intel vmx feature is on */
 u32 vmx_enabled = 0;
@@ -64,6 +64,28 @@ static u64 vm_buffer = 0;	/* Buffer required to bring up VMX feature */
 u64 __vsa_base = 0;	/* Run-time service base of VMX */
 
 /* Check whether vt feature is enabled or not. */
+
+void vmx_vps_patch(void)
+{
+	u64 addr;
+	
+	addr = (u64)&vmx_vps_sync_read;
+	ia64_patch_imm64(addr, __vsa_base+PAL_VPS_SYNC_READ);
+	ia64_fc((void *)addr);
+	addr = (u64)&vmx_vps_sync_write;
+	ia64_patch_imm64(addr, __vsa_base+PAL_VPS_SYNC_WRITE);
+	ia64_fc((void *)addr);
+	addr = (u64)&vmx_vps_resume_normal;
+	ia64_patch_imm64(addr, __vsa_base+PAL_VPS_RESUME_NORMAL);
+	ia64_fc((void *)addr);
+	addr = (u64)&vmx_vps_resume_handler;
+	ia64_patch_imm64(addr, __vsa_base+PAL_VPS_RESUME_HANDLER);
+	ia64_fc((void *)addr);
+	ia64_sync_i();
+	ia64_srlz_i();	
+}
+
+
 void
 identify_vmx_feature(void)
 {
@@ -152,8 +174,10 @@ vmx_init_env(void *start, unsigned long end_in_pa)
 		return start;
 	}
 
-	if (!__vsa_base)
+	if (!__vsa_base){
 		__vsa_base = tmp_base;
+		vmx_vps_patch();
+	}
 	else
 		ASSERT(tmp_base == __vsa_base);
 
@@ -470,7 +494,6 @@ vmx_final_setup_guest(struct vcpu *v)
 {
 	vpd_t *vpd;
 	int rc;
-	struct switch_stack *sw;
 
 	vpd = alloc_vpd();
 	ASSERT(vpd);
@@ -506,10 +529,6 @@ vmx_final_setup_guest(struct vcpu *v)
 
 	/* Set up guest 's indicator for VTi domain*/
 	set_bit(ARCH_VMX_DOMAIN, &v->arch.arch_vmx.flags);
-
-	/* Initialize pNonSys=1 for the first context switching */
-	sw = (struct switch_stack *)vcpu_regs(v) - 1;
-	sw->pr = (1UL << PRED_NON_SYSCALL);
 
 	return 0;
 }

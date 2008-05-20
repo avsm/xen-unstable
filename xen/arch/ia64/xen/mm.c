@@ -494,6 +494,10 @@ gmfn_to_mfn_foreign(struct domain *d, unsigned long gpfn)
 	if (!pte) {
 		panic("gmfn_to_mfn_foreign: bad gpfn. spinning...\n");
 	}
+
+	if ((pte & _PAGE_IO) && is_hvm_domain(d))
+		return INVALID_MFN;
+
 	return ((pte & _PFN_MASK) >> PAGE_SHIFT);
 }
 
@@ -2187,6 +2191,7 @@ replace_grant_host_mapping(unsigned long gpaddr,
     struct page_info* page = mfn_to_page(mfn);
     struct page_info* new_page = NULL;
     volatile pte_t* new_page_pte = NULL;
+    unsigned long new_page_mfn = INVALID_MFN;
 
     if (new_gpaddr) {
         new_page_pte = lookup_noalloc_domain_pte_none(d, new_gpaddr);
@@ -2194,7 +2199,6 @@ replace_grant_host_mapping(unsigned long gpaddr,
             new_pte = ptep_get_and_clear(&d->arch.mm,
                                          new_gpaddr, new_page_pte);
             if (likely(pte_present(new_pte))) {
-                unsigned long new_page_mfn;
                 struct domain* page_owner;
 
                 new_page_mfn = pte_pfn(new_pte);
@@ -2207,7 +2211,7 @@ replace_grant_host_mapping(unsigned long gpaddr,
                              "new_gpaddr 0x%lx mfn 0x%lx\n",
                              __func__, gpaddr, mfn, new_gpaddr, new_page_mfn);
                     new_page = NULL; /* prevent domain_put_page() */
-                    goto out;
+                    return GNTST_general_error;
                 }
 
                 /*
@@ -2224,7 +2228,7 @@ replace_grant_host_mapping(unsigned long gpaddr,
                                  "new_gpaddr 0x%lx mfn 0x%lx\n",
                                  __func__, gpaddr, mfn,
                                  new_gpaddr, new_page_mfn);
-                        goto out;
+                        return GNTST_general_error;
                     }
                 }
                 domain_put_page(d, new_gpaddr, new_page_pte, new_pte, 0);
@@ -2242,7 +2246,7 @@ replace_grant_host_mapping(unsigned long gpaddr,
     if (pte == NULL) {
         gdprintk(XENLOG_INFO, "%s: gpaddr 0x%lx mfn 0x%lx\n",
                 __func__, gpaddr, mfn);
-        goto out;
+        return GNTST_general_error;
     }
 
  again:
@@ -2252,25 +2256,29 @@ replace_grant_host_mapping(unsigned long gpaddr,
         (page_get_owner(page) == d && get_gpfn_from_mfn(mfn) == gpfn)) {
         gdprintk(XENLOG_INFO, "%s: gpaddr 0x%lx mfn 0x%lx cur_pte 0x%lx\n",
                 __func__, gpaddr, mfn, pte_val(cur_pte));
-        goto out;
+        return GNTST_general_error;
     }
 
-    old_pte = ptep_cmpxchg_rel(&d->arch.mm, gpaddr, pte, cur_pte, new_pte);
-    if (unlikely(!pte_present(old_pte))) {
-        gdprintk(XENLOG_INFO, "%s: gpaddr 0x%lx mfn 0x%lx"
-                         " cur_pte 0x%lx old_pte 0x%lx\n",
-                __func__, gpaddr, mfn, pte_val(cur_pte), pte_val(old_pte));
-        goto out;
+    if (new_page) {
+        BUG_ON(new_page_mfn == INVALID_MFN);
+        set_gpfn_from_mfn(new_page_mfn, gpfn);
+        /* smp_mb() isn't needed because assign_domain_pge_cmpxchg_rel()
+           has release semantics. */
     }
+    old_pte = ptep_cmpxchg_rel(&d->arch.mm, gpaddr, pte, cur_pte, new_pte);
     if (unlikely(pte_val(cur_pte) != pte_val(old_pte))) {
         if (pte_pfn(old_pte) == mfn) {
             goto again;
         }
-        gdprintk(XENLOG_INFO, "%s gpaddr 0x%lx mfn 0x%lx cur_pte "
-                "0x%lx old_pte 0x%lx\n",
-                __func__, gpaddr, mfn, pte_val(cur_pte), pte_val(old_pte));
+        if (new_page) {
+            BUG_ON(new_page_mfn == INVALID_MFN);
+            set_gpfn_from_mfn(new_page_mfn, INVALID_M2P_ENTRY);
+            domain_put_page(d, new_gpaddr, new_page_pte, new_pte, 1);
+        }
         goto out;
     }
+    if (unlikely(!pte_present(old_pte)))
+        goto out;
     BUG_ON(pte_pfn(old_pte) != mfn);
 
     /* try_to_clear_PGC_allocate(d, page) is not needed. */
@@ -2283,8 +2291,9 @@ replace_grant_host_mapping(unsigned long gpaddr,
     return GNTST_okay;
 
  out:
-    if (new_page)
-        domain_put_page(d, new_gpaddr, new_page_pte, new_pte, 1);
+    gdprintk(XENLOG_INFO, "%s gpaddr 0x%lx mfn 0x%lx cur_pte "
+             "0x%lx old_pte 0x%lx\n",
+             __func__, gpaddr, mfn, pte_val(cur_pte), pte_val(old_pte));
     return GNTST_general_error;
 }
 
@@ -2910,6 +2919,20 @@ arch_memory_op(int op, XEN_GUEST_HANDLE(void) arg)
 int is_iomem_page(unsigned long mfn)
 {
     return (!mfn_valid(mfn) || (page_get_owner(mfn_to_page(mfn)) == dom_io));
+}
+
+void xencomm_mark_dirty(unsigned long addr, unsigned int len)
+{
+    struct domain *d = current->domain;
+    unsigned long gpfn;
+    unsigned long end_addr = addr + len;
+
+    if (shadow_mode_enabled(d)) {
+        for (addr &= PAGE_MASK; addr < end_addr; addr += PAGE_SIZE) {
+            gpfn = get_gpfn_from_mfn(virt_to_mfn(addr));
+            shadow_mark_page_dirty(d, gpfn);
+        }
+    }
 }
 
 /*
