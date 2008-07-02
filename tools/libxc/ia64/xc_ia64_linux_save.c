@@ -208,69 +208,15 @@ xc_ia64_send_shared_info(int xc_handle, int io_fd, shared_info_t *live_shinfo)
 }
 
 static int
-xc_ia64_pv_send_context(int xc_handle, int io_fd, uint32_t dom,
-                        shared_info_t *live_shinfo)
-{
-    /* A copy of the CPU context of the guest. */
-    vcpu_guest_context_any_t ctxt_any;
-    vcpu_guest_context_t *ctxt = &ctxt_any.c;
-    char *mem;
-
-    if (xc_ia64_send_vcpu_context(xc_handle, io_fd, dom, 0, &ctxt_any))
-        return -1;
-
-    mem = xc_map_foreign_range(xc_handle, dom, PAGE_SIZE,
-                               PROT_READ|PROT_WRITE, ctxt->privregs_pfn);
-    if (mem == NULL) {
-        ERROR("cannot map privreg page");
-        return -1;
-    }
-    if (write_exact(io_fd, mem, PAGE_SIZE)) {
-        ERROR("Error when writing privreg to state file (5)");
-        munmap(mem, PAGE_SIZE);
-        return -1;
-    }
-    munmap(mem, PAGE_SIZE);
-
-    if (xc_ia64_send_shared_info(xc_handle, io_fd, live_shinfo))
-        return -1;
-
-    return 0;
-}
-
-static int
-xc_ia64_hvm_send_context(int xc_handle, int io_fd, uint32_t dom,
-                         const xc_dominfo_t *info, shared_info_t *live_shinfo)
+xc_ia64_send_vcpumap(int xc_handle, int io_fd, uint32_t dom,
+                     const xc_dominfo_t *info, uint64_t max_virt_cpus,
+                     uint64_t **vcpumapp)
 {
     int rc = -1;
     unsigned int i;
-
-    /* vcpu map */
-    uint64_t max_virt_cpus;
     unsigned long vcpumap_size;
     uint64_t *vcpumap = NULL;
 
-    /* HVM: magic frames for ioreqs and xenstore comms */
-    const int hvm_params[] = {
-        HVM_PARAM_STORE_PFN,
-        HVM_PARAM_IOREQ_PFN,
-        HVM_PARAM_BUFIOREQ_PFN,
-        HVM_PARAM_BUFPIOREQ_PFN,
-    };
-    const int NR_PARAMS = sizeof(hvm_params) / sizeof(hvm_params[0]);
-    /* ioreq_pfn, bufioreq_pfn, store_pfn */
-    uint64_t magic_pfns[NR_PARAMS];
-
-    /* HVM: a buffer for holding HVM contxt */
-    uint64_t rec_size;
-    uint64_t hvm_buf_size = 0;
-    uint8_t *hvm_buf = NULL;
-
-    if (xc_ia64_send_shared_info(xc_handle, io_fd, live_shinfo))
-        return -1;
-
-    /* vcpu map */
-    max_virt_cpus = MAX_VIRT_CPUS;
     vcpumap_size = (max_virt_cpus + 1 + sizeof(vcpumap[0]) - 1) /
         sizeof(vcpumap[0]);
     vcpumap = malloc(vcpumap_size);
@@ -296,6 +242,101 @@ xc_ia64_hvm_send_context(int xc_handle, int io_fd, uint32_t dom,
         goto out;
     }
 
+    rc = 0;
+
+ out:
+    if (rc != 0 && vcpumap != NULL) {
+        free(vcpumap);
+        vcpumap = NULL;
+    }
+    *vcpumapp = vcpumap;
+    return rc;
+}
+
+
+static int
+xc_ia64_pv_send_context(int xc_handle, int io_fd, uint32_t dom,
+                        const xc_dominfo_t *info, shared_info_t *live_shinfo)
+{
+    int rc = -1;
+    unsigned int i;
+
+    /* vcpu map */
+    uint64_t *vcpumap = NULL;
+    if (xc_ia64_send_vcpumap(xc_handle, io_fd, dom, info, MAX_VIRT_CPUS,
+                             &vcpumap))
+        goto out;
+
+    /* vcpu context */
+    for (i = 0; i <= info->max_vcpu_id; i++) {
+        /* A copy of the CPU context of the guest. */
+        vcpu_guest_context_any_t ctxt_any;
+        vcpu_guest_context_t *ctxt = &ctxt_any.c;
+
+        char *mem;
+
+        if (!__test_bit(i, vcpumap))
+            continue;
+
+        if (xc_ia64_send_vcpu_context(xc_handle, io_fd, dom, i, &ctxt_any))
+            goto out;
+
+        mem = xc_map_foreign_range(xc_handle, dom, PAGE_SIZE,
+                                   PROT_READ|PROT_WRITE, ctxt->privregs_pfn);
+        if (mem == NULL) {
+            ERROR("cannot map privreg page");
+            goto out;
+        }
+        if (write_exact(io_fd, mem, PAGE_SIZE)) {
+            ERROR("Error when writing privreg to state file (5)");
+            munmap(mem, PAGE_SIZE);
+            goto out;
+        }
+        munmap(mem, PAGE_SIZE);
+    }    
+
+    rc = xc_ia64_send_shared_info(xc_handle, io_fd, live_shinfo);
+
+ out:
+    if (vcpumap != NULL)
+        free(vcpumap);
+    return rc;
+}
+
+static int
+xc_ia64_hvm_send_context(int xc_handle, int io_fd, uint32_t dom,
+                         const xc_dominfo_t *info, shared_info_t *live_shinfo)
+{
+    int rc = -1;
+    unsigned int i;
+
+    /* vcpu map */
+    uint64_t *vcpumap = NULL;
+
+    /* HVM: magic frames for ioreqs and xenstore comms */
+    const int hvm_params[] = {
+        HVM_PARAM_STORE_PFN,
+        HVM_PARAM_IOREQ_PFN,
+        HVM_PARAM_BUFIOREQ_PFN,
+        HVM_PARAM_BUFPIOREQ_PFN,
+    };
+    const int NR_PARAMS = sizeof(hvm_params) / sizeof(hvm_params[0]);
+    /* ioreq_pfn, bufioreq_pfn, store_pfn */
+    uint64_t magic_pfns[NR_PARAMS];
+
+    /* HVM: a buffer for holding HVM contxt */
+    uint64_t rec_size;
+    uint64_t hvm_buf_size = 0;
+    uint8_t *hvm_buf = NULL;
+
+    if (xc_ia64_send_shared_info(xc_handle, io_fd, live_shinfo))
+        return -1;
+
+    /* vcpu map */
+    if (xc_ia64_send_vcpumap(xc_handle, io_fd, dom, info, MAX_VIRT_CPUS,
+                             &vcpumap))
+        goto out;
+
     /* vcpu context */
     for (i = 0; i <= info->max_vcpu_id; i++) {
         /* A copy of the CPU context of the guest. */
@@ -307,7 +348,7 @@ xc_ia64_hvm_send_context(int xc_handle, int io_fd, uint32_t dom,
         if (xc_ia64_send_vcpu_context(xc_handle, io_fd, dom, i, &ctxt_any))
             goto out;
 
-        // system context of vcpu is sent as hvm context.
+        /* system context of vcpu is sent as hvm context. */
     }    
 
     /* Save magic-page locations. */
@@ -735,7 +776,8 @@ xc_domain_save(int xc_handle, int io_fd, uint32_t dom, uint32_t max_iters,
         goto out;
 
     if (!hvm)
-        rc = xc_ia64_pv_send_context(xc_handle, io_fd, dom, live_shinfo);
+        rc = xc_ia64_pv_send_context(xc_handle, io_fd,
+                                     dom, &info, live_shinfo);
     else
         rc = xc_ia64_hvm_send_context(xc_handle, io_fd,
                                       dom, &info, live_shinfo);
