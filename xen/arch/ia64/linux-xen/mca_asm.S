@@ -26,6 +26,7 @@
 #include <asm/mca.h>
 #ifdef XEN
 #include <asm/vhpt.h>
+#include <public/arch-ia64.h>
 #endif
 
 /*
@@ -320,9 +321,51 @@ ia64_do_tlb_purge:
 	srlz.i
 	;;
 #ifdef XEN
-	// 5. VHPT
-#if VHPT_ENABLED
-	GET_VA_VCPU_VHPT_MADDR(r2,r3);;
+	// 5. shared_info
+	GET_THIS_PADDR(r2, inserted_shared_info);;
+	ld8 r16=[r2]
+	mov r18=XSI_SHIFT<<2
+	;;
+	ptr.d r16,r18
+	;;
+	srlz.d
+	;;
+
+	// 6. mapped_regs
+	GET_THIS_PADDR(r2, inserted_mapped_regs);;
+	ld8 r16=[r2]
+	mov r18=XMAPPEDREGS_SHIFT<<2
+	;;
+	ptr.d r16,r18
+	;;
+	srlz.d
+	;;
+
+	// 7. VPD
+	// The VPD will not be mapped in the case where
+	// a VMX domain hasn't been started since boot
+	GET_THIS_PADDR(r2, inserted_vpd);;
+	ld8 r16=[r2]
+	mov r18=XMAPPEDREGS_SHIFT<<2
+	;;
+	cmp.eq p7,p0=r2,r0
+	;;
+(p7)	br.cond.sptk .vpd_not_mapped
+	;;
+	ptr.i r16,r18
+	;;
+	srlz.i
+	;;
+.vpd_not_mapped:
+
+	// 8. VHPT
+	// GET_VA_VCPU_VHPT_MADDR() may not give the
+	// value of the VHPT currently pinned into the TLB
+	GET_THIS_PADDR(r2, inserted_vhpt);;
+	;;
+	cmp.eq p7,p0=r2,r0
+	;;
+(p7)	br.cond.sptk .vhpt_not_mapped
 	dep r16=0,r2,0,IA64_GRANULE_SHIFT
 	mov r18=IA64_GRANULE_SHIFT<<2
 	;;
@@ -330,7 +373,7 @@ ia64_do_tlb_purge:
 	;;
 	srlz.d
 	;;
-#endif
+.vhpt_not_mapped:
 #endif
 	// Now branch away to caller.
 	br.sptk.many b1
@@ -430,6 +473,7 @@ ia64_reload_tr:
 	;;
 	srlz.d
 	;;
+#ifndef XEN
 	// 3. Reload ITR for PAL code.
 	GET_THIS_PADDR(r2, ia64_mca_pal_pte)
 	;;
@@ -448,6 +492,8 @@ ia64_reload_tr:
 	;;
 	srlz.i
 	;;
+#endif
+
 	// 4. Reload DTR for stack.
 #ifdef XEN
 	// Kernel registers are saved in a per_cpu cpu_kr_ia64_t
@@ -480,8 +526,9 @@ ia64_reload_tr:
 #ifdef XEN
 .reload_vhpt:
 	// 5. VHPT
-#if VHPT_ENABLED
-	GET_VA_VCPU_VHPT_MADDR(r2,r3);;
+       GET_THIS_PADDR(r1, inserted_vhpt);;
+       cmp.eq p7,p0=r2,r0
+(p7)   br.cond.sptk    .overlap_vhpt   // vhpt isn't mapped.
 
 	// avoid overlapping with stack TR
 	shr.u r17=r2,IA64_GRANULE_SHIFT
@@ -511,7 +558,6 @@ ia64_reload_tr:
 	srlz.d
 	;;
 .overlap_vhpt:
-#endif
 #endif
 	br.sptk.many done_tlb_purge_and_reload
 err:

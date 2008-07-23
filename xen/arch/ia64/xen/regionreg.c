@@ -11,13 +11,18 @@
 #include <linux/config.h>
 #include <linux/types.h>
 #include <linux/sched.h>
+#include <linux/percpu.h>
 #include <asm/page.h>
 #include <asm/regionreg.h>
 #include <asm/vhpt.h>
 #include <asm/vcpu.h>
+#include <asm/percpu.h>
+#include <asm/pal.h>
 
 /* Defined in xemasm.S  */
 extern void ia64_new_rr7(unsigned long rid, void *shared_info, void *shared_arch_info, unsigned long shared_info_va, unsigned long va_vhpt);
+extern void ia64_new_rr7_efi(unsigned long rid, unsigned long repin_percpu,
+			     unsigned long vpd);
 
 /* RID virtualization mechanism is really simple:  domains have less rid bits
    than the host and the host rid space is shared among the domains.  (Values
@@ -46,6 +51,11 @@ extern void ia64_new_rr7(unsigned long rid, void *shared_info, void *shared_arch
 /* Default number of rid bits for domains.  */
 static unsigned int domain_rid_bits_default = IA64_MIN_IMPL_RID_BITS;
 integer_param("dom_rid_bits", domain_rid_bits_default); 
+
+DEFINE_PER_CPU(unsigned long, inserted_vhpt);
+DEFINE_PER_CPU(unsigned long, inserted_shared_info);
+DEFINE_PER_CPU(unsigned long, inserted_mapped_regs);
+DEFINE_PER_CPU(unsigned long, inserted_vpd);
 
 #if 0
 // following already defined in include/asm-ia64/gcc_intrin.h
@@ -260,12 +270,41 @@ int set_one_rr(unsigned long rr, unsigned long val)
 		if (!PSCB(v,metaphysical_mode))
 			set_rr(rr,newrrv.rrval);
 	} else if (rreg == 7) {
+#if VHPT_ENABLED
+		__get_cpu_var(inserted_vhpt) = __va_ul(vcpu_vhpt_maddr(v));
+#endif
+		__get_cpu_var(inserted_shared_info) =
+					v->domain->arch.shared_info_va;
+		__get_cpu_var(inserted_mapped_regs) =
+					v->domain->arch.shared_info_va +
+					XMAPPEDREGS_OFS;
 		ia64_new_rr7(vmMangleRID(newrrv.rrval),v->domain->shared_info,
 			     v->arch.privregs, v->domain->arch.shared_info_va,
 		             __va_ul(vcpu_vhpt_maddr(v)));
 	} else {
 		set_rr(rr,newrrv.rrval);
 	}
+	return 1;
+}
+
+int set_one_rr_efi(unsigned long rr, unsigned long val)
+{
+	unsigned long rreg = REGION_NUMBER(rr);
+	unsigned long vpd = 0UL;
+
+	BUG_ON(rreg != 6 && rreg != 7);
+
+	if (rreg == 6) {
+		ia64_set_rr(rr, val);
+		ia64_srlz_d();
+	}
+	else {
+		if (current && VMX_DOMAIN(current))
+			vpd = __get_cpu_var(inserted_vpd);
+		ia64_new_rr7_efi(val, cpu_isset(smp_processor_id(),
+				 percpu_set), vpd);
+	}
+
 	return 1;
 }
 

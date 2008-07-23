@@ -97,5 +97,7 @@ static inline u64 pa_clear_uc(u64 paddr)
 /* It is sometimes very useful to have unsigned long as result.  */
 #define __va_ul(x)	({xen_va _v; _v.l = (long) (x); _v.f.reg = -1; _v.l;})
 
+#define __va_efi(x)	((void*)((unsigned long)(x) | __IA64_EFI_CACHED_OFFSET))
+
 #endif
 #endif /* _ASM_IA64_XENPAGE_H */
