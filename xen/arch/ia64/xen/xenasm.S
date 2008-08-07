@@ -34,12 +34,13 @@
 //                         unsigned long va_vhpt)   	 /* in4 */
 //Local usage:
 //  loc0=rp, loc1=ar.pfs, loc2=percpu_paddr, loc3=psr, loc4=ar.rse
-//  loc5=pal_vaddr, loc6=xen_paddr, loc7=shared_archinfo_paddr,
+//  loc5=shared_archinfo_paddr, loc6=xen_paddr,
 //  r16, r19, r20 are used by ia64_switch_mode_{phys, virt}()
+// loc5 is unused.
 GLOBAL_ENTRY(ia64_new_rr7)
 	// FIXME? not sure this unwind statement is correct...
 	.prologue ASM_UNW_PRLG_RP|ASM_UNW_PRLG_PFS, ASM_UNW_PRLG_GRSAVE(1)
-	alloc loc1 = ar.pfs, 5, 8, 0, 0
+	alloc loc1 = ar.pfs, 5, 7, 0, 0
 	movl loc2=PERCPU_ADDR
 1:	{
 	  mov loc3 = psr		// save psr	
@@ -51,7 +52,7 @@ GLOBAL_ENTRY(ia64_new_rr7)
 	tpa in1=in1			// grab shared_info BEFORE changing rr7
 	adds r8 = 1f-1b,r8		// calculate return address for call
 	;;
-	tpa loc7=in2			// grab arch_vcpu_info BEFORE chg rr7
+	tpa loc5=in2			// grab arch_vcpu_info BEFORE chg rr7
 	movl r17=PSR_BITS_TO_SET
 	mov loc4=ar.rsc			// save RSE configuration
 	movl r16=PSR_BITS_TO_CLEAR
@@ -60,10 +61,7 @@ GLOBAL_ENTRY(ia64_new_rr7)
 	mov ar.rsc=0			// put RSE in enforced lazy, LE mode
 	or loc3=loc3,r17		// add in psr the bits to set
 	;;
-	movl loc5=pal_vaddr		// get pal_vaddr
-	;;
-	ld8 loc5=[loc5]			// read pal_vaddr
-	;;
+
 	andcm r16=loc3,r16		// removes bits to clear from psr
 	dep loc6=0,r8,0,KERNEL_TR_PAGE_SHIFT // Xen code paddr
 	br.call.sptk.many rp=ia64_switch_mode_phys
@@ -163,24 +161,12 @@ GLOBAL_ENTRY(ia64_new_rr7)
 	add r22=r22,in3
 	;;
 	ptr.d	r22,r24
-	or r23=loc7,r25			// construct PA | page properties
+	or r23=loc5,r25			// construct PA | page properties
 	mov cr.itir=r24
 	mov cr.ifa=r22
 	mov r21=IA64_TR_MAPPED_REGS
 	;;
 	itr.d dtr[r21]=r23		// wire in new mapping...
-
-	// Purge/insert PAL TR
-	mov r24=IA64_TR_PALCODE
-	mov r23=IA64_GRANULE_SHIFT<<2
-	dep r25=0,loc5,60,4		// convert pal vaddr to paddr
-	;;
-	ptr.i	loc5,r23
-	or r25=r25,r26			// construct PA | page properties
-	mov cr.itir=r23
-	mov cr.ifa=loc5
-	;;
-	itr.i itr[r24]=r25
 
 	// done, switch back to virtual and return
 	mov r16=loc3			// r16= original psr
@@ -194,6 +180,171 @@ GLOBAL_ENTRY(ia64_new_rr7)
 	srlz.d				// seralize restoration of psr.l
 	br.ret.sptk.many rp
 END(ia64_new_rr7)
+
+
+ /* ia64_new_rr7_efi:
+  *   in0 = rid
+  *   in1 = repin_percpu
+  *   in2 = VPD vaddr
+  *
+  * There seems to be no need to repin: palcode, mapped_regs
+  * or vhpt. If they do need to be repinned then special care
+  * needs to betaken to track the correct value to repin.
+  * That is generally the values that were most recently pinned by
+  * ia64_new_rr7.
+  *
+  * This code function could probably be merged with ia64_new_rr7
+  * as it is just a trimmed down version of that function.
+  * However, current can change without repinning occuring,
+  * so simply getting the values from current does not work correctly.
+  */
+
+GLOBAL_ENTRY(ia64_new_rr7_efi)
+	// FIXME? not sure this unwind statement is correct...
+	.prologue ASM_UNW_PRLG_RP|ASM_UNW_PRLG_PFS, ASM_UNW_PRLG_GRSAVE(1)
+	alloc loc1 = ar.pfs, 3, 7, 0, 0
+	movl loc2=PERCPU_ADDR
+1:	{
+	  mov loc3 = psr		// save psr
+	  mov loc0 = rp			// save rp
+	  mov r8   = ip			// save ip to compute branch
+	};;
+	.body
+	tpa loc2=loc2			// grab this BEFORE changing rr7
+	adds r8 = 1f-1b,r8		// calculate return address for call
+	;;
+	movl r17=PSR_BITS_TO_SET
+	mov loc4=ar.rsc			// save RSE configuration
+	movl r16=PSR_BITS_TO_CLEAR
+	;;
+	tpa r8=r8			// convert rp to physical
+	mov ar.rsc=0			// put RSE in enforced lazy, LE mode
+	or loc3=loc3,r17		// add in psr the bits to set
+	;;
+	dep loc6 = 0,in2,60,4		// get physical address of VPD
+	;;
+	dep loc6 = 0,loc6,0,IA64_GRANULE_SHIFT
+					// mask granule shift
+	;;
+	andcm r16=loc3,r16		// removes bits to clear from psr
+	dep loc5=0,r8,0,KERNEL_TR_PAGE_SHIFT // Xen code paddr
+	br.call.sptk.many rp=ia64_switch_mode_phys
+1:
+	movl	r26=PAGE_KERNEL
+	// now in physical mode with psr.i/ic off so do rr7 switch
+	dep r16=-1,r0,61,3
+	;;
+	mov	rr[r16]=in0
+	;;
+	srlz.d
+
+	// re-pin mappings for kernel text and data
+	mov r24=KERNEL_TR_PAGE_SHIFT<<2
+	movl r17=KERNEL_START
+	;;
+	ptr.i	r17,r24
+	;;
+	ptr.d	r17,r24
+	;;
+	srlz.i
+	;;
+	srlz.d
+	;;
+	mov r16=IA64_TR_KERNEL
+	mov cr.itir=r24
+	mov cr.ifa=r17
+	or r18=loc5,r26
+	;;
+	itr.i itr[r16]=r18
+	;;
+	itr.d dtr[r16]=r18
+	;;
+	srlz.i
+	;;
+	srlz.d
+	;;
+
+	// re-pin mappings for stack (current)
+	mov r25=IA64_GRANULE_SHIFT<<2
+	dep r21=0,r13,60,4		// physical address of "current"
+	;;
+	ptr.d	r13,r25
+	;;
+	srlz.d
+	;;
+	or r23=r21,r26			// construct PA | page properties
+	mov cr.itir=r25
+	mov cr.ifa=r13			// VA of next task...
+	mov r21=IA64_TR_CURRENT_STACK
+	;;
+	itr.d dtr[r21]=r23		// wire in new mapping...
+	;;
+	srlz.d
+	;;
+
+	//  Per-cpu
+	cmp.eq p7,p0=r0,in1
+(p7)	br.cond.sptk ia64_new_rr7_efi_percpu_not_mapped
+	mov r24=PERCPU_PAGE_SHIFT<<2
+	movl r22=PERCPU_ADDR
+	;;
+	ptr.d	r22,r24
+	;;
+	srlz.d
+	;;
+	or r23=loc2,r26
+	mov cr.itir=r24
+	mov cr.ifa=r22
+	mov r25=IA64_TR_PERCPU_DATA
+	;;
+	itr.d dtr[r25]=r23		// wire in new mapping...
+	;;
+	srlz.d
+	;;
+ia64_new_rr7_efi_percpu_not_mapped:
+
+	// VPD
+	cmp.eq p7,p0=r0,in2
+(p7)	br.cond.sptk ia64_new_rr7_efi_vpd_not_mapped
+	or loc6 = r26,loc6		// construct PA | page properties
+	mov r22=IA64_TR_VPD
+	mov r24=IA64_TR_MAPPED_REGS
+	mov r23=IA64_GRANULE_SHIFT<<2
+	;;
+	ptr.i   in2,r23
+	;;
+	ptr.d	in2,r24
+	;;
+	srlz.i
+	;;
+	srlz.d
+	;;
+	mov cr.itir=r23
+	mov cr.ifa=in2
+	;;
+	itr.i itr[r22]=loc6
+	;;
+	itr.d dtr[r24]=loc6
+	;;
+	srlz.i
+	;;
+	srlz.d
+	;;
+ia64_new_rr7_efi_vpd_not_mapped:
+
+	// done, switch back to virtual and return
+	mov r16=loc3			// r16= original psr
+	br.call.sptk.many rp=ia64_switch_mode_virt // return to virtual mode
+	mov psr.l = loc3		// restore init PSR
+	;;
+
+	mov ar.pfs = loc1
+	mov rp = loc0
+	;;
+	mov ar.rsc=loc4			// restore RSE configuration
+	srlz.d				// seralize restoration of psr.l
+	br.ret.sptk.many rp
+END(ia64_new_rr7_efi)
 
 #if 0 /* Not used */
 #include "minstate.h"

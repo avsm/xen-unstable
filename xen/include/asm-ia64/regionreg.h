@@ -36,8 +36,16 @@ typedef union ia64_rr {
 #define RR_RID(arg)     (((arg) & 0x0000000000ffffff) << 8)
 #define RR_RID_MASK     0x00000000ffffff00L
 
+DECLARE_PER_CPU(unsigned long, domain_shared_info);
+DECLARE_PER_CPU(unsigned long, inserted_vhpt);
+DECLARE_PER_CPU(unsigned long, inserted_shared_info);
+DECLARE_PER_CPU(unsigned long, inserted_mapped_regs);
+DECLARE_PER_CPU(unsigned long, inserted_vpd);
+
+extern cpumask_t percpu_set;
 
 int set_one_rr(unsigned long rr, unsigned long val);
+int set_one_rr_efi(unsigned long rr, unsigned long val);
 
 // This function is purely for performance... apparently scrambling
 //  bits in the region id makes for better hashing, which means better

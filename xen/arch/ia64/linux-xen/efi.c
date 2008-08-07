@@ -65,11 +65,14 @@ prefix##_get_time (efi_time_t *tm, efi_time_cap_t *tc)						  \
 	struct ia64_fpreg fr[6];								  \
 	efi_time_cap_t *atc = NULL;								  \
 	efi_status_t ret;									  \
+	XEN_EFI_RR_DECLARE(rr6, rr7);								  \
 												  \
 	if (tc)											  \
 		atc = adjust_arg(tc);								  \
 	ia64_save_scratch_fpregs(fr);								  \
+	XEN_EFI_RR_ENTER(rr6, rr7);								  \
 	ret = efi_call_##prefix((efi_get_time_t *) __va(runtime->get_time), adjust_arg(tm), atc); \
+	XEN_EFI_RR_LEAVE(rr6, rr7);								  \
 	ia64_load_scratch_fpregs(fr);								  \
 	return ret;										  \
 }
@@ -80,9 +83,12 @@ prefix##_set_time (efi_time_t *tm)								\
 {												\
 	struct ia64_fpreg fr[6];								\
 	efi_status_t ret;									\
+	XEN_EFI_RR_DECLARE(rr6, rr7);								  \
 												\
 	ia64_save_scratch_fpregs(fr);								\
+	XEN_EFI_RR_ENTER(rr6, rr7);								  \
 	ret = efi_call_##prefix((efi_set_time_t *) __va(runtime->set_time), adjust_arg(tm));	\
+	XEN_EFI_RR_LEAVE(rr6, rr7);								  \
 	ia64_load_scratch_fpregs(fr);								\
 	return ret;										\
 }
@@ -93,10 +99,13 @@ prefix##_get_wakeup_time (efi_bool_t *enabled, efi_bool_t *pending, efi_time_t *
 {												\
 	struct ia64_fpreg fr[6];								\
 	efi_status_t ret;									\
+	XEN_EFI_RR_DECLARE(rr6, rr7);								  \
 												\
 	ia64_save_scratch_fpregs(fr);								\
+	XEN_EFI_RR_ENTER(rr6, rr7);								  \
 	ret = efi_call_##prefix((efi_get_wakeup_time_t *) __va(runtime->get_wakeup_time),	\
 				adjust_arg(enabled), adjust_arg(pending), adjust_arg(tm));	\
+	XEN_EFI_RR_LEAVE(rr6, rr7);								  \
 	ia64_load_scratch_fpregs(fr);								\
 	return ret;										\
 }
@@ -108,12 +117,15 @@ prefix##_set_wakeup_time (efi_bool_t enabled, efi_time_t *tm)					\
 	struct ia64_fpreg fr[6];								\
 	efi_time_t *atm = NULL;									\
 	efi_status_t ret;									\
+	XEN_EFI_RR_DECLARE(rr6, rr7);								  \
 												\
 	if (tm)											\
 		atm = adjust_arg(tm);								\
 	ia64_save_scratch_fpregs(fr);								\
+	XEN_EFI_RR_ENTER(rr6, rr7);								  \
 	ret = efi_call_##prefix((efi_set_wakeup_time_t *) __va(runtime->set_wakeup_time),	\
 				enabled, atm);							\
+	XEN_EFI_RR_LEAVE(rr6, rr7);								  \
 	ia64_load_scratch_fpregs(fr);								\
 	return ret;										\
 }
@@ -126,13 +138,16 @@ prefix##_get_variable (efi_char16_t *name, efi_guid_t *vendor, u32 *attr,		\
 	struct ia64_fpreg fr[6];							\
 	u32 *aattr = NULL;									\
 	efi_status_t ret;								\
+	XEN_EFI_RR_DECLARE(rr6, rr7);								  \
 											\
 	if (attr)									\
 		aattr = adjust_arg(attr);						\
 	ia64_save_scratch_fpregs(fr);							\
+	XEN_EFI_RR_ENTER(rr6, rr7);								  \
 	ret = efi_call_##prefix((efi_get_variable_t *) __va(runtime->get_variable),	\
 				adjust_arg(name), adjust_arg(vendor), aattr,		\
 				adjust_arg(data_size), adjust_arg(data));		\
+	XEN_EFI_RR_LEAVE(rr6, rr7);								  \
 	ia64_load_scratch_fpregs(fr);							\
 	return ret;									\
 }
@@ -143,10 +158,13 @@ prefix##_get_next_variable (unsigned long *name_size, efi_char16_t *name, efi_gu
 {												\
 	struct ia64_fpreg fr[6];								\
 	efi_status_t ret;									\
+	XEN_EFI_RR_DECLARE(rr6, rr7);								  \
 												\
 	ia64_save_scratch_fpregs(fr);								\
+	XEN_EFI_RR_ENTER(rr6, rr7);								  \
 	ret = efi_call_##prefix((efi_get_next_variable_t *) __va(runtime->get_next_variable),	\
 				adjust_arg(name_size), adjust_arg(name), adjust_arg(vendor));	\
+	XEN_EFI_RR_LEAVE(rr6, rr7);								  \
 	ia64_load_scratch_fpregs(fr);								\
 	return ret;										\
 }
@@ -158,11 +176,14 @@ prefix##_set_variable (efi_char16_t *name, efi_guid_t *vendor, unsigned long att
 {											\
 	struct ia64_fpreg fr[6];							\
 	efi_status_t ret;								\
+	XEN_EFI_RR_DECLARE(rr6, rr7);								  \
 											\
 	ia64_save_scratch_fpregs(fr);							\
+	XEN_EFI_RR_ENTER(rr6, rr7);								  \
 	ret = efi_call_##prefix((efi_set_variable_t *) __va(runtime->set_variable),	\
 				adjust_arg(name), adjust_arg(vendor), attr, data_size,	\
 				adjust_arg(data));					\
+	XEN_EFI_RR_LEAVE(rr6, rr7);								  \
 	ia64_load_scratch_fpregs(fr);							\
 	return ret;									\
 }
@@ -173,10 +194,13 @@ prefix##_get_next_high_mono_count (u32 *count)							\
 {												\
 	struct ia64_fpreg fr[6];								\
 	efi_status_t ret;									\
+	XEN_EFI_RR_DECLARE(rr6, rr7);								  \
 												\
 	ia64_save_scratch_fpregs(fr);								\
+	XEN_EFI_RR_ENTER(rr6, rr7);								  \
 	ret = efi_call_##prefix((efi_get_next_high_mono_count_t *)				\
 				__va(runtime->get_next_high_mono_count), adjust_arg(count));	\
+	XEN_EFI_RR_LEAVE(rr6, rr7);								  \
 	ia64_load_scratch_fpregs(fr);								\
 	return ret;										\
 }
@@ -188,14 +212,17 @@ prefix##_reset_system (int reset_type, efi_status_t status,			\
 {										\
 	struct ia64_fpreg fr[6];						\
 	efi_char16_t *adata = NULL;						\
+	XEN_EFI_RR_DECLARE(rr6, rr7);								  \
 										\
 	if (data)								\
 		adata = adjust_arg(data);					\
 										\
 	ia64_save_scratch_fpregs(fr);						\
+	XEN_EFI_RR_ENTER(rr6, rr7);						\
 	efi_call_##prefix((efi_reset_system_t *) __va(runtime->reset_system),	\
 			  reset_type, status, data_size, adata);		\
 	/* should not return, but just in case... */				\
+	XEN_EFI_RR_LEAVE(rr6, rr7);								  \
 	ia64_load_scratch_fpregs(fr);						\
 }
 
@@ -397,7 +424,7 @@ efi_get_pal_addr (void)
 			md->phys_addr + (md->num_pages << EFI_PAGE_SHIFT),
 			vaddr & mask, (vaddr & mask) + IA64_GRANULE_SIZE);
 #endif
-		return __va(md->phys_addr);
+		return __va_efi(md->phys_addr);
 	}
 	printk(KERN_WARNING "%s: no PAL-code memory-descriptor found\n",
 	       __FUNCTION__);
@@ -405,7 +432,7 @@ efi_get_pal_addr (void)
 }
 
 #ifdef XEN
-void *pal_vaddr = 0;
+static void *pal_vaddr = 0;
 
 void *
 efi_get_pal_addr(void)
@@ -416,24 +443,51 @@ efi_get_pal_addr(void)
 }
 #endif
 
-void
-efi_map_pal_code (void)
-{
 #ifdef XEN
-	u64 psr;
-	(void)efi_get_pal_addr();
-#else
+static void
+__efi_unmap_pal_code (void *pal_vaddr)
+{
+	ia64_ptr(0x1, GRANULEROUNDDOWN((unsigned long)pal_vaddr),
+		 IA64_GRANULE_SHIFT);
+}
+
+void
+efi_unmap_pal_code (void)
+{
 	void *pal_vaddr = efi_get_pal_addr ();
 	u64 psr;
 
 	if (!pal_vaddr)
 		return;
-#endif
 
 	/*
 	 * Cannot write to CRx with PSR.ic=1
 	 */
 	psr = ia64_clear_ic();
+	__efi_unmap_pal_code(pal_vaddr);
+	ia64_set_psr(psr);		/* restore psr */
+	ia64_srlz_i();
+}
+#endif
+
+void
+efi_map_pal_code (void)
+{
+	void *pal_vaddr = efi_get_pal_addr ();
+	u64 psr;
+
+	if (!pal_vaddr)
+		return;
+
+	/*
+	 * Cannot write to CRx with PSR.ic=1
+	 */
+	psr = ia64_clear_ic();
+#ifdef XEN
+	/* pal_vaddr must be unpinned before pinning
+	 * This is needed in the case of a nested EFI, PAL or SAL call */
+	__efi_unmap_pal_code(pal_vaddr);
+#endif
 	ia64_itr(0x1, IA64_TR_PALCODE, GRANULEROUNDDOWN((unsigned long) pal_vaddr),
 		 pte_val(pfn_pte(__pa(pal_vaddr) >> PAGE_SHIFT, PAGE_KERNEL)),
 		 IA64_GRANULE_SHIFT);
@@ -567,7 +621,9 @@ efi_init (void)
 	}
 #endif
 
+#ifndef XEN
 	efi_map_pal_code();
+#endif
 	efi_enter_virtual_mode();
 }
 
@@ -585,6 +641,17 @@ efi_enter_virtual_mode (void)
 
 	for (p = efi_map_start; p < efi_map_end; p += efi_desc_size) {
 		md = p;
+#ifdef XEN
+		if (md->attribute & EFI_MEMORY_RUNTIME) {
+			if (md->attribute & EFI_MEMORY_WB)
+				md->virt_addr = __IA64_EFI_CACHED_OFFSET|
+						md->phys_addr;
+			else if (md->attribute & (EFI_MEMORY_UC|EFI_MEMORY_WC|
+						  EFI_MEMORY_WT))
+				md->virt_addr = __IA64_EFI_UNCACHED_OFFSET|
+						md->phys_addr;
+		}
+#else
 		if (md->attribute & EFI_MEMORY_RUNTIME) {
 			/*
 			 * Some descriptors have multiple bits set, so the order of
@@ -617,6 +684,7 @@ efi_enter_virtual_mode (void)
 #endif
 			}
 		}
+#endif
 	}
 
 	status = efi_call_phys(__va(runtime->set_virtual_address_map),
