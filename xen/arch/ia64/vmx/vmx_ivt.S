@@ -973,6 +973,7 @@ END(vmx_single_step_trap)
 ENTRY(vmx_virtualization_fault)
 //    VMX_DBG_FAULT(37)
     mov r31=pr
+#ifndef CONFIG_XEN_IA64_DISABLE_OPTVFAULT
     movl r30 = virtualization_fault_table
     mov r23=b0
     ;;
@@ -981,6 +982,7 @@ ENTRY(vmx_virtualization_fault)
     mov b0=r30
     br.sptk.many b0
     ;;
+#endif
 vmx_virtualization_fault_back:
     mov r19=37
     adds r16 = IA64_VCPU_CAUSE_OFFSET,r21
@@ -1348,6 +1350,7 @@ ENTRY(vmx_dispatch_shadow_fault)
     br.call.sptk.many b6=vmx_ia64_shadow_fault
 END(vmx_dispatch_shadow_fault)
 
+    .section .rodata, "a"
 .Lvmx_dispatch_reflection_string:
     .asciz "vmx_dispatch_reflection\n"
 .Lvmx_dispatch_virtualization_fault_string:
@@ -1358,3 +1361,4 @@ END(vmx_dispatch_shadow_fault)
     .asciz "vmx_dispatch_tlb_miss\n"
 .Lvmx_dispatch_shadow_fault_string:
     .asciz "vmx_dispatch_shadow_fault\n"
+    .previous
