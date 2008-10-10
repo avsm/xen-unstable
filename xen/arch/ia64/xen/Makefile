@@ -15,6 +15,7 @@ obj-y += dom_fw_sn2.o
 obj-y += fw_emul.o
 obj-y += hpsimserial.o
 obj-y += hypercall.o
+obj-y += platform_hypercall.o
 obj-y += hyperprivop.o
 obj-y += idle0_task.o
 obj-y += irq.o
@@ -36,6 +37,7 @@ obj-y += xentime.o
 obj-y += flushd.o
 obj-y += privop_stat.o
 obj-y += xenpatch.o
+obj-y += pci.o
 
 obj-$(crash_debug) += gdbstub.o
 obj-$(xen_ia64_tlb_track) += tlb_track.o

@@ -56,43 +56,18 @@ static int
 suspend_and_state(int (*suspend)(void), int xc_handle, int io_fd,
                   int dom, xc_dominfo_t *info)
 {
-    int i = 0;
-
     if (!(*suspend)()) {
         ERROR("Suspend request failed");
         return -1;
     }
 
-retry:
-
-    if (xc_domain_getinfo(xc_handle, dom, 1, info) != 1) {
+    if ( (xc_domain_getinfo(xc_handle, dom, 1, info) != 1) ||
+         !info->shutdown || (info->shutdown_reason != SHUTDOWN_suspend) ) {
         ERROR("Could not get domain info");
         return -1;
     }
 
-    if (info->shutdown && info->shutdown_reason == SHUTDOWN_suspend)
-        return 0; // success
-
-    if (info->paused) {
-        // try unpausing domain, wait, and retest
-        xc_domain_unpause(xc_handle, dom);
-
-        ERROR("Domain was paused. Wait and re-test.");
-        usleep(10000);  // 10ms
-
-        goto retry;
-    }
-
-
-    if(++i < 100) {
-        ERROR("Retry suspend domain.");
-        usleep(10000);  // 10ms
-        goto retry;
-    }
-
-    ERROR("Unable to suspend domain.");
-
-    return -1;
+    return 0;
 }
 
 static inline int
@@ -455,9 +430,10 @@ xc_domain_save(int xc_handle, int io_fd, uint32_t dom, uint32_t max_iters,
     int qemu_non_active = 1;
 
     /* for foreign p2m exposure */
-    unsigned int memmap_info_num_pages;
+    unsigned long memmap_info_num_pages;
+    /* Unsigned int was used before. To keep file format compatibility. */
+    unsigned int memmap_info_num_pages_to_send;
     unsigned long memmap_size = 0;
-    xen_ia64_memmap_info_t *memmap_info_live = NULL;
     xen_ia64_memmap_info_t *memmap_info = NULL;
     void *memmap_desc_start;
     void *memmap_desc_end;
@@ -591,30 +567,21 @@ xc_domain_save(int xc_handle, int io_fd, uint32_t dom, uint32_t max_iters,
 
     }
 
-    memmap_info_num_pages = live_shinfo->arch.memmap_info_num_pages;
-    memmap_size = PAGE_SIZE * memmap_info_num_pages;
-    memmap_info_live = xc_map_foreign_range(xc_handle, info.domid,
-                                       memmap_size, PROT_READ,
-                                            live_shinfo->arch.memmap_info_pfn);
-    if (memmap_info_live == NULL) {
-        PERROR("Could not map memmap info.");
+    /* copy before use in case someone updating them */
+    if (xc_ia64_copy_memmap(xc_handle, info.domid, live_shinfo,
+                            &memmap_info, &memmap_info_num_pages) != 0) {
+        PERROR("Could not copy memmap");
         goto out;
     }
-    memmap_info = malloc(memmap_size);
-    if (memmap_info == NULL) {
-        PERROR("Could not allocate memmap info memory");
-        goto out;
-    }
-    memcpy(memmap_info, memmap_info_live, memmap_size);
-    munmap(memmap_info_live, memmap_size);
-    memmap_info_live = NULL;
-    
+    memmap_size = memmap_info_num_pages << PAGE_SHIFT;
+
     if (xc_ia64_p2m_map(&p2m_table, xc_handle, dom, memmap_info, 0) < 0) {
         PERROR("xc_ia64_p2m_map");
         goto out;
     }
-    if (write_exact(io_fd,
-                     &memmap_info_num_pages, sizeof(memmap_info_num_pages))) {
+    memmap_info_num_pages_to_send = memmap_info_num_pages;
+    if (write_exact(io_fd, &memmap_info_num_pages_to_send,
+                    sizeof(memmap_info_num_pages_to_send))) {
         PERROR("write: arch.memmap_info_num_pages");
         goto out;
     }
@@ -803,8 +770,6 @@ xc_domain_save(int xc_handle, int io_fd, uint32_t dom, uint32_t max_iters,
     free(to_skip);
     if (live_shinfo)
         munmap(live_shinfo, PAGE_SIZE);
-    if (memmap_info_live)
-        munmap(memmap_info_live, memmap_size);
     if (memmap_info)
         free(memmap_info);
     xc_ia64_p2m_unmap(&p2m_table);
