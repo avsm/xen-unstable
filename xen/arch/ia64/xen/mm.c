@@ -983,15 +983,48 @@ assign_domain_page(struct domain *d,
                                ASSIGN_writable | ASSIGN_pgc_allocated);
 }
 
+static void
+ioports_get_mmio_addr(const struct io_space *space,
+                      unsigned long fp, unsigned long lp,
+                      unsigned long *mmio_start, unsigned long *mmio_end)
+{
+    if (space->sparse) {
+        *mmio_start = IO_SPACE_SPARSE_ENCODING(fp) & PAGE_MASK;
+        *mmio_end = PAGE_ALIGN(IO_SPACE_SPARSE_ENCODING(lp));
+    } else {
+        *mmio_start = fp & PAGE_MASK;
+        *mmio_end = PAGE_ALIGN(lp);
+    }
+}
+
+static unsigned long
+ioports_get_mmio_base(const struct io_space *space, struct domain *d)
+{
+    if (VMX_DOMAIN(d->vcpu[0]))
+        return LEGACY_IO_START;
+
+    if (space == &io_space[0] && d != dom0)
+        return IO_PORTS_PADDR;
+
+    return __pa(space->mmio_base);
+}
+
+/* 
+ * Inpurt
+ * fgp: first guest port
+ * fmp: first machine port
+ * lmp: last machine port
+ */
 int
-ioports_permit_access(struct domain *d, unsigned int fp, unsigned int lp)
+ioports_permit_access(struct domain *d, unsigned int fgp,
+        unsigned int fmp, unsigned int lmp)
 {
     struct io_space *space;
-    unsigned long mmio_start, mmio_end, mach_start;
+    unsigned long mmio_start, mach_start, mach_end;
     int ret;
 
-    if (IO_SPACE_NR(fp) >= num_io_spaces) {
-        dprintk(XENLOG_WARNING, "Unknown I/O Port range 0x%x - 0x%x\n", fp, lp);
+    if (IO_SPACE_NR(fmp) >= num_io_spaces) {
+        dprintk(XENLOG_WARNING, "Unknown I/O Port range 0x%x - 0x%x\n", fmp, lmp);
         return -EFAULT;
     }
 
@@ -1005,42 +1038,32 @@ ioports_permit_access(struct domain *d, unsigned int fp, unsigned int lp)
      * I/O port spaces and thus will number port spaces differently.
      * This is ok, they don't make use of this interface.
      */
-    ret = rangeset_add_range(d->arch.ioport_caps, fp, lp);
+    ret = rangeset_add_range(d->arch.ioport_caps, fmp, lmp);
     if (ret != 0)
         return ret;
 
-    space = &io_space[IO_SPACE_NR(fp)];
+    space = &io_space[IO_SPACE_NR(fmp)];
 
     /* Legacy I/O on dom0 is already setup */
     if (d == dom0 && space == &io_space[0])
         return 0;
 
-    fp = IO_SPACE_PORT(fp);
-    lp = IO_SPACE_PORT(lp);
+    fmp = IO_SPACE_PORT(fmp);
+    lmp = IO_SPACE_PORT(lmp);
 
-    if (space->sparse) {
-        mmio_start = IO_SPACE_SPARSE_ENCODING(fp) & PAGE_MASK;
-        mmio_end = PAGE_ALIGN(IO_SPACE_SPARSE_ENCODING(lp));
-    } else {
-        mmio_start = fp & PAGE_MASK;
-        mmio_end = PAGE_ALIGN(lp);
-    }
+    ioports_get_mmio_addr(space, fmp, lmp, &mach_start, &mach_end);
 
     /*
      * The "machine first port" is not necessarily identity mapped
      * to the guest first port.  At least for the legacy range.
      */
-    mach_start = mmio_start | __pa(space->mmio_base);
+    mach_start = mach_start | __pa(space->mmio_base);
+    mach_end = mach_end | __pa(space->mmio_base);
 
-    if (space == &io_space[0]) {
-        mmio_start |= IO_PORTS_PADDR;
-        mmio_end |= IO_PORTS_PADDR;
-    } else {
-        mmio_start |= __pa(space->mmio_base);
-        mmio_end |= __pa(space->mmio_base);
-    }
+    mmio_start = IO_SPACE_SPARSE_ENCODING(fgp) & PAGE_MASK;
+    mmio_start |= ioports_get_mmio_base(space, d);
 
-    while (mmio_start <= mmio_end) {
+    while (mach_start < mach_end) {
         (void)__assign_domain_page(d, mmio_start, mach_start, ASSIGN_nocache); 
         mmio_start += PAGE_SIZE;
         mach_start += PAGE_SIZE;
@@ -1081,18 +1104,9 @@ ioports_deny_access(struct domain *d, unsigned int fp, unsigned int lp)
     fp_base = IO_SPACE_PORT(fp);
     lp_base = IO_SPACE_PORT(lp);
 
-    if (space->sparse) {
-        mmio_start = IO_SPACE_SPARSE_ENCODING(fp_base) & PAGE_MASK;
-        mmio_end = PAGE_ALIGN(IO_SPACE_SPARSE_ENCODING(lp_base));
-    } else {
-        mmio_start = fp_base & PAGE_MASK;
-        mmio_end = PAGE_ALIGN(lp_base);
-    }
+    ioports_get_mmio_addr(space, fp_base, lp_base, &mmio_start, &mmio_end);
 
-    if (space == &io_space[0] && d != dom0)
-        mmio_base = IO_PORTS_PADDR;
-    else
-        mmio_base = __pa(space->mmio_base);
+    mmio_base = ioports_get_mmio_base(space, d);
 
     for (; mmio_start < mmio_end; mmio_start += PAGE_SIZE) {
         unsigned int port, range;
