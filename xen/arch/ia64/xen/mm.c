@@ -917,10 +917,19 @@ __assign_domain_page(struct domain *d,
 
     old_pte = __pte(0);
     new_pte = pfn_pte(physaddr >> PAGE_SHIFT, __pgprot(prot));
+ again_hvm_page_io:
     ret_pte = ptep_cmpxchg_rel(&d->arch.mm, mpaddr, pte, old_pte, new_pte);
     if (pte_val(ret_pte) == pte_val(old_pte)) {
         smp_mb();
         return 0;
+    }
+    /* in HVM guest, when VTD is enabled,
+     * P2M entry may change from _PAGE_IO type to real MMIO page 
+     */
+    if(is_hvm_domain(d) && (pte_val(ret_pte) & _PAGE_IO) &&
+       !mfn_valid(physaddr >> PAGE_SHIFT)) {
+        old_pte = ret_pte;
+        goto again_hvm_page_io;
     }
 
     // dom0 tries to map real machine's I/O region, but failed.
@@ -1427,6 +1436,8 @@ zap_domain_page_one(struct domain *d, unsigned long mpaddr,
     if (mfn == INVALID_MFN) {
         // clear pte
         old_pte = ptep_get_and_clear(mm, mpaddr, pte);
+        if(!pte_mem(old_pte))
+            return;
         mfn = pte_pfn(old_pte);
     } else {
         unsigned long old_arflags;
@@ -1463,6 +1474,13 @@ zap_domain_page_one(struct domain *d, unsigned long mpaddr,
     perfc_incr(zap_domain_page_one);
     if(!mfn_valid(mfn))
         return;
+
+    if ( iommu_enabled && (is_hvm_domain(d) || need_iommu(d)) ){
+        int i, j;
+        j = 1 << (PAGE_SHIFT-PAGE_SHIFT_4K);
+        for(i = 0 ; i < j; i++)
+            iommu_unmap_page(d, (mpaddr>>PAGE_SHIFT)*j + i);
+    }
 
     page = mfn_to_page(mfn);
     BUG_ON((page->count_info & PGC_count_mask) == 0);
@@ -2848,6 +2866,12 @@ __guest_physmap_add_page(struct domain *d, unsigned long gpfn,
     smp_mb();
     assign_domain_page_replace(d, gpfn << PAGE_SHIFT, mfn,
                                ASSIGN_writable | ASSIGN_pgc_allocated);
+    if ( iommu_enabled && (is_hvm_domain(d) || need_iommu(d)) ){
+        int i, j;
+        j = 1 << (PAGE_SHIFT-PAGE_SHIFT_4K);
+        for(i = 0 ; i < j; i++)
+            iommu_map_page(d, gpfn*j + i, mfn*j + i);
+    }
 }
 
 int
@@ -3342,7 +3366,6 @@ arch_memory_op(int op, XEN_GUEST_HANDLE(void) arg)
         /* Map at new location. */
         /* Here page->count_info = PGC_allocated | N where N >= 1*/
         __guest_physmap_add_page(d, xatp.gpfn, mfn);
-        page = NULL; /* prevent put_page() */
 
     out:
         domain_unlock(d);
