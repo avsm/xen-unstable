@@ -288,7 +288,7 @@ struct arch_vcpu {
     char irq_new_condition;    // vpsr.i/vtpr change, check for pending VHPI
     char hypercall_continuation;
 
-    fpswa_ret_t fpswa_ret;	/* save return values of FPSWA emulation */
+    fpswa_ret_t fpswa_ret;     /* save return values of FPSWA emulation */
     struct timer hlt_timer;
     struct arch_vmx_struct arch_vmx; /* Virtual Machine Extensions */
 
@@ -322,6 +322,9 @@ void
 ia64_fault(unsigned long vector, unsigned long isr, unsigned long ifa,
            unsigned long iim, unsigned long itir, unsigned long arg5,
            unsigned long arg6, unsigned long arg7, unsigned long stack);
+
+void
+ia64_lazy_load_fpu(struct vcpu *vcpu);
 
 #endif /* __ASM_DOMAIN_H__ */
 

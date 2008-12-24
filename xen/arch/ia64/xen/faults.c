@@ -314,10 +314,10 @@ fp_emulate(int fp_fault, void *bundle, unsigned long *ipsr,
 unsigned long
 handle_fpu_swa(int fp_fault, struct pt_regs *regs, unsigned long isr)
 {
-	struct vcpu *v = current;
 	IA64_BUNDLE bundle;
 	unsigned long fault_ip;
 	fpswa_ret_t ret;
+	unsigned long rc;
 
 	fault_ip = regs->cr_iip;
 	/*
@@ -329,24 +329,29 @@ handle_fpu_swa(int fp_fault, struct pt_regs *regs, unsigned long isr)
 		fault_ip -= 16;
 
 	if (VMX_DOMAIN(current)) {
-		if (IA64_RETRY == __vmx_get_domain_bundle(fault_ip, &bundle))
-			return IA64_RETRY;
-	} else
-		bundle = __get_domain_bundle(fault_ip);
-
-	if (!bundle.i64[0] && !bundle.i64[1]) {
-		printk("%s: floating-point bundle at 0x%lx not mapped\n",
-		       __FUNCTION__, fault_ip);
-		return -1;
+		rc = __vmx_get_domain_bundle(fault_ip, &bundle);
+	} else {
+		rc = 0;
+		if (vcpu_get_domain_bundle(current, regs, fault_ip,
+					   &bundle) == 0)
+			rc = IA64_RETRY;
+	}
+	if (rc == IA64_RETRY) {
+		PSCBX(current, fpswa_ret) = (fpswa_ret_t){IA64_RETRY, 0, 0, 0};
+		gdprintk(XENLOG_DEBUG,
+			 "%s(%s): floating-point bundle at 0x%lx not mapped\n",
+			 __FUNCTION__, fp_fault ? "fault" : "trap", fault_ip);
+		return IA64_RETRY;
 	}
 
 	ret = fp_emulate(fp_fault, &bundle, &regs->cr_ipsr, &regs->ar_fpsr,
 	                 &isr, &regs->pr, &regs->cr_ifs, regs);
 
 	if (ret.status) {
-		PSCBX(v, fpswa_ret) = ret;
-		printk("%s(%s): fp_emulate() returned %ld\n",
-		       __FUNCTION__, fp_fault ? "fault" : "trap", ret.status);
+		PSCBX(current, fpswa_ret) = ret;
+		gdprintk(XENLOG_ERR, "%s(%s): fp_emulate() returned %ld\n",
+			 __FUNCTION__, fp_fault ? "fault" : "trap",
+			 ret.status);
 	}
 
 	return ret.status;
@@ -406,6 +411,13 @@ ia64_fault(unsigned long vector, unsigned long isr, unsigned long ifa,
 
 	case 8:
 		printk("Dirty-bit.\n");
+		break;
+
+	case 10:
+		/* __domain_get_bundle() may cause fault. */
+		if (ia64_done_with_exception(regs))
+			return;
+		printk("Data Access-bit.\n");
 		break;
 
 	case 20:
@@ -566,6 +578,17 @@ ia64_handle_privop(unsigned long ifa, struct pt_regs *regs, unsigned long isr,
 }
 
 void
+ia64_lazy_load_fpu(struct vcpu *v)
+{
+	if (PSCB(v, hpsr_dfh)) {
+		PSCB(v, hpsr_dfh) = 0;
+		PSCB(v, hpsr_mfh) = 1;
+		if (__ia64_per_cpu_var(fp_owner) != v)
+			__ia64_load_fpu(v->arch._thread.fph);
+	}
+}
+
+void
 ia64_handle_reflection(unsigned long ifa, struct pt_regs *regs,
                        unsigned long isr, unsigned long iim,
                        unsigned long vector)
@@ -613,12 +636,7 @@ ia64_handle_reflection(unsigned long ifa, struct pt_regs *regs,
 		vector = IA64_GENEX_VECTOR;
 		break;
 	case 25:
-		if (PSCB(v, hpsr_dfh)) {
-			PSCB(v, hpsr_dfh) = 0;
-			PSCB(v, hpsr_mfh) = 1;
-			if (__ia64_per_cpu_var(fp_owner) != v)
-				__ia64_load_fpu(v->arch._thread.fph);
-		}
+		ia64_lazy_load_fpu(v);
 		if (!PSCB(v, vpsr_dfh)) {
 			regs->cr_ipsr &= ~IA64_PSR_DFH;
 			return;
@@ -678,20 +696,12 @@ ia64_handle_reflection(unsigned long ifa, struct pt_regs *regs,
 			vcpu_increment_iip(v);
 			return;
 		}
-		// fetch code fail
-		if (IA64_RETRY == status)
-			return;
-		printk("ia64_handle_reflection: handling FP fault\n");
 		vector = IA64_FP_FAULT_VECTOR;
 		break;
 	case 33:
 		status = handle_fpu_swa(0, regs, isr);
 		if (!status)
 			return;
-		// fetch code fail
-		if (IA64_RETRY == status)
-			return;
-		printk("ia64_handle_reflection: handling FP trap\n");
 		vector = IA64_FP_TRAP_VECTOR;
 		break;
 	case 34:
